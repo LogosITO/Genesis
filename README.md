@@ -31,6 +31,6 @@ On a machine with a compatible GPU, run the additional offscreen parity and reso
 cargo test -p analytic-renderer --test gpu --locked -- --ignored --nocapture
 ```
 
-The [architecture](docs/architecture/overview.md), [renderer design](docs/architecture/renderer.md), [CPU/GPU contract](docs/specifications/cpu-gpu-contract.md), [field contract](docs/specifications/mathematical-fields.md), [distance-bound proof and limits](docs/specifications/distance-bounds.md), [CPU spatial queries](docs/specifications/spatial-queries.md), [roadmap](docs/roadmap/roadmap.md), and [research ledger](docs/research/references.md) are the canonical technical documents. The [site](site/README.md) imports these files instead of maintaining copies.
+The [architecture](docs/architecture/overview.md), [renderer design](docs/architecture/renderer.md), [CPU/GPU contract](docs/specifications/cpu-gpu-contract.md), [field contract](docs/specifications/mathematical-fields.md), [distance-bound proof and limits](docs/specifications/distance-bounds.md), [CPU spatial queries](docs/specifications/spatial-queries.md), [release policy](docs/architecture/releases.md), [roadmap](docs/roadmap/roadmap.md), and [research ledger](docs/research/references.md) are the canonical technical documents. The [site](site/README.md) imports these files instead of maintaining copies.
 
 License: MIT OR Apache-2.0. No project brand, organization, domain, or release channel has been chosen.

@@ -9,6 +9,10 @@ Analytic gradients, ideal Lipschitz zero-set bounds, CSG counterexamples, bounde
 ## Foundation 0.3 — First Light, experimental local prototype
 Analytic sphere and AABB intersections in `wgpu` / WGSL, native viewport, fixed-step growth from `WorldState`, camera controls, normal debug, CPU reference tests, opt-in GPU readback, and explicit precision limits. A general field graph compiler and CSG renderer are outside this stage. Local validation is recorded in the [First Light benchmark](../research/first-light-benchmark.md); cross-platform behavior is not yet established.
 
+## Foundation 0.3.1 — Release governance, configured locally
+
+Conventional Commit PR titles, independent Rust crate version rules, and a reviewable Release Please workflow. GitHub App credentials, branch and environment protection, hosted checks, tags, and releases remain to be configured or exercised on GitHub; see the [release policy](../architecture/releases.md).
+
 ## Candidate 0.4 — First Life
 Design a bounded, persisted growth rule and one environment interaction. Before broadening GPU geometry, test numerical stability and scene scaling with reproducible fixtures, and decide whether a field compiler or a spatial index is justified by measurements.
 

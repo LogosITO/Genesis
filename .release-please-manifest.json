@@ -1,0 +1,10 @@
+{
+  "crates/math": "0.1.0",
+  "crates/field": "0.1.0",
+  "crates/world": "0.1.0",
+  "crates/simulation": "0.1.0",
+  "crates/runtime": "0.1.0",
+  "crates/renderer": "0.1.0",
+  "examples/hello-world": "0.1.0",
+  "examples/first-light": "0.1.0"
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "rust",
+  "include-component-in-tag": true,
+  "bump-minor-pre-major": true,
+  "bootstrap-sha": "901fd1d0ea2f602fe96e520f806a560d191bda09",
+  "plugins": ["cargo-workspace"],
+  "packages": {
+    "crates/math": { "component": "spatial-math" },
+    "crates/field": { "component": "analytic-field" },
+    "crates/world": { "component": "world-state" },
+    "crates/simulation": { "component": "world-simulation" },
+    "crates/runtime": { "component": "world-runtime" },
+    "crates/renderer": { "component": "analytic-renderer" },
+    "examples/hello-world": { "component": "hello-world" },
+    "examples/first-light": { "component": "first-light" }
+  }
+}
