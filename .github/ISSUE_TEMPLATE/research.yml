@@ -1,0 +1,15 @@
+name: Research proposal
+description: Propose a falsifiable engine experiment
+body:
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: Hypothesis
+    validations:
+      required: true
+  - type: textarea
+    id: method
+    attributes:
+      label: Method and metrics
+    validations:
+      required: true

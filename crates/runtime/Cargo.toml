@@ -1,0 +1,13 @@
+[package]
+name = "world-runtime"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+world-state = { path = "../world" }
+world-simulation = { path = "../simulation" }
+
+[lints]
+workspace = true
