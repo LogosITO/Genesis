@@ -12,6 +12,8 @@ pub enum MathError {
     NonPositive,
     /// Interval endpoints were reversed.
     ReversedInterval,
+    /// Finite value exceeds a documented supported domain.
+    OutOfRange,
 }
 
 impl fmt::Display for MathError {

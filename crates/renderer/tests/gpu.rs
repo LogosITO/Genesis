@@ -1,6 +1,8 @@
 //! Opt-in native GPU parity and offscreen readback. Run with `cargo test -p analytic-renderer --test gpu -- --ignored --nocapture`.
 
-use analytic_field::{AxisAlignedBox, Ray as FieldRay, RayOptions, RayOutcome, Sphere, trace};
+use analytic_field::{
+    AxisAlignedBox, Capsule, Ray as FieldRay, RayOptions, RayOutcome, Sphere, trace,
+};
 use analytic_renderer::{Camera, DrawOptions, GpuRenderer, GpuTimer, Primitive, Ray, Scene};
 use spatial_math::{Transform, Vec3};
 use std::{sync::mpsc, time::Instant};
@@ -101,6 +103,96 @@ fn gpu_analytic_parity_and_image_readback() {
             other => panic!("ray {index} classification mismatch: {other:?}"),
         }
     }
+    let mut capsule_scene = Scene::default();
+    capsule_scene
+        .push(
+            Primitive::capsule(
+                77,
+                Capsule::new(v(0.0, 0.0, 0.0), v(0.0, 2.0, 0.0), 0.5).unwrap(),
+                [0.3, 0.8, 0.4],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let capsule_rays = [
+        r(v(0.0, 1.0, -3.0), v(0.0, 0.0, 1.0)),
+        r(v(0.0, 3.0, 0.0), v(0.0, -1.0, 0.0)),
+        r(v(0.0, 1.0, 0.0), v(0.0, 0.0, 1.0)),
+        r(v(0.5, 1.0, -2.0), v(0.0, 0.0, 1.0)),
+        r(v(0.501, 1.0, -2.0), v(0.0, 0.0, 1.0)),
+        r(v(0.51, 1.0, -3.0), v(0.0, 1e-6, 1.0)),
+        r(v(0.0, 2.0, -3.0), v(0.0, 0.0, 1.0)),
+    ];
+    for (index, (ray, actual)) in capsule_rays
+        .iter()
+        .zip(
+            renderer
+                .query(&device, &queue, &capsule_scene, &capsule_rays)
+                .unwrap(),
+        )
+        .enumerate()
+    {
+        match (capsule_scene.intersect(*ray), actual) {
+            (None, None) => {}
+            (Some(cpu), Some(gpu)) => {
+                assert_eq!(cpu.id, gpu.id, "capsule ray {index}");
+                assert!(
+                    (cpu.distance - f64::from(gpu.distance)).abs() <= 3e-4,
+                    "capsule ray {index} distance"
+                );
+                let alignment = cpu.normal.x() * f64::from(gpu.normal[0])
+                    + cpu.normal.y() * f64::from(gpu.normal[1])
+                    + cpu.normal.z() * f64::from(gpu.normal[2]);
+                assert!(alignment >= 0.998, "capsule ray {index} normal");
+            }
+            other => panic!("capsule ray {index} classification {other:?}"),
+        }
+    }
+    let mut degenerate = Scene::default();
+    degenerate
+        .push(
+            Primitive::capsule(
+                78,
+                Capsule::new(Vec3::ZERO, Vec3::ZERO, 0.5).unwrap(),
+                [1.0; 3],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(
+        (f64::from(
+            renderer
+                .query(
+                    &device,
+                    &queue,
+                    &degenerate,
+                    &[r(v(0.0, 0.0, -2.0), v(0.0, 0.0, 1.0))]
+                )
+                .unwrap()[0]
+                .unwrap()
+                .distance
+        ) - 1.5)
+            .abs()
+            < 3e-4
+    );
+    let mut short = Scene::default();
+    short
+        .push(
+            Primitive::capsule(
+                79,
+                Capsule::new(Vec3::ZERO, v(0.0, 1e-8, 0.0), 0.5).unwrap(),
+                [1.0; 3],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let short_ray = r(v(0.0, 0.0, -2.0), v(0.0, 0.0, 1.0));
+    let cpu = short.intersect(short_ray).unwrap();
+    let gpu = renderer
+        .query(&device, &queue, &short, &[short_ray])
+        .unwrap()[0]
+        .unwrap();
+    assert!((cpu.distance - f64::from(gpu.distance)).abs() < 3e-4);
     // Existing bounded SDF query agrees for an exterior, non-grazing sphere ray.
     let reference = trace(
         &Sphere::new(1.0).unwrap(),
@@ -319,7 +411,7 @@ fn gpu_first_life_snapshot_matches_cpu() {
     let scene = Scene::from_world(&world).unwrap();
     assert_eq!(
         scene.primitives().len(),
-        world.organisms()[0].nodes().len() + 1
+        world.organisms()[0].nodes().len() * 2
     );
     let instance = wgpu::Instance::default();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -399,4 +491,90 @@ fn gpu_first_life_snapshot_matches_cpu() {
         adapter.get_info().name,
         adapter.get_info().backend
     );
+}
+
+#[test]
+#[ignore = "requires a compatible native GPU; run explicitly"]
+fn gpu_growth_scaling_measurements() {
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        ..Default::default()
+    }))
+    .expect("GPU adapter required");
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+        ..Default::default()
+    }))
+    .unwrap();
+    let renderer =
+        pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+    let timer = GpuTimer::new(&device);
+    let camera =
+        Camera::look_at(v(0.0, 4.0, -12.0), v(0.0, 2.0, 0.0), v(0.0, 1.0, 0.0), 0.95).unwrap();
+    let mut world = WorldState::new(DeterministicSeed(7));
+    world
+        .spawn_organism(
+            Vec3::ZERO,
+            GrowthParameters::new(0.14, 0.32, 0.12, 1.0).unwrap(),
+        )
+        .unwrap();
+    world.spawn_source(v(0.0, 2.0, 0.0), 100.0, 10.0).unwrap();
+    let mut time = world_simulation::SimulationTime::default();
+    let step = world_simulation::SimulationStep::new(0.01).unwrap();
+    for target in [1, 8, 16, 32, 48] {
+        while world.organisms()[0].nodes().len() < target {
+            world_simulation::advance_life(&mut world, &mut time, step, &[]).unwrap();
+        }
+        let scene = Scene::from_world(&world).unwrap();
+        let mut submit = Vec::new();
+        let mut frame = Vec::new();
+        let mut compute = Vec::new();
+        for i in 0..8 {
+            let started = Instant::now();
+            renderer
+                .draw(
+                    &device,
+                    &queue,
+                    &scene,
+                    camera,
+                    DrawOptions {
+                        size: [1280, 720],
+                        normal_debug: false,
+                        surface: None,
+                        timer: timer.as_ref(),
+                    },
+                )
+                .unwrap();
+            let submitted = started.elapsed().as_secs_f64() * 1000.0;
+            let gpu = timer
+                .as_ref()
+                .map(|timer| timer.read_ms(&device, &queue).unwrap());
+            let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+            if i >= 3 {
+                submit.push(submitted);
+                frame.push(elapsed);
+                if let Some(value) = gpu {
+                    compute.push(value);
+                }
+            }
+        }
+        submit.sort_by(f64::total_cmp);
+        frame.sort_by(f64::total_cmp);
+        compute.sort_by(f64::total_cmp);
+        eprintln!(
+            "growth_scale nodes={} primitives={} resolution=1280x720 cpu_submit_median_ms={:.3} full_frame_median_ms={:.3} gpu_compute_median_ms={} adapter={} backend={:?}",
+            world.organisms()[0].nodes().len(),
+            scene.primitives().len(),
+            submit[2],
+            frame[2],
+            compute
+                .get(compute.len() / 2)
+                .map(|x| format!("{x:.3}"))
+                .unwrap_or_else(|| "unavailable".into()),
+            adapter.get_info().name,
+            adapter.get_info().backend
+        );
+    }
 }

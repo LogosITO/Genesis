@@ -256,11 +256,24 @@ mod tests {
         let good = runtime.save_bytes().unwrap();
         let original = runtime.clone();
         let mut value: serde_json::Value = serde_json::from_slice(&good).unwrap();
-        value["format_version"] = 2.into();
+        value["format_version"] = 3.into();
         assert!(matches!(
             runtime.load_into(&serde_json::to_vec(&value).unwrap()),
-            Err(PersistenceError::Version(2))
+            Err(PersistenceError::Version(3))
         ));
+        value["format_version"] = 1.into();
+        value["runtime"]["world"]["organisms"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("budget");
+        value["runtime"]["world"]["organisms"][0]["parameters"]
+            .as_object_mut()
+            .unwrap()
+            .remove("max_children");
+        assert_eq!(
+            Runtime::load_bytes(&serde_json::to_vec(&value).unwrap()).unwrap(),
+            runtime
+        );
         value["format_version"] = 1.into();
         value["runtime"]["world"]["organisms"][0]["nodes"][0]["parent"] = 9.into();
         assert!(matches!(
@@ -291,6 +304,42 @@ mod tests {
         assert!(runtime.save_new(&path).is_err());
         assert_eq!(Runtime::load_file(&path).unwrap(), runtime);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn malformed_branch_topology_and_budget_are_rejected() {
+        let (mut runtime, _) = fixture();
+        for _ in 0..4 {
+            runtime.tick().unwrap();
+        }
+        assert!(runtime.world().organisms()[0].nodes().len() >= 3);
+        let base: serde_json::Value =
+            serde_json::from_slice(&runtime.save_bytes().unwrap()).unwrap();
+        for (path, bad) in [
+            ("parent", serde_json::json!(2)),
+            ("id", serde_json::json!(0)),
+        ] {
+            let mut value = base.clone();
+            value["runtime"]["world"]["organisms"][0]["nodes"][1][path] = bad;
+            assert!(matches!(
+                Runtime::load_bytes(&serde_json::to_vec(&value).unwrap()),
+                Err(PersistenceError::InvalidState("world"))
+            ));
+        }
+        for (key, bad) in [
+            ("budget", serde_json::json!(-1.0)),
+            (
+                "parameters",
+                serde_json::json!({"node_radius":0.1,"segment_length":0.3,"threshold":0.1,"uptake":1.0,"max_children":1}),
+            ),
+        ] {
+            let mut value = base.clone();
+            value["runtime"]["world"]["organisms"][0][key] = bad;
+            assert!(matches!(
+                Runtime::load_bytes(&serde_json::to_vec(&value).unwrap()),
+                Err(PersistenceError::InvalidState("world"))
+            ));
+        }
     }
 
     #[test]

@@ -1,5 +1,7 @@
 # Project Name TBD
 
+Foundation 0.5 adds a bounded branching organism and analytic capsule connections. **Experimental / Research Stage.** The default First Life rule has at most two children per node, a shared resource budget, deterministic node-ID allocation, and version-2 saves that load valid version-1 state. The renderer shows overlapping primitives as separate solids; it does not provide watertight CSG geometry.
+
 **Experimental / Research Stage.** A small foundation for mathematically defined mutable worlds. Analytic parameters, transforms, and growth rules are the source of truth; no mesh or voxel representation is stored. Foundation 0.4 adds a bounded growth graph driven by a continuous resource field, tick-indexed events, and versioned saves. The CPU math and simulation remain independently testable without a GPU. No floating-point intersection is formally certified.
 
 ## Run
@@ -25,10 +27,11 @@ cargo run -p first-life --locked -- baseline
 cargo run -p first-life --locked -- changed
 cargo run -p first-life --locked -- limited
 cargo run -p first-life --locked -- baseline --measure
+cargo run -p first-life --locked -- scale --measure
 cargo run -p first-light --locked -- --life
 ```
 
-The headless commands print JSON summaries computed from 120 fixed ticks. `changed` moves the resource source at tick 40; `limited` supplies too little resource to create a child. `--measure` adds local timing diagnostics on stderr. In the native First Life mode, **M** schedules a source move at the next tick; **Space** pauses or resumes. The renderer copies analytic nodes and source positions from `WorldState`. See the [growth model](docs/specifications/growth-model.md), [environment field](docs/specifications/environment-fields.md), [save contract](docs/specifications/world-persistence.md), and [replay contract](docs/specifications/replay-determinism.md).
+The first three headless scenarios print JSON summaries after 120 fixed ticks. `changed` moves the resource source at tick 40; `limited` supplies too little resource to create a child. `--measure` adds local timing diagnostics on stderr. `scale --measure` prints controlled CPU step and snapshot medians for 1–48 nodes and a four-organism overflow case; it is not a full-frame benchmark. In native First Life mode, **M** schedules a source move at the next tick; **Space** pauses or resumes. The renderer copies node positions, connections, and sources from `WorldState`. See the [growth model](docs/specifications/growth-model.md), [capsule contract](docs/specifications/capsule.md), [save contract](docs/specifications/world-persistence.md), and [replay contract](docs/specifications/replay-determinism.md).
 
 ```sh
 cargo fmt --all -- --check

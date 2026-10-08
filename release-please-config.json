@@ -21,6 +21,11 @@
       "component": "first-light",
       "exclude-paths": ["examples/first-light"],
       "skip-github-release": true
+    },
+    "examples/first-life": {
+      "component": "first-life",
+      "exclude-paths": ["examples/first-life"],
+      "skip-github-release": true
     }
   }
 }

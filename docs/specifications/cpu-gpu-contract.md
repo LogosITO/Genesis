@@ -18,6 +18,12 @@ CPU `f64` and GPU `f32` can disagree near tangencies, surfaces, coincident hits,
 
 The opt-in parity fixture compares hit/miss and object ID exactly for chosen rays, distance within `max(0.0002 world units, 0.0002 × CPU distance)`, and normal dot product at least `0.999`. These are **test acceptance tolerances**, not runtime safety margins or universal error bounds. Cases include center, tangent and near-tangent sphere rays, interior and surface starts, box-parallel hit/miss, overlap and depth ordering, and radius `0.001` and `1000`. CPU `field::trace` is checked separately on exterior non-grazing primitives; it has different semantics for interior and tangent starts and does not return an ID or normal. Its `Indeterminate` status is not converted to a GPU miss.
 
+## Foundation 0.5 capsule extension
+
+The renderer also copies analytic capsules as endpoint A, endpoint B, and radius in `f32`. CPU and WGSL intersect the finite cylinder side and two hemispherical caps. The [capsule contract](capsule.md) defines the field and supported domain. The opt-in parity fixture exercises side, cap, interior, tangent, near-parallel, seam, and degenerate rays with distance tolerance `0.0003` world units and normal dot product at least `0.998`. These selected-ray tolerances are not numerical certificates. Overlapping node spheres and connection capsules are drawn as separate nearest-hit primitives; no watertight CSG union is claimed.
+
+The authoritative world permits 512 ordinary spheres and up to 4 × 48 growth nodes. It can exceed the 256-primitive renderer budget. Snapshot construction returns `TooManyObjects`; it never silently omits geometry. Growth node IDs use the 1,000,000 range, connection IDs the 2,000,000 range, and resource marker IDs the 3,000,000 range, derived from stable world and node identities. See the [growth model](growth-model.md) for the complete worst-case count.
+
 ## Open questions
 
 Numerically certified conservative steps, robust intersections over larger dynamic ranges, CSG solid-boundary semantics, GPU field lowering, cross-adapter parity, and high-object-count acceleration remain research tasks. Any future change must retain explicit uncertainty rather than silently treating iteration exhaustion as a miss.

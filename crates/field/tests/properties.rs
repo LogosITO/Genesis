@@ -1,8 +1,8 @@
 //! Bounded numerical properties supplement deterministic counterexamples in unit tests.
 
 use analytic_field::{
-    AnalyticGradient, AxisAlignedBox, Field, Gradient, LipschitzField, Ray, RayOptions, RayOutcome,
-    ScalarField, Sphere, trace,
+    AnalyticGradient, AxisAlignedBox, Capsule, Field, Gradient, LipschitzField, Ray, RayOptions,
+    RayOutcome, ScalarField, Sphere, trace,
 };
 use proptest::prelude::*;
 use spatial_math::{Transform, Vec3};
@@ -17,6 +17,18 @@ proptest! {
         rng_seed: proptest::test_runner::RngSeed::Fixed(0xF002_2026),
         ..ProptestConfig::default()
     })]
+
+    #[test]
+    fn capsule_side_and_cap_sdf_match_segment_distance(
+        x in -3.0f64..3.0, z in -3.0f64..3.0, y in -2.0f64..4.0,
+        radius in 0.1f64..2.0,
+    ) {
+        let capsule = Capsule::new(Vec3::ZERO, p(0.0, 2.0, 0.0), radius).unwrap();
+        let closest_y = y.clamp(0.0, 2.0);
+        let expected = x.hypot(y - closest_y).hypot(z) - radius;
+        let actual = capsule.sample(p(x, y, z)).unwrap();
+        prop_assert!((actual - expected).abs() <= 1e-12);
+    }
 
     #[test]
     fn csg_is_unit_lipschitz_and_has_expected_strict_signs(

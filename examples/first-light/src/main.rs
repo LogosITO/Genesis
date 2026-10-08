@@ -257,11 +257,9 @@ impl App {
         let height = if self.life {
             self.world.organisms()[0]
                 .nodes()
-                .last()
-                .expect("root exists")
-                .position()
-                .y()
-                .max(2.0)
+                .iter()
+                .map(|node| node.position().y())
+                .fold(2.0, f64::max)
         } else {
             0.0
         };
@@ -341,11 +339,21 @@ impl App {
             };
             let growth = if self.life {
                 format!(
-                    "nodes={}",
+                    "nodes={} active={} bifurcations={}",
                     self.world
                         .organisms()
                         .iter()
                         .map(|organism| organism.nodes().len())
+                        .sum::<usize>(),
+                    self.world
+                        .organisms()
+                        .iter()
+                        .map(|organism| organism.active_count())
+                        .sum::<usize>(),
+                    self.world
+                        .organisms()
+                        .iter()
+                        .map(|organism| organism.branch_count())
                         .sum::<usize>()
                 )
             } else {

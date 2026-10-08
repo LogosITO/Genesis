@@ -1,6 +1,6 @@
 # Release governance
 
-**Status: configured locally; no hosted release has been tested.** The six library crates have independent SemVer releases. Both examples remain Cargo workspace members with internal versions, but `publish = false`; they do not get their own tags or GitHub Releases. The private site is not a release component. A GitHub Release is a source-code milestone; this workflow does not publish to crates.io, npm, Pages, or a binary download channel.
+**Status: configured locally; no hosted release has been tested.** The six library crates have independent SemVer releases. All three examples remain Cargo workspace members with internal versions, but `publish = false`; they do not get their own tags or GitHub Releases. The private site is not a release component. A GitHub Release is a source-code milestone; this workflow does not publish to crates.io, npm, Pages, or a binary download channel.
 
 ## Version rules
 
@@ -28,5 +28,7 @@ Use Conventional Commit subjects for squash commits on `main`. The PR title chec
 The workflow is intentionally inert until the GitHub App credentials are installed. The manual job also needs a separate private-key secret stored in the protected `release` environment, so it fails before publication if that secret is absent. The repository administrator must complete the [GitHub setup checklist](github-setup.md) before enabling it. Only trusted `main` pushes and manual dispatch from `main` receive an App token; pull requests never receive it. A skipped job means no release preparation occurred. The default `GITHUB_TOKEN` is unsuitable here because PRs it creates do not normally trigger required CI checks. Approval and branch protection are GitHub settings and cannot be verified from local files alone.
 
 ## Deferred decisions
+
+`first-life` was added as a ninth manifest/config package at `0.1.0`, matching the existing non-publishable example policy. Its actual `cargo-workspace` propagation must be reviewed in the first hosted Release Please PR; local JSON/schema checks cannot prove GitHub App behavior.
 
 Crates currently use path-only internal dependencies, so this is not a crates.io publication process. Before publishing there, choose package names and ownership, add publishable version requirements and metadata, test `cargo package`, and define provenance and support policy. The `first-light` binary has no supported distribution artifact yet. Avoid treating experimental GPU behavior or numerical approximations as stable solely because a version or tag exists.

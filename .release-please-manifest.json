@@ -6,5 +6,6 @@
   "crates/runtime": "0.1.0",
   "crates/renderer": "0.1.0",
   "examples/hello-world": "0.1.0",
-  "examples/first-light": "0.1.0"
+  "examples/first-light": "0.1.0",
+  "examples/first-life": "0.1.0"
 }

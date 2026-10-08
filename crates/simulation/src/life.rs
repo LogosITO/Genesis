@@ -39,8 +39,8 @@ pub struct EnvironmentEvent {
     pub kind: EnvironmentEventKind,
 }
 
-/// Applies events, samples the previous tips in the changed environment, proposes one child
-/// per organism, then commits world and time together. Any failure leaves both unchanged.
+/// Applies events, samples all unsaturated nodes in the changed environment, then resolves
+/// mature growth requests in node-ID order. Any failure leaves world and time unchanged.
 pub fn advance_life(
     world: &mut WorldState,
     time: &mut SimulationTime,
@@ -73,35 +73,60 @@ pub fn advance_life(
     }
     let sources = proposed.sources().to_vec();
     for organism in proposed.organisms_mut() {
-        let tip = organism
-            .nodes()
-            .last()
-            .expect("validated organism has a root")
-            .position();
-        let mut concentration = 0.0;
-        let mut strongest = None;
-        let mut strongest_sample = 0.0;
-        for source in &sources {
-            let sample = source.sample(tip).map_err(SimulationError::World)?;
-            concentration += sample;
-            if sample > strongest_sample {
-                strongest_sample = sample;
-                strongest = Some(source.position());
-            }
+        let nodes = organism.nodes();
+        let mut children = vec![0u8; nodes.len()];
+        for node in &nodes[1..] {
+            children[node.parent().expect("validated tree") as usize] += 1;
         }
-        let direction = if let Some(position) = strongest {
-            let delta = position
-                .checked_sub(tip)
-                .map_err(|error| SimulationError::World(error.into()))?;
-            Vec3::new(delta.x(), 1.0, delta.z())
-                .map_err(|error| SimulationError::World(error.into()))?
-        } else {
-            Vec3::new(0.0, 1.0, 0.0).expect("finite axis")
-        };
-        let gained = concentration * organism.parameters().uptake() * step.seconds();
-        organism
-            .grow(gained, direction)
-            .map_err(SimulationError::World)?;
+        let mut samples = Vec::with_capacity(nodes.len());
+        for (index, node) in nodes.iter().enumerate() {
+            if children[index] >= organism.parameters().max_children() {
+                samples.push((0.0, Vec3::new(0.0, 1.0, 0.0).expect("axis")));
+                continue;
+            }
+            let mut concentration = 0.0;
+            let mut strongest = None;
+            let mut strongest_sample = 0.0;
+            for source in &sources {
+                let sample = source
+                    .sample(node.position())
+                    .map_err(SimulationError::World)?;
+                concentration += sample;
+                if sample > strongest_sample {
+                    strongest_sample = sample;
+                    strongest = Some(source.position());
+                }
+            }
+            let parent_direction = if let Some(parent) = node.parent() {
+                node.position()
+                    .checked_sub(nodes[parent as usize].position())
+                    .map_err(|error| SimulationError::World(error.into()))?
+                    .normalized()
+                    .map_err(|error| SimulationError::World(error.into()))?
+            } else {
+                Vec3::new(0.0, 1.0, 0.0).expect("axis")
+            };
+            let toward = if let Some(position) = strongest {
+                position
+                    .checked_sub(node.position())
+                    .map_err(|error| SimulationError::World(error.into()))?
+            } else {
+                Vec3::ZERO
+            };
+            // A second child diverges from the first; both still follow the local resource.
+            let divergence = if children[index] == 1 { -0.65 } else { 0.0 };
+            let direction = Vec3::new(
+                parent_direction.x() * 0.4 + toward.x() * 0.35 + divergence,
+                1.0,
+                parent_direction.z() * 0.4 + toward.z() * 0.35,
+            )
+            .map_err(|error| SimulationError::World(error.into()))?;
+            samples.push((
+                concentration * organism.parameters().uptake() * step.seconds(),
+                direction,
+            ));
+        }
+        organism.grow(&samples).map_err(SimulationError::World)?;
     }
     let mut next_time = *time;
     advance(&mut proposed, &mut next_time, step)?;

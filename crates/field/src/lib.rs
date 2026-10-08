@@ -70,6 +70,8 @@ pub enum Gradient {
 pub enum GradientIssue {
     /// The sphere centre is singular.
     SphereCenter,
+    /// Point lies on the capsule axis, where no unique normal exists.
+    CapsuleAxis,
     /// An AABB edge, corner, or medial axis is non-smooth.
     BoxNonsmooth,
     /// CSG branches have equal sampled values.
@@ -164,6 +166,112 @@ impl AnalyticGradient for Sphere {
     }
 }
 
+/// Closed segment swept by a positive radius, in world length units.
+/// Its ideal sample is exact signed distance; floating point results are not certified.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Capsule {
+    a: Vec3,
+    b: Vec3,
+    radius: f64,
+}
+impl Capsule {
+    /// Endpoints and radius are supported within 10,000 units; positive radii and
+    /// nonzero segment lengths below 1e-12 are rejected. Equal endpoints form a sphere.
+    pub fn new(a: Vec3, b: Vec3, radius: f64) -> Result<Self, MathError> {
+        if !radius.is_finite() {
+            return Err(MathError::NonFinite);
+        }
+        if radius <= 0.0 {
+            return Err(MathError::NonPositive);
+        }
+        if !(1e-12..=10_000.0).contains(&radius)
+            || [a.x(), a.y(), a.z(), b.x(), b.y(), b.z()]
+                .iter()
+                .any(|x| x.abs() > 10_000.0)
+        {
+            return Err(MathError::OutOfRange);
+        }
+        let length = b.checked_sub(a)?.length()?;
+        if length > 0.0 && length < 1e-12 {
+            return Err(MathError::OutOfRange);
+        }
+        Ok(Self { a, b, radius })
+    }
+    /// First segment endpoint.
+    pub fn a(self) -> Vec3 {
+        self.a
+    }
+    /// Second segment endpoint.
+    pub fn b(self) -> Vec3 {
+        self.b
+    }
+    /// Sweep radius.
+    pub fn radius(self) -> f64 {
+        self.radius
+    }
+    /// Axis-aligned bounds of the solid.
+    pub fn bounds(self) -> Result<(Vec3, Vec3), MathError> {
+        let r = self.radius;
+        Ok((
+            Vec3::new(
+                self.a.x().min(self.b.x()) - r,
+                self.a.y().min(self.b.y()) - r,
+                self.a.z().min(self.b.z()) - r,
+            )?,
+            Vec3::new(
+                self.a.x().max(self.b.x()) + r,
+                self.a.y().max(self.b.y()) + r,
+                self.a.z().max(self.b.z()) + r,
+            )?,
+        ))
+    }
+    fn offset(self, point: Vec3) -> Result<Vec3, MathError> {
+        if [point.x(), point.y(), point.z()]
+            .iter()
+            .any(|x| x.abs() > 10_000.0)
+        {
+            return Err(MathError::OutOfRange);
+        }
+        let axis = self.b.checked_sub(self.a)?;
+        let length2 = axis.x() * axis.x() + axis.y() * axis.y() + axis.z() * axis.z();
+        let from_a = point.checked_sub(self.a)?;
+        let t = if length2 == 0.0 {
+            0.0
+        } else {
+            ((from_a.x() * axis.x() + from_a.y() * axis.y() + from_a.z() * axis.z()) / length2)
+                .clamp(0.0, 1.0)
+        };
+        point.checked_sub(self.a.checked_add(axis.checked_scale(t)?)?)
+    }
+}
+impl ScalarField for Capsule {
+    fn sample(&self, point: Vec3) -> Result<f64, MathError> {
+        let value = self.offset(point)?.length()? - self.radius;
+        if value.is_finite() {
+            Ok(value)
+        } else {
+            Err(MathError::NonFinite)
+        }
+    }
+}
+impl SignedField for Capsule {}
+impl LipschitzField for Capsule {
+    fn lipschitz_bound(&self) -> f64 {
+        1.0
+    }
+}
+impl ExactSdf for Capsule {}
+impl AnalyticGradient for Capsule {
+    fn gradient(&self, point: Vec3) -> Result<Gradient, MathError> {
+        let offset = self.offset(point)?;
+        if offset == Vec3::ZERO {
+            Ok(Gradient::Undefined(GradientIssue::CapsuleAxis))
+        } else {
+            Ok(Gradient::Defined(offset.normalized()?))
+        }
+    }
+}
+
 /// Axis-aligned box centred at the local origin.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AxisAlignedBox {
@@ -244,6 +352,8 @@ impl AnalyticGradient for AxisAlignedBox {
 pub enum Field {
     /// Analytic sphere.
     Sphere(Sphere),
+    /// Analytic capsule.
+    Capsule(Capsule),
     /// Analytic axis-aligned box.
     Box(AxisAlignedBox),
     /// Union: `min(a, b)`.
@@ -279,6 +389,7 @@ impl ScalarField for Field {
     fn sample(&self, point: Vec3) -> Result<f64, MathError> {
         match self {
             Self::Sphere(s) => s.sample(point),
+            Self::Capsule(c) => c.sample(point),
             Self::Box(b) => b.sample(point),
             Self::Union(a, b) => Ok(a.sample(point)?.min(b.sample(point)?)),
             Self::Intersection(a, b) => Ok(a.sample(point)?.max(b.sample(point)?)),
@@ -307,6 +418,7 @@ impl AnalyticGradient for Field {
     fn gradient(&self, point: Vec3) -> Result<Gradient, MathError> {
         match self {
             Self::Sphere(s) => s.gradient(point),
+            Self::Capsule(c) => c.gradient(point),
             Self::Box(b) => b.gradient(point),
             Self::Union(a, b) => {
                 let (av, bv) = (a.sample(point)?, b.sample(point)?);
@@ -370,6 +482,36 @@ mod tests {
         assert_eq!(Sphere::new(f64::INFINITY), Err(MathError::NonFinite));
         assert_eq!(
             s.sample(p(f64::MAX, f64::MAX, 0.0)),
+            Err(MathError::NonFinite)
+        );
+    }
+
+    #[test]
+    fn capsule_samples_bounds_and_gradient() {
+        let c = Capsule::new(p(0.0, 0.0, 0.0), p(0.0, 2.0, 0.0), 0.5).unwrap();
+        assert_eq!(c.sample(p(0.0, 1.0, 0.0)), Ok(-0.5));
+        assert_eq!(c.sample(p(0.5, 1.0, 0.0)), Ok(0.0));
+        assert_eq!(c.sample(p(0.0, 2.5, 0.0)), Ok(0.0));
+        assert_eq!(c.sample(p(0.0, 3.0, 0.0)), Ok(0.5));
+        assert_eq!(
+            c.gradient(p(0.5, 1.0, 0.0)),
+            Ok(Gradient::Defined(p(1.0, 0.0, 0.0)))
+        );
+        assert_eq!(
+            c.gradient(p(0.0, 1.0, 0.0)),
+            Ok(Gradient::Undefined(GradientIssue::CapsuleAxis))
+        );
+        assert_eq!(c.bounds(), Ok((p(-0.5, -0.5, -0.5), p(0.5, 2.5, 0.5))));
+        let short = Capsule::new(Vec3::ZERO, p(0.0, 1e-8, 0.0), 0.5).unwrap();
+        assert!(short.sample(p(0.0, 0.5, 0.0)).unwrap() < 0.0);
+        let degenerate = Capsule::new(Vec3::ZERO, Vec3::ZERO, 0.5).unwrap();
+        assert_eq!(degenerate.sample(p(0.0, 0.0, 1.0)), Ok(0.5));
+        assert_eq!(
+            Capsule::new(Vec3::ZERO, Vec3::ZERO, 0.0),
+            Err(MathError::NonPositive)
+        );
+        assert_eq!(
+            Capsule::new(Vec3::ZERO, Vec3::ZERO, f64::NAN),
             Err(MathError::NonFinite)
         );
     }

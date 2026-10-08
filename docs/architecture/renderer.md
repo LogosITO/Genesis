@@ -1,5 +1,9 @@
 # Renderer architecture
 
+## First Structure extension
+
+`Scene::from_world` also copies every parent-child edge as an analytic capsule with stable connection identity. Its endpoints come from `WorldState`; the renderer calculates no growth. CPU and WGSL intersect capsule sides and hemispherical caps directly. Overlapping node spheres and capsules are separate nearest-hit solids and do not form a tested watertight union. The world capacity is independent of the 256-primitive GPU snapshot; `TooManyObjects` reports overflow. See the [capsule contract](../specifications/capsule.md) and [growth model](../specifications/growth-model.md).
+
 **Status: experimental / research stage.** `analytic-renderer` is a leaf crate depending on `math`, `field`, `world`, and `wgpu`. Core crates contain no GPU or window types. `first-light` owns the `winit` window and fixed-step simulation loop. The renderer reads a frame snapshot; it never mutates `WorldState`.
 
 `Scene::from_world` copies current ordinary sphere IDs, transforms, and radii, plus each organism's analytic node spheres and each resource source's visible marker. The default First Light mode adds a static `AxisAlignedBox` through the same validated `Primitive` API with a distinct ID and color; it is renderer-owned and not persistent world state. First Life mode adds no renderer-owned growth object. Every frame rebuilds its snapshot after simulation steps, so visible growth and source position come from authoritative `WorldState`.

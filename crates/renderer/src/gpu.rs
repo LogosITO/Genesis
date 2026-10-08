@@ -120,13 +120,13 @@ fn scene_data(scene: &Scene) -> Vec<GpuPrimitive> {
         .map(|p| GpuPrimitive {
             center_kind: vec4(
                 p.center,
-                if p.kind == crate::PrimitiveKind::Sphere {
-                    0.0
-                } else {
-                    1.0
+                match p.kind {
+                    crate::PrimitiveKind::Sphere => 0.0,
+                    crate::PrimitiveKind::Box => 1.0,
+                    crate::PrimitiveKind::Capsule => 2.0,
                 },
             ),
-            dimensions: vec4(p.dimensions, 0.0),
+            dimensions: vec4(p.dimensions, p.radius as f32),
             color: [p.color[0], p.color[1], p.color[2], 1.0],
             identity: [p.id, 0, 0, 0],
         })

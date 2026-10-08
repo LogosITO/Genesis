@@ -10,8 +10,8 @@ pub const MAX_ORGANISMS: usize = 4;
 pub const MAX_NODES: usize = 48;
 /// Maximum resource sources in one world.
 pub const MAX_SOURCES: usize = 4;
-/// Maximum ordinary sphere entities, leaving room for all life primitives on the GPU.
-pub const MAX_SPHERES: usize = 32;
+/// Authoritative ordinary sphere capacity, independent of GPU snapshot capacity.
+pub const MAX_SPHERES: usize = 512;
 /// Spatial support for growth and resource sources, in world units.
 pub const MAX_POSITION: f64 = 1000.0;
 
@@ -49,7 +49,7 @@ impl GrowthNode {
     }
 }
 
-/// Fixed, validated rule parameters. Growth adds at most one child per organism per tick.
+/// Fixed, validated rule parameters.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrowthParameters {
@@ -57,6 +57,11 @@ pub struct GrowthParameters {
     segment_length: f64,
     threshold: f64,
     uptake: f64,
+    #[serde(default = "default_max_children")]
+    max_children: u8,
+}
+fn default_max_children() -> u8 {
+    2
 }
 impl GrowthParameters {
     /// Dimensions are world units; threshold is energy; uptake scales energy per second.
@@ -81,6 +86,7 @@ impl GrowthParameters {
             segment_length,
             threshold,
             uptake,
+            max_children: 2,
         })
     }
     /// Analytic radius used to display each growth node.
@@ -99,10 +105,21 @@ impl GrowthParameters {
     pub fn uptake(self) -> f64 {
         self.uptake
     }
+    /// Sets the maximum children per structural node (one or two).
+    pub fn with_max_children(mut self, count: u8) -> Result<Self, WorldError> {
+        if !(1..=2).contains(&count) {
+            return Err(WorldError::OutOfRange);
+        }
+        self.max_children = count;
+        Ok(self)
+    }
+    /// Maximum children per structural node.
+    pub fn max_children(self) -> u8 {
+        self.max_children
+    }
 }
 
-/// A rooted chain, represented as a graph with stable parent links and node IDs.
-// shortcut: one active tip permits only a chain; add bounded tip selection when branching is justified.
+/// Bounded rooted tree with stable local IDs and a shared resource budget.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Organism {
@@ -110,6 +127,8 @@ pub struct Organism {
     root: Vec3,
     parameters: GrowthParameters,
     nodes: Vec<GrowthNode>,
+    #[serde(default)]
+    budget: f64,
 }
 impl Organism {
     pub(crate) fn new(
@@ -122,7 +141,8 @@ impl Organism {
             parameters.segment_length,
             parameters.threshold,
             parameters.uptake,
-        )?;
+        )?
+        .with_max_children(parameters.max_children)?;
         if !bounded_position(root) {
             return Err(WorldError::OutOfRange);
         }
@@ -136,6 +156,7 @@ impl Organism {
                 position: root,
                 energy: 0.0,
             }],
+            budget: 0.0,
         })
     }
     /// Stable world identity.
@@ -154,52 +175,104 @@ impl Organism {
     pub fn nodes(&self) -> &[GrowthNode] {
         &self.nodes
     }
-    /// Accumulates resource on the current tip and creates at most one child.
-    /// Returns true if topology changed. At capacity, energy saturates at the threshold.
-    pub fn grow(&mut self, gained: f64, direction: Vec3) -> Result<bool, WorldError> {
-        if !gained.is_finite() {
+    /// Shared budget in model energy units.
+    pub fn budget(&self) -> f64 {
+        self.budget
+    }
+    /// Number of bifurcation nodes with two children.
+    pub fn branch_count(&self) -> usize {
+        let mut children = vec![0u8; self.nodes.len()];
+        for node in &self.nodes[1..] {
+            children[node.parent.unwrap() as usize] += 1;
+        }
+        children.into_iter().filter(|count| *count == 2).count()
+    }
+    /// Nodes still allowed to create a child.
+    pub fn active_count(&self) -> usize {
+        let mut children = vec![0u8; self.nodes.len()];
+        for node in &self.nodes[1..] {
+            children[node.parent.unwrap() as usize] += 1;
+        }
+        children
+            .into_iter()
+            .filter(|count| *count < self.parameters.max_children)
+            .count()
+    }
+    /// Applies one tick of samples in existing node-ID order. Each entry is uptake and a
+    /// proposed local direction; saturated nodes (two children) receive zero uptake.
+    /// Shared budget gains only the largest local uptake per tick; mature requests consume
+    /// one threshold in ID order, so more tips cannot multiply the same environmental supply.
+    pub fn grow(&mut self, samples: &[(f64, Vec3)]) -> Result<usize, WorldError> {
+        self.validate()?;
+        let mut proposed = self.clone();
+        let added = proposed.grow_in_place(samples)?;
+        *self = proposed;
+        Ok(added)
+    }
+    fn grow_in_place(&mut self, samples: &[(f64, Vec3)]) -> Result<usize, WorldError> {
+        if samples.len() != self.nodes.len() {
+            return Err(WorldError::LengthMismatch);
+        }
+        let mut children = vec![0u8; self.nodes.len()];
+        for node in &self.nodes[1..] {
+            children[node.parent.ok_or(WorldError::InvalidStructure)? as usize] += 1;
+        }
+        let mut directions = Vec::with_capacity(samples.len());
+        let mut gained_total: f64 = 0.0;
+        for (index, &(gained, direction)) in samples.iter().enumerate() {
+            if !gained.is_finite() {
+                return Err(MathError::NonFinite.into());
+            }
+            if gained < 0.0 {
+                return Err(MathError::NonPositive.into());
+            }
+            if children[index] >= self.parameters.max_children && gained != 0.0 {
+                return Err(WorldError::InvalidStructure);
+            }
+            let direction = direction.normalized()?;
+            if direction.y() <= 0.0 {
+                return Err(WorldError::InvalidStructure);
+            }
+            directions.push(direction);
+            gained_total = gained_total.max(gained);
+        }
+        let cap = self.parameters.threshold * MAX_NODES as f64;
+        if !gained_total.is_finite() {
             return Err(MathError::NonFinite.into());
         }
-        if gained < 0.0 {
-            return Err(MathError::NonPositive.into());
+        self.budget = (self.budget + gained_total).min(cap);
+        let old_len = self.nodes.len();
+        for (index, &(gained, _)) in samples.iter().enumerate() {
+            if children[index] >= self.parameters.max_children {
+                continue;
+            }
+            let at_capacity = self.nodes.len() == MAX_NODES;
+            let node = &mut self.nodes[index];
+            node.energy = (node.energy + gained).min(self.parameters.threshold);
+            if node.energy < self.parameters.threshold
+                || self.budget < self.parameters.threshold
+                || at_capacity
+            {
+                continue;
+            }
+            let position = node
+                .position
+                .checked_add(directions[index].checked_scale(self.parameters.segment_length)?)?;
+            if !bounded_position(position) {
+                return Err(WorldError::OutOfRange);
+            }
+            let parent = node.id;
+            node.energy = 0.0;
+            self.budget -= self.parameters.threshold;
+            self.nodes.push(GrowthNode {
+                id: self.nodes.len() as u32,
+                parent: Some(parent),
+                position,
+                energy: 0.0,
+            });
+            children[index] += 1;
         }
-        let direction = direction.normalized()?;
-        if direction.y() <= 0.0 {
-            return Err(WorldError::InvalidStructure);
-        }
-        let at_capacity = self.nodes.len() == MAX_NODES;
-        let tip = self.nodes.last_mut().ok_or(WorldError::InvalidStructure)?;
-        let total = tip.energy + gained;
-        if !total.is_finite() {
-            return Err(MathError::NonFinite.into());
-        }
-        let energy = total.min(self.parameters.threshold);
-        if energy < self.parameters.threshold || at_capacity {
-            tip.energy = energy;
-            return Ok(false);
-        }
-        let parent = tip.id;
-        let position = tip
-            .position
-            .checked_add(direction.checked_scale(self.parameters.segment_length)?)?;
-        if !bounded_position(position) {
-            return Err(WorldError::OutOfRange);
-        }
-        let actual = position.checked_sub(tip.position)?;
-        if actual.y() <= 0.0
-            || (actual.length()? - self.parameters.segment_length).abs()
-                > self.parameters.segment_length * 1e-12
-        {
-            return Err(WorldError::InvalidStructure);
-        }
-        tip.energy = 0.0;
-        self.nodes.push(GrowthNode {
-            id: self.nodes.len() as u32,
-            parent: Some(parent),
-            position,
-            energy: 0.0,
-        });
-        Ok(true)
+        Ok(self.nodes.len() - old_len)
     }
     pub(crate) fn validate(&self) -> Result<(), WorldError> {
         GrowthParameters::new(
@@ -207,22 +280,30 @@ impl Organism {
             self.parameters.segment_length,
             self.parameters.threshold,
             self.parameters.uptake,
-        )?;
+        )?
+        .with_max_children(self.parameters.max_children)?;
         if !bounded_position(self.root) || self.nodes.is_empty() || self.nodes.len() > MAX_NODES {
             return Err(WorldError::InvalidStructure);
         }
+        let mut children = vec![0u8; self.nodes.len()];
         for (i, node) in self.nodes.iter().enumerate() {
             if node.id != i as u32
-                || node.parent != (if i == 0 { None } else { Some((i - 1) as u32) })
+                || (i == 0 && node.parent.is_some())
+                || (i > 0 && node.parent.is_none_or(|parent| parent as usize >= i))
                 || !bounded_position(node.position)
                 || !node.energy.is_finite()
                 || !(0.0..=self.parameters.threshold).contains(&node.energy)
             {
                 return Err(WorldError::InvalidStructure);
             }
+            if let Some(parent) = node.parent {
+                children[parent as usize] += 1;
+            }
         }
-        for pair in self.nodes.windows(2) {
-            let delta = pair[1].position.checked_sub(pair[0].position)?;
+        for node in &self.nodes[1..] {
+            let delta = node
+                .position
+                .checked_sub(self.nodes[node.parent.unwrap() as usize].position)?;
             if delta.y() <= 0.0
                 || (delta.length()? - self.parameters.segment_length).abs()
                     > self.parameters.segment_length * 1e-12
@@ -231,9 +312,12 @@ impl Organism {
             }
         }
         if self.nodes[0].position != self.root
-            || self.nodes[..self.nodes.len() - 1]
-                .iter()
-                .any(|n| n.energy != 0.0)
+            || children.iter().enumerate().any(|(i, &count)| {
+                count > self.parameters.max_children
+                    || (count == self.parameters.max_children && self.nodes[i].energy != 0.0)
+            })
+            || !self.budget.is_finite()
+            || !(0.0..=self.parameters.threshold * MAX_NODES as f64).contains(&self.budget)
         {
             return Err(WorldError::InvalidStructure);
         }
@@ -263,30 +347,25 @@ mod tests {
                 .unwrap(),
             0.0
         );
-        assert_eq!(
-            world.organisms_mut()[0].grow(0.5, Vec3::new(0.0, 1.0, 0.0).unwrap()),
-            Ok(false)
-        );
-        assert_eq!(
-            world.organisms_mut()[0].grow(0.5, Vec3::new(0.0, 1.0, 0.0).unwrap()),
-            Ok(true)
-        );
+        let up = Vec3::new(0.0, 1.0, 0.0).unwrap();
+        assert_eq!(world.organisms_mut()[0].grow(&[(0.5, up)]), Ok(0));
+        assert_eq!(world.organisms_mut()[0].grow(&[(0.5, up)]), Ok(1));
         assert_eq!(world.organisms()[0].nodes()[1].parent(), Some(0));
         assert_eq!(world.organisms()[0].nodes()[1].id(), 1);
-        for _ in 2..MAX_NODES {
-            assert!(
-                world.organisms_mut()[0]
-                    .grow(1.0, Vec3::new(0.0, 1.0, 0.0).unwrap())
-                    .unwrap()
-            );
-        }
-        assert!(
-            !world.organisms_mut()[0]
-                .grow(1.0, Vec3::new(0.0, 1.0, 0.0).unwrap())
-                .unwrap()
+        assert_eq!(
+            world.organisms_mut()[0].grow(&[(1.0, up), (1.0, up)]),
+            Ok(1)
         );
-        assert_eq!(world.organisms()[0].nodes().len(), MAX_NODES);
-        assert_eq!(world.organisms()[0].nodes().last().unwrap().energy(), 1.0);
+        assert_eq!(world.organisms()[0].nodes()[2].parent(), Some(0));
+        assert_eq!(world.organisms()[0].nodes()[1].energy(), 1.0);
+        assert_eq!(
+            world.organisms_mut()[0].grow(&[(0.0, up), (1.0, up), (0.0, up)]),
+            Ok(1)
+        );
+        assert_eq!(world.organisms()[0].nodes()[3].parent(), Some(1));
+        assert_eq!(world.organisms()[0].budget(), 0.0);
+        assert_eq!(world.organisms()[0].branch_count(), 1);
+        assert_eq!(world.organisms()[0].active_count(), 3);
         world.validate().unwrap();
         assert_eq!(
             GrowthParameters::new(f64::NAN, 0.5, 1.0, 1.0),
@@ -321,6 +400,54 @@ mod tests {
             (MAX_ORGANISMS + MAX_SOURCES - 1) as u64
         );
         world.validate().unwrap();
+    }
+
+    #[test]
+    fn capacity_and_invalid_growth_are_atomic() {
+        let up = Vec3::new(0.0, 1.0, 0.0).unwrap();
+        let mut world = WorldState::new(DeterministicSeed(2));
+        world
+            .spawn_organism(
+                Vec3::ZERO,
+                GrowthParameters::new(0.1, 0.5, 1.0, 1.0)
+                    .unwrap()
+                    .with_max_children(1)
+                    .unwrap(),
+            )
+            .unwrap();
+        while world.organisms()[0].nodes().len() < MAX_NODES {
+            let len = world.organisms()[0].nodes().len();
+            let samples = (0..len)
+                .map(|i| (if i + 1 == len { 1.0 } else { 0.0 }, up))
+                .collect::<Vec<_>>();
+            assert_eq!(world.organisms_mut()[0].grow(&samples), Ok(1));
+        }
+        let len = world.organisms()[0].nodes().len();
+        let samples = (0..len)
+            .map(|i| (if i + 1 == len { 1.0 } else { 0.0 }, up))
+            .collect::<Vec<_>>();
+        assert_eq!(world.organisms_mut()[0].grow(&samples), Ok(0));
+        assert_eq!(world.organisms()[0].nodes().last().unwrap().energy(), 1.0);
+        world.validate().unwrap();
+
+        let mut edge = WorldState::new(DeterministicSeed(3));
+        edge.spawn_organism(
+            Vec3::new(0.0, 999.9, 0.0).unwrap(),
+            GrowthParameters::new(0.1, 1.0, 1.0, 1.0).unwrap(),
+        )
+        .unwrap();
+        let before = edge.clone();
+        assert_eq!(
+            edge.organisms_mut()[0].grow(&[(1.0, up)]),
+            Err(WorldError::OutOfRange)
+        );
+        assert_eq!(edge, before);
+        assert_eq!(
+            GrowthParameters::new(0.1, 1.0, 1.0, 1.0)
+                .unwrap()
+                .with_max_children(3),
+            Err(WorldError::OutOfRange)
+        );
     }
 }
 

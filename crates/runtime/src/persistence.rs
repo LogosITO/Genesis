@@ -11,7 +11,7 @@ use std::{
 
 /// Maximum encoded save size, in bytes.
 pub const MAX_SAVE_BYTES: usize = 64 * 1024;
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 
 /// Save and load failure; a failed load leaves an existing runtime unchanged.
 #[derive(Debug)]
@@ -52,7 +52,7 @@ struct SaveFile {
 }
 
 impl Runtime {
-    /// Encodes a validated version-1 save. JSON is for inspection, not a stable public API.
+    /// Encodes a validated version-2 save. JSON is for inspection, not a stable public API.
     pub fn save_bytes(&self) -> Result<Vec<u8>, PersistenceError> {
         self.validate()?;
         let bytes = serde_json::to_vec_pretty(&SaveFile {
@@ -70,7 +70,7 @@ impl Runtime {
             return Err(PersistenceError::TooLarge);
         }
         let save: SaveFile = serde_json::from_slice(bytes)?;
-        if save.format_version != FORMAT_VERSION {
+        if !(1..=FORMAT_VERSION).contains(&save.format_version) {
             return Err(PersistenceError::Version(save.format_version));
         }
         save.runtime.validate()?;

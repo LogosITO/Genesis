@@ -1,5 +1,7 @@
 # First Life local measurement record
 
+**Historical Foundation 0.4 record at commit `83054d4`.** Current Foundation 0.5 branching and capsule code changes topology, primitive counts, and timings; run the commands below at that commit to reproduce this table. See the [First Structure record](first-structure-measurements.md) for current measurements.
+
 ## Hypothesis
 
 A bounded analytic growth graph can be advanced, saved, converted to a render snapshot, and queried on one native GPU without storing a mesh or voxel world.

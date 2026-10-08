@@ -1,10 +1,10 @@
-//! Experimental analytic sphere and axis-aligned box renderer. World state owns geometry;
+//! Experimental analytic sphere, box, and capsule renderer. World state owns geometry;
 //! this crate converts a bounded snapshot to `f32` GPU data and never stores a mesh.
 
 mod gpu;
 pub use gpu::{DrawOptions, GpuRenderer, GpuResult, GpuTimer};
 
-use analytic_field::{AxisAlignedBox, Sphere};
+use analytic_field::{AxisAlignedBox, Capsule, Sphere};
 use spatial_math::{Transform, Vec3};
 use std::fmt;
 use world_state::{MAX_NODES, WorldState};
@@ -190,6 +190,8 @@ pub enum PrimitiveKind {
     Sphere,
     /// Analytic axis-aligned box.
     Box,
+    /// Analytic closed-segment capsule.
+    Capsule,
 }
 
 /// One snapshot primitive, in world coordinates, with a stable caller-supplied ID.
@@ -201,6 +203,7 @@ pub struct Primitive {
     pub kind: PrimitiveKind,
     center: Vec3,
     dimensions: Vec3,
+    radius: f64,
     color: [f32; 3],
 }
 impl Primitive {
@@ -232,6 +235,7 @@ impl Primitive {
             kind,
             center: transform.translation(),
             dimensions,
+            radius: 0.0,
             color,
         })
     }
@@ -260,13 +264,43 @@ impl Primitive {
             .map_err(|_| RenderError::InvalidInput("box extent overflow"))?;
         Self::new(id, PrimitiveKind::Box, dimensions, transform, color)
     }
+    /// Constructs an analytic capsule from authoritative world-space endpoints.
+    pub fn capsule(id: u32, capsule: Capsule, color: [f32; 3]) -> Result<Self, RenderError> {
+        let (a, b, radius) = (capsule.a(), capsule.b(), capsule.radius());
+        for value in components(a).into_iter().chain(components(b)) {
+            finite_range(value)?;
+        }
+        if !(MIN_DIMENSION..=MAX_COORDINATE).contains(&radius) {
+            return Err(RenderError::InvalidInput(
+                "capsule radius outside supported range",
+            ));
+        }
+        if color
+            .iter()
+            .any(|c| !c.is_finite() || !(0.0..=1.0).contains(c))
+        {
+            return Err(RenderError::InvalidInput("color component outside 0..=1"));
+        }
+        Ok(Self {
+            id,
+            kind: PrimitiveKind::Capsule,
+            center: a,
+            dimensions: b,
+            radius,
+            color,
+        })
+    }
     /// Center in world coordinates.
     pub fn center(self) -> Vec3 {
         self.center
     }
-    /// World radius (sphere) or half extents (box).
+    /// World radius (sphere), half extents (box), or endpoint B (capsule).
     pub fn dimensions(self) -> Vec3 {
         self.dimensions
+    }
+    /// Capsule radius; zero for other primitive kinds.
+    pub fn capsule_radius(self) -> f64 {
+        self.radius
     }
     /// Linear RGB surface color.
     pub fn color(self) -> [f32; 3] {
@@ -280,7 +314,7 @@ pub struct Scene {
     primitives: Vec<Primitive>,
 }
 impl Scene {
-    /// Copies current world spheres into the snapshot, preserving their IDs and transforms.
+    /// Copies world geometry into a bounded snapshot. IDs encode category, entity and node.
     pub fn from_world(world: &WorldState) -> Result<Self, RenderError> {
         world
             .validate()
@@ -298,7 +332,7 @@ impl Scene {
         }
         for organism in world.organisms() {
             for node in organism.nodes() {
-                let id = 256
+                let id = 1_000_000
                     + u32::try_from(organism.id().value())
                         .map_err(|_| RenderError::InvalidInput("organism ID exceeds u32"))?
                         * MAX_NODES as u32
@@ -311,10 +345,28 @@ impl Scene {
                         .map_err(|_| RenderError::InvalidInput("invalid node position"))?,
                     [0.30, 0.85, 0.42],
                 )?)?;
+                if let Some(parent) = node.parent() {
+                    let a = organism.nodes()[parent as usize].position();
+                    let capsule = Capsule::new(
+                        a,
+                        node.position(),
+                        organism.parameters().node_radius() * 0.55,
+                    )
+                    .map_err(|_| RenderError::InvalidInput("invalid growth connection"))?;
+                    scene.push(Primitive::capsule(
+                        2_000_000
+                            + u32::try_from(organism.id().value()).map_err(|_| {
+                                RenderError::InvalidInput("organism ID exceeds u32")
+                            })? * MAX_NODES as u32
+                            + node.id(),
+                        capsule,
+                        [0.22, 0.65, 0.34],
+                    )?)?;
+                }
             }
         }
         for source in world.sources() {
-            let id = 4096
+            let id = 3_000_000
                 + u32::try_from(source.id().value())
                     .map_err(|_| RenderError::InvalidInput("source ID exceeds u32"))?;
             scene.push(Primitive::sphere(
@@ -447,7 +499,84 @@ fn intersect_primitive(p: Primitive, ray: Ray) -> Option<Hit> {
                 normal: Vec3::new(n[0], n[1], n[2]).ok()?,
             })
         }
+        PrimitiveKind::Capsule => intersect_capsule(p, ray),
     }
+}
+
+fn intersect_capsule(p: Primitive, ray: Ray) -> Option<Hit> {
+    let a = p.center;
+    let b = p.dimensions;
+    let axis = b.checked_sub(a).ok()?;
+    let length = axis.length().ok()?;
+    let unit = if length == 0.0 {
+        Vec3::new(0.0, 1.0, 0.0).ok()?
+    } else {
+        axis.checked_scale(1.0 / length).ok()?
+    };
+    let from_a = ray.origin.checked_sub(a).ok()?;
+    let parallel_o = dot(from_a, unit);
+    let parallel_d = dot(ray.direction, unit);
+    let radial_o = from_a
+        .checked_sub(unit.checked_scale(parallel_o).ok()?)
+        .ok()?;
+    let radial_d = ray
+        .direction
+        .checked_sub(unit.checked_scale(parallel_d).ok()?)
+        .ok()?;
+    let mut closest: Option<Hit> = None;
+    let mut accept = |t: f64, normal: Vec3| {
+        if (ray.near..=ray.far).contains(&t) && closest.is_none_or(|hit| t < hit.distance) {
+            closest = Some(Hit {
+                id: p.id,
+                distance: t,
+                normal,
+            });
+        }
+    };
+    if length > 0.0 {
+        let qa = dot(radial_d, radial_d);
+        let qb = dot(radial_o, radial_d);
+        let qc = dot(radial_o, radial_o) - p.radius * p.radius;
+        let disc = qb * qb - qa * qc;
+        if qa > 0.0 && disc >= 0.0 {
+            for t in [(-qb - disc.sqrt()) / qa, (-qb + disc.sqrt()) / qa] {
+                let along = parallel_o + t * parallel_d;
+                if (0.0..=length).contains(&along) {
+                    let radial = radial_o.checked_add(radial_d.checked_scale(t).ok()?).ok()?;
+                    if let Ok(normal) = radial.normalized() {
+                        accept(t, normal);
+                    }
+                }
+            }
+        }
+    }
+    for (center, start) in [(a, true), (b, false)] {
+        if length == 0.0 && !start {
+            break;
+        }
+        let offset = ray.origin.checked_sub(center).ok()?;
+        let qb = dot(offset, ray.direction);
+        let disc = qb * qb - (dot(offset, offset) - p.radius * p.radius);
+        if disc < 0.0 {
+            continue;
+        }
+        for t in [-qb - disc.sqrt(), -qb + disc.sqrt()] {
+            if !(ray.near..=ray.far).contains(&t) {
+                continue;
+            }
+            let point = ray
+                .origin
+                .checked_add(ray.direction.checked_scale(t).ok()?)
+                .ok()?;
+            let along = dot(point.checked_sub(a).ok()?, unit);
+            if (length == 0.0 || (start && along <= 0.0) || (!start && along >= length))
+                && let Ok(normal) = point.checked_sub(center).ok()?.normalized()
+            {
+                accept(t, normal);
+            }
+        }
+    }
+    closest
 }
 
 #[cfg(test)]
@@ -534,6 +663,92 @@ mod tests {
                 .distance,
             0.0
         );
+    }
+    #[test]
+    fn capsule_side_caps_inside_tangent_and_degeneracy() {
+        let mut scene = Scene::default();
+        scene
+            .push(
+                Primitive::capsule(
+                    17,
+                    Capsule::new(v(0.0, 0.0, 0.0), v(0.0, 2.0, 0.0), 0.5).unwrap(),
+                    [0.5; 3],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let cases = [
+            (ray(v(0.0, 1.0, -3.0), v(0.0, 0.0, 1.0)), Some(2.5)),
+            (ray(v(0.0, 3.0, 0.0), v(0.0, -1.0, 0.0)), Some(0.5)),
+            (ray(v(0.0, 1.0, 0.0), v(0.0, 0.0, 1.0)), Some(0.5)),
+            (ray(v(0.5, 1.0, -2.0), v(0.0, 0.0, 1.0)), Some(2.0)),
+            (ray(v(0.501, 1.0, -2.0), v(0.0, 0.0, 1.0)), None),
+            (ray(v(0.0, 3.0, -3.0), v(0.0, 0.0, 1.0)), None),
+            (ray(v(0.51, 1.0, -3.0), v(0.0, 1e-6, 1.0)), None),
+            (ray(v(0.0, 2.0, -3.0), v(0.0, 0.0, 1.0)), Some(2.5)),
+        ];
+        for (ray, expected) in cases {
+            let actual = scene.intersect(ray).map(|hit| hit.distance);
+            match (actual, expected) {
+                (Some(a), Some(e)) => assert!((a - e).abs() < 1e-10, "distance {a} vs {e}"),
+                (None, None) => {}
+                other => panic!("classification {other:?}"),
+            }
+        }
+        let mut degenerate = Scene::default();
+        degenerate
+            .push(
+                Primitive::capsule(
+                    18,
+                    Capsule::new(Vec3::ZERO, Vec3::ZERO, 0.5).unwrap(),
+                    [0.5; 3],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            degenerate
+                .intersect(ray(v(0.0, 0.0, -2.0), v(0.0, 0.0, 1.0)))
+                .unwrap()
+                .distance,
+            1.5
+        );
+        let mut short = Scene::default();
+        short
+            .push(
+                Primitive::capsule(
+                    19,
+                    Capsule::new(Vec3::ZERO, v(0.0, 1e-8, 0.0), 0.5).unwrap(),
+                    [0.5; 3],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(
+            (short
+                .intersect(ray(v(0.0, 0.0, -2.0), v(0.0, 0.0, 1.0)))
+                .unwrap()
+                .distance
+                - 1.5)
+                .abs()
+                < 1e-10
+        );
+    }
+    #[test]
+    fn world_capacity_does_not_hide_snapshot_overflow() {
+        use world_state::DeterministicSeed;
+        let mut world = WorldState::new(DeterministicSeed(1));
+        for _ in 0..256 {
+            world
+                .spawn_sphere(Sphere::new(0.1).unwrap(), Transform::identity(), 0.0)
+                .unwrap();
+        }
+        world.spawn_source(Vec3::ZERO, 1.0, 1.0).unwrap();
+        world.validate().unwrap();
+        assert!(matches!(
+            Scene::from_world(&world),
+            Err(RenderError::TooManyObjects)
+        ));
     }
     #[test]
     fn camera_and_validation() {
@@ -629,7 +844,7 @@ mod tests {
         .unwrap();
         let after = Scene::from_world(&world).unwrap();
         assert_eq!(world.organisms()[0].nodes().len(), 2);
-        assert_eq!(after.primitives().len(), 3);
+        assert_eq!(after.primitives().len(), 4);
         assert_eq!(
             after.primitives()[1].center(),
             world.organisms()[0].nodes()[1].position()
@@ -655,7 +870,7 @@ mod tests {
         );
         assert_eq!(
             moved.primitives().len(),
-            world.organisms()[0].nodes().len() + world.sources().len()
+            world.organisms()[0].nodes().len() * 2 - 1 + world.sources().len()
         );
     }
 
@@ -671,16 +886,21 @@ mod tests {
         world
             .spawn_organism(
                 Vec3::ZERO,
-                GrowthParameters::new(0.1, 0.3, 1.0, 1.0).unwrap(),
+                GrowthParameters::new(0.1, 0.3, 1.0, 1.0)
+                    .unwrap()
+                    .with_max_children(1)
+                    .unwrap(),
             )
             .unwrap();
         world.spawn_source(v(0.0, 1.0, 0.0), 3.0, 1.0).unwrap();
         for _ in 0..18 {
-            world.organisms_mut()[0]
-                .grow(1.0, v(0.0, 1.0, 0.0))
-                .unwrap();
+            let len = world.organisms()[0].nodes().len();
+            let samples = (0..len)
+                .map(|i| (if i + 1 == len { 1.0 } else { 0.0 }, v(0.0, 1.0, 0.0)))
+                .collect::<Vec<_>>();
+            world.organisms_mut()[0].grow(&samples).unwrap();
         }
-        assert_eq!(Scene::from_world(&world).unwrap().primitives().len(), 36);
+        assert_eq!(Scene::from_world(&world).unwrap().primitives().len(), 54);
     }
 
     #[test]

@@ -3,9 +3,9 @@
 use analytic_renderer::Scene;
 use spatial_math::Vec3;
 use std::{error::Error, time::Instant};
-use world_runtime::Runtime;
+use world_runtime::{PersistenceError, Runtime};
 use world_simulation::{EnvironmentEventKind, SimulationStep};
-use world_state::{DeterministicSeed, GrowthParameters, WorldState};
+use world_state::{DeterministicSeed, GrowthNode, GrowthParameters, WorldState};
 
 const TICKS: u64 = 120;
 
@@ -63,7 +63,7 @@ fn run(name: &str, measure: bool) -> Result<(Runtime, serde_json::Value), Box<dy
         );
     }
     let organism = &runtime.world().organisms()[0];
-    let tip = organism.nodes().last().expect("root exists").position();
+    let last_node = organism.nodes().last().expect("root exists").position();
     let fingerprint = bytes.iter().fold(0xcbf29ce484222325_u64, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
     });
@@ -72,15 +72,92 @@ fn run(name: &str, measure: bool) -> Result<(Runtime, serde_json::Value), Box<dy
         "ticks": TICKS,
         "organism_id": organism.id().value(),
         "node_count": organism.nodes().len(),
-        "tip": [tip.x(), tip.y(), tip.z()],
+        "active_count": organism.active_count(),
+        "branch_count": organism.branch_count(),
+        "last_allocated_node": [last_node.x(), last_node.y(), last_node.z()],
         "snapshot_primitives": scene.primitives().len(),
         "state_fingerprint_fnv1a64": format!("{fingerprint:016x}")
     });
     Ok((runtime, summary))
 }
 
+fn scale_sample(
+    organisms: usize,
+    target_nodes: usize,
+) -> Result<serde_json::Value, Box<dyn Error>> {
+    let mut world = WorldState::new(DeterministicSeed(7));
+    for index in 0..organisms {
+        world.spawn_organism(
+            point(index as f64 - 1.5, 0.0, 0.0),
+            GrowthParameters::new(0.14, 0.32, 0.12, 1.0)?,
+        )?;
+    }
+    world.spawn_source(point(0.0, 2.0, 0.0), 100.0, 10.0)?;
+    let mut runtime = Runtime::new(world, SimulationStep::new(0.01)?);
+    while runtime
+        .world()
+        .organisms()
+        .iter()
+        .any(|o| o.nodes().len() < target_nodes)
+    {
+        if runtime.time().ticks() >= 200 {
+            return Err("scale scene did not reach requested node count".into());
+        }
+        runtime.tick()?;
+    }
+    let nodes: usize = runtime
+        .world()
+        .organisms()
+        .iter()
+        .map(|o| o.nodes().len())
+        .sum();
+    let mut step_us = Vec::new();
+    let mut snapshot_us = Vec::new();
+    let mut primitive_count = None;
+    let mut overflow = false;
+    for _ in 0..25 {
+        let mut copy = runtime.clone();
+        let started = Instant::now();
+        copy.tick()?;
+        step_us.push(started.elapsed().as_secs_f64() * 1e6);
+        let started = Instant::now();
+        match Scene::from_world(runtime.world()) {
+            Ok(scene) => primitive_count = Some(scene.primitives().len()),
+            Err(analytic_renderer::RenderError::TooManyObjects) => overflow = true,
+            Err(error) => return Err(error.into()),
+        }
+        snapshot_us.push(started.elapsed().as_secs_f64() * 1e6);
+    }
+    step_us.sort_by(f64::total_cmp);
+    snapshot_us.sort_by(f64::total_cmp);
+    let save_bytes = match runtime.save_bytes() {
+        Ok(bytes) => Some(bytes.len()),
+        Err(PersistenceError::TooLarge) => None,
+        Err(error) => return Err(error.into()),
+    };
+    Ok(serde_json::json!({
+        "organisms": organisms, "nodes": nodes, "ticks": runtime.time().ticks(),
+        "primitives": primitive_count, "snapshot_overflow": overflow,
+        "step_median_us": step_us[12], "snapshot_median_us": snapshot_us[12],
+        "node_storage_lower_bound_bytes": nodes * std::mem::size_of::<GrowthNode>(),
+        "save_bytes": save_bytes,
+    }))
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "scale") {
+        if args.len() != 2 || args[1] != "--measure" {
+            return Err("usage: first-life scale --measure".into());
+        }
+        let mut results = Vec::new();
+        for count in [1, 8, 16, 32, 48] {
+            results.push(scale_sample(1, count)?);
+        }
+        results.push(scale_sample(4, 48)?);
+        println!("{}", serde_json::Value::Array(results));
+        return Ok(());
+    }
     let name = args.first().map(String::as_str).unwrap_or("baseline");
     if args.len() > 2 || args.get(1).is_some_and(|arg| arg != "--measure") {
         return Err("usage: first-life [baseline|changed|limited] [--measure]".into());
@@ -104,7 +181,10 @@ mod tests {
         let (limited, limited_summary) = run("limited", false).unwrap();
         assert_ne!(base, changed);
         assert_ne!(base, limited);
-        assert_ne!(baseline["tip"], changed_summary["tip"]);
+        assert_ne!(
+            baseline["last_allocated_node"],
+            changed_summary["last_allocated_node"]
+        );
         assert_eq!(limited_summary["node_count"], 1);
         assert!(baseline["node_count"].as_u64().unwrap() > 1);
     }
@@ -136,7 +216,7 @@ mod tests {
                 let scene = Scene::from_world(frequent.world()).unwrap();
                 assert_eq!(
                     scene.primitives().len(),
-                    frequent.world().organisms()[0].nodes().len() + 1
+                    frequent.world().organisms()[0].nodes().len() * 2
                 );
             }
             frequent.tick().unwrap();

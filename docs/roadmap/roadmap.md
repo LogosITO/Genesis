@@ -16,8 +16,11 @@ Conventional Commit PR titles, independent Rust crate version rules, and a revie
 ## Foundation 0.4 — First Life, experimental local slice
 A bounded rooted growth graph, continuous resource concentration, tick-indexed source events, version-1 JSON saves, exact local replay tests, three headless scenarios, and a state-driven native viewport. Cross-platform replay and visual quality remain unverified. This is an inspectable procedural model, not validated biology. See the [growth](../specifications/growth-model.md), [environment](../specifications/environment-fields.md), [persistence](../specifications/world-persistence.md), and [replay](../specifications/replay-determinism.md) specifications.
 
-## Candidate 0.5
-Measure many-organism scaling and visual legibility, then choose one grounded extension: bounded branching with explicit tip allocation, or analytic connection primitives with CPU/GPU parity. The current single-chain rule and point-like sphere rendering should be evaluated before a field compiler or spatial index is introduced.
+## Foundation 0.5 — First Structure, experimental local slice
+Bounded two-child branching with shared resource allocation, analytic capsule connections, version-2 saves with version-1 read compatibility, CPU/GPU selected-ray parity, and controlled 1–48-node measurements. Four fully populated organisms overflow the current GPU snapshot explicitly. Visual legibility, cross-adapter numerical behavior, and large-world rendering remain unverified; see the [growth model](../specifications/growth-model.md), [capsule contract](../specifications/capsule.md), and [measurement record](../research/first-structure-measurements.md).
+
+## Candidate 0.6
+Address measured snapshot and intersection scaling without weakening world-state authority: test a bounded visibility or acceleration strategy on a defined scene class, then investigate branch collision and shape continuity separately. Do not infer a watertight CSG union from overlapping spheres and capsules.
 
 ## Later research
 Growth grammars and L-systems, finite resource budgets, destruction and recovery rules, physics queries, embedding/FFI, standalone UI, and authored language. Sequence and scope will follow experiments, not promises.

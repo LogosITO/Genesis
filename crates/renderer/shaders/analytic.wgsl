@@ -7,8 +7,8 @@ struct Camera {
     settings: vec4<f32>, // x = 0 lit, 1 normals; y = object count
 }
 struct Primitive {
-    center_kind: vec4<f32>, // w = 0 sphere, 1 AABB
-    dimensions: vec4<f32>, // radius in x, or box half extents
+    center_kind: vec4<f32>, // w = 0 sphere, 1 AABB, 2 capsule; xyz = capsule A
+    dimensions: vec4<f32>, // radius in x, box half extents, or capsule B xyz and radius w
     color: vec4<f32>,
     identity: vec4<u32>,
 }
@@ -85,6 +85,55 @@ fn box_hit(p: Primitive, origin: vec3<f32>, direction: vec3<f32>, near: f32, far
     return Hit(t, select(exit_normal, entry_normal, use_entry), p.identity.x, true);
 }
 
+fn capsule_hit(p: Primitive, origin: vec3<f32>, direction: vec3<f32>, near: f32, far: f32) -> Hit {
+    let a = p.center_kind.xyz;
+    let b = p.dimensions.xyz;
+    let radius = p.dimensions.w;
+    let axis = b - a;
+    let length = length(axis);
+    let unit = select(vec3<f32>(0.0, 1.0, 0.0), axis / max(length, 1e-20), length > 0.0);
+    let from_a = origin - a;
+    let parallel_o = dot(from_a, unit);
+    let parallel_d = dot(direction, unit);
+    let radial_o = from_a - parallel_o * unit;
+    let radial_d = direction - parallel_d * unit;
+    var best = no_hit();
+    if (length > 0.0) {
+        let qa = dot(radial_d, radial_d);
+        let qb = dot(radial_o, radial_d);
+        let qc = dot(radial_o, radial_o) - radius * radius;
+        let disc = qb * qb - qa * qc;
+        if (qa > 0.0 && disc >= 0.0) {
+            let root = sqrt(disc);
+            for (var i = 0u; i < 2u; i++) {
+                let t = select((-qb + root) / qa, (-qb - root) / qa, i == 0u);
+                let along = parallel_o + t * parallel_d;
+                if (t >= near && t <= far && along >= 0.0 && along <= length && (!best.valid || t < best.distance)) {
+                    best = Hit(t, normalize(radial_o + t * radial_d), p.identity.x, true);
+                }
+            }
+        }
+    }
+    for (var cap = 0u; cap < 2u; cap++) {
+        if (length == 0.0 && cap == 1u) { break; }
+        let center = select(b, a, cap == 0u);
+        let offset = origin - center;
+        let qb = dot(offset, direction);
+        let disc = qb * qb - (dot(offset, offset) - radius * radius);
+        if (disc < 0.0) { continue; }
+        let root = sqrt(disc);
+        for (var i = 0u; i < 2u; i++) {
+            let t = select(-qb + root, -qb - root, i == 0u);
+            let point = origin + t * direction;
+            let along = dot(point - a, unit);
+            if (t >= near && t <= far && (length == 0.0 || (cap == 0u && along <= 0.0) || (cap == 1u && along >= length)) && (!best.valid || t < best.distance)) {
+                best = Hit(t, normalize(point - center), p.identity.x, true);
+            }
+        }
+    }
+    return best;
+}
+
 fn trace(origin: vec3<f32>, direction: vec3<f32>, near: f32, far: f32) -> Hit {
     var closest = no_hit();
     var limit = far;
@@ -93,8 +142,10 @@ fn trace(origin: vec3<f32>, direction: vec3<f32>, near: f32, far: f32) -> Hit {
         var candidate = no_hit();
         if (p.center_kind.w == 0.0) {
             candidate = sphere_hit(p, origin, direction, near, limit);
-        } else {
+        } else if (p.center_kind.w == 1.0) {
             candidate = box_hit(p, origin, direction, near, limit);
+        } else {
+            candidate = capsule_hit(p, origin, direction, near, limit);
         }
         if (candidate.valid && (!closest.valid || candidate.distance < closest.distance)) {
             closest = candidate;
