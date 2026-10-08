@@ -1,6 +1,6 @@
 //! Minimal mutable world: stable IDs and analytic spheres, with no renderer dependency.
 
-use analytic_field::{ScalarField, Sphere};
+use analytic_field::Sphere;
 use spatial_math::{MathError, Transform, Vec3};
 use std::fmt;
 
@@ -67,15 +67,9 @@ impl Entity {
     pub fn growth_per_second(&self) -> f64 {
         self.growth_per_second
     }
-    /// Exact world-space signed distance; positive uniform scale preserves the SDF property.
+    /// Ideal exact world-space sphere SDF; floating point sampling remains approximate.
     pub fn signed_distance(&self, point: Vec3) -> Result<f64, WorldError> {
-        let local = self.transform.to_local(point)?;
-        let value = self.sphere.sample(local)? * self.transform.scale();
-        if value.is_finite() {
-            Ok(value)
-        } else {
-            Err(WorldError::Math(MathError::NonFinite))
-        }
+        Ok(self.sphere.sample_transformed(self.transform, point)?)
     }
 }
 
@@ -169,5 +163,16 @@ mod tests {
             Err(WorldError::Math(MathError::NonFinite))
         );
         assert_eq!(world.entities().len(), 2);
+        let tiny = Transform::new(Vec3::ZERO, 1e-308).unwrap();
+        let id = world
+            .spawn_sphere(Sphere::new(1.0).unwrap(), tiny, 0.0)
+            .unwrap();
+        assert_eq!(
+            world
+                .entity(id)
+                .unwrap()
+                .signed_distance(Vec3::new(1.0, 0.0, 0.0).unwrap()),
+            Ok(1.0)
+        );
     }
 }

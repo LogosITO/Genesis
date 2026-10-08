@@ -1,7 +1,7 @@
 # ADR 0003: Field contracts
 
 ## Status
-Accepted for Foundation 0.1.
+Accepted for Foundation 0.1; CSG regularization wording corrected by ADR 0005.
 
 ## Context
 Treating every signed field as an exact SDF can make geometric queries unsafe.

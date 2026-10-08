@@ -64,6 +64,25 @@ impl Vec3 {
         Self::new(self.x - rhs.x, self.y - rhs.y, self.z - rhs.z)
     }
 
+    /// Checked vector addition.
+    pub fn checked_add(self, rhs: Self) -> Result<Self, MathError> {
+        Self::new(self.x + rhs.x, self.y + rhs.y, self.z + rhs.z)
+    }
+
+    /// Checked multiplication by a scalar.
+    pub fn checked_scale(self, factor: f64) -> Result<Self, MathError> {
+        Self::new(self.x * factor, self.y * factor, self.z * factor)
+    }
+
+    /// Additive inverse.
+    pub fn negated(self) -> Self {
+        Self {
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
+        }
+    }
+
     /// Checked Euclidean length. `hypot` avoids overflow in squaring.
     pub fn length(self) -> Result<f64, MathError> {
         let length = self.x.hypot(self.y).hypot(self.z);
@@ -72,6 +91,17 @@ impl Vec3 {
         } else {
             Err(MathError::NonFinite)
         }
+    }
+
+    /// Unit vector; the zero vector has no direction.
+    pub fn normalized(self) -> Result<Self, MathError> {
+        let largest = self.x.abs().max(self.y.abs()).max(self.z.abs());
+        if largest == 0.0 {
+            return Err(MathError::NonPositive);
+        }
+        let scaled = Self::new(self.x / largest, self.y / largest, self.z / largest)?;
+        let length = scaled.length()?;
+        Self::new(scaled.x / length, scaled.y / length, scaled.z / length)
     }
 
     /// Component-wise absolute value.
@@ -182,6 +212,22 @@ mod tests {
         assert_eq!(
             t.to_local(Vec3::new(4.0, 0.0, 0.0).unwrap()).unwrap(),
             Vec3::new(1.0, 0.0, 0.0).unwrap()
+        );
+        assert_eq!(Vec3::ZERO.normalized(), Err(MathError::NonPositive));
+        let huge = Vec3::new(f64::MAX, f64::MAX, 0.0)
+            .unwrap()
+            .normalized()
+            .unwrap();
+        assert!((huge.length().unwrap() - 1.0).abs() < 1e-15);
+        assert_eq!(
+            Vec3::new(f64::from_bits(1), 0.0, 0.0).unwrap().normalized(),
+            Vec3::new(1.0, 0.0, 0.0)
+        );
+        assert_eq!(
+            Vec3::new(f64::MAX, 0.0, 0.0)
+                .unwrap()
+                .checked_add(Vec3::new(f64::MAX, 0.0, 0.0).unwrap()),
+            Err(MathError::NonFinite)
         );
     }
 }
