@@ -121,7 +121,7 @@ impl Field {
     pub fn intersection(a: Self, b: Self) -> Self {
         Self::Intersection(Box::new(a), Box::new(b))
     }
-    /// Removes `b` from `a`.
+    /// Regularized closed-set difference. The cut surface has value zero and counts as boundary.
     pub fn difference(a: Self, b: Self) -> Self {
         Self::Difference(Box::new(a), Box::new(b))
     }
@@ -189,5 +189,11 @@ mod tests {
             Ok(-1.0)
         );
         assert_eq!(Field::difference(a, b).sample(p(0.0, 0.0, 0.0)), Ok(1.0));
+        let cut = Field::difference(
+            Field::Sphere(Sphere::new(2.0).unwrap()),
+            Field::Box(AxisAlignedBox::new(p(1.0, 1.0, 1.0)).unwrap()),
+        );
+        assert_eq!(cut.sample(p(1.0, 0.0, 0.0)), Ok(0.0));
+        assert!(cut.contains(p(1.0, 0.0, 0.0)).unwrap());
     }
 }
