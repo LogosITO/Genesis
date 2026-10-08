@@ -13,4 +13,4 @@ hero:
       variant: minimal
 ---
 
-**Experimental / Research Stage.** Foundation 0.1 contains a CPU-only Rust implementation. It has no renderer, editor, or production performance claims.
+**Experimental / Research Stage.** The Rust foundation includes an optional First Light GPU viewport for analytic spheres and boxes. The world model remains independent of the renderer. There is no editor or production performance claim.

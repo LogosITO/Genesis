@@ -179,6 +179,11 @@ impl AxisAlignedBox {
         }
         Ok(Self { half_extent })
     }
+
+    /// Positive local half extents.
+    pub fn half_extent(self) -> Vec3 {
+        self.half_extent
+    }
 }
 
 impl ScalarField for AxisAlignedBox {

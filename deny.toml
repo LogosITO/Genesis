@@ -2,4 +2,5 @@
 yanked = "deny"
 
 [licenses]
-allow = ["MIT", "Apache-2.0"]
+# Permissive transitive licenses used by wgpu/winit; no GPL dependency is accepted.
+allow = ["MIT", "Apache-2.0", "Zlib", "ISC", "Unicode-3.0"]

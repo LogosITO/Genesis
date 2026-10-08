@@ -2,4 +2,4 @@
 title: Roadmap
 ---
 
-The [engineering roadmap](../reference/roadmap/roadmap/) lists candidate work after Foundation 0.1. Later stages depend on numerical evidence and are not committed release dates.
+The [engineering roadmap](../reference/roadmap/roadmap/) records completed local slices and candidate research. Later stages depend on numerical evidence and are not committed release dates.

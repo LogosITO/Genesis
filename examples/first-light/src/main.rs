@@ -1,0 +1,382 @@
+//! Native First Light viewport. World simulation advances in fixed steps; rendering samples it.
+
+use analytic_field::{AxisAlignedBox, Sphere};
+use analytic_renderer::{Camera, DrawOptions, GpuRenderer, GpuTimer, Primitive, Scene};
+use spatial_math::{Transform, Vec3};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
+use winit::{
+    application::ApplicationHandler,
+    event::{ElementState, WindowEvent},
+    event_loop::{ActiveEventLoop, EventLoop},
+    keyboard::{KeyCode, PhysicalKey},
+    window::{Window, WindowId},
+};
+use world_simulation::{SimulationStep, SimulationTime, advance};
+use world_state::{DeterministicSeed, WorldState};
+
+const STEP: Duration = Duration::from_nanos(16_666_667);
+
+fn v(x: f64, y: f64, z: f64) -> Vec3 {
+    Vec3::new(x, y, z).expect("finite scene coordinate")
+}
+
+struct Graphics {
+    window: Arc<Window>,
+    surface: wgpu::Surface<'static>,
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+    renderer: GpuRenderer,
+    timer: Option<GpuTimer>,
+}
+impl Graphics {
+    async fn open(
+        window: Arc<Window>,
+        lost: Arc<AtomicBool>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let instance = wgpu::Instance::default();
+        let surface = instance.create_surface(window.clone())?;
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+                ..Default::default()
+            })
+            .await?;
+        let info = adapter.get_info();
+        eprintln!(
+            "adapter={} backend={:?} driver={} wgpu=30.0.1",
+            info.name, info.backend, info.driver
+        );
+        let features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("First Light"),
+                required_features: features,
+                required_limits: wgpu::Limits::default(),
+                ..Default::default()
+            })
+            .await?;
+        let uncaptured_error = Arc::clone(&lost);
+        device.on_uncaptured_error(Arc::new(move |error| {
+            eprintln!("GPU error: {error}");
+            uncaptured_error.store(true, Ordering::Relaxed);
+        }));
+        let device_lost = Arc::clone(&lost);
+        device.set_device_lost_callback(move |reason, message| {
+            eprintln!("GPU device lost: {reason:?}: {message}");
+            device_lost.store(true, Ordering::Relaxed);
+        });
+        let capabilities = surface.get_capabilities(&adapter);
+        let format = capabilities
+            .formats
+            .iter()
+            .copied()
+            .find(wgpu::TextureFormat::is_srgb)
+            .or_else(|| capabilities.formats.first().copied())
+            .ok_or("surface has no supported format")?;
+        let size = window.inner_size();
+        let config = surface
+            .get_default_config(&adapter, size.width.max(1), size.height.max(1))
+            .ok_or("surface configuration unavailable")?;
+        let config = wgpu::SurfaceConfiguration { format, ..config };
+        surface.configure(&device, &config);
+        let renderer = GpuRenderer::new(&device, format).await?;
+        let timer = GpuTimer::new(&device);
+        Ok(Self {
+            window,
+            surface,
+            adapter,
+            device,
+            queue,
+            config,
+            renderer,
+            timer,
+        })
+    }
+    fn resize(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        if width > self.device.limits().max_texture_dimension_2d
+            || height > self.device.limits().max_texture_dimension_2d
+        {
+            eprintln!("resize skipped: {width}x{height} exceeds GPU texture limit");
+            return;
+        }
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(&self.device, &self.config);
+    }
+}
+
+struct App {
+    graphics: Option<Graphics>,
+    lost: Arc<AtomicBool>,
+    world: WorldState,
+    time: SimulationTime,
+    step: SimulationStep,
+    paused: bool,
+    normals: bool,
+    yaw: f64,
+    elevation: f64,
+    previous: Instant,
+    accumulator: Duration,
+    stats_since: Instant,
+    frames: u32,
+    cpu_total: Duration,
+}
+impl App {
+    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        let mut world = WorldState::new(DeterministicSeed(7));
+        world.spawn_sphere(
+            Sphere::new(0.7)?,
+            Transform::new(v(-1.4, 0.0, 0.0), 1.0)?,
+            0.12,
+        )?;
+        Ok(Self {
+            graphics: None,
+            lost: Arc::new(AtomicBool::new(false)),
+            world,
+            time: SimulationTime::default(),
+            step: SimulationStep::new(STEP.as_secs_f64())?,
+            paused: false,
+            normals: false,
+            yaw: 0.0,
+            elevation: 0.25,
+            previous: Instant::now(),
+            accumulator: Duration::ZERO,
+            stats_since: Instant::now(),
+            frames: 0,
+            cpu_total: Duration::ZERO,
+        })
+    }
+    fn scene(&self) -> Result<Scene, Box<dyn std::error::Error>> {
+        let mut scene = Scene::from_world(&self.world)?;
+        scene.push(Primitive::axis_aligned_box(
+            1,
+            AxisAlignedBox::new(v(0.9, 0.9, 0.9))?,
+            Transform::new(v(1.2, 0.0, 0.0), 1.0)?,
+            [0.95, 0.48, 0.22],
+        )?)?;
+        Ok(scene)
+    }
+    fn redraw(&mut self, event_loop: &ActiveEventLoop) {
+        if self.lost.load(Ordering::Relaxed) {
+            eprintln!("GPU device error; exiting");
+            event_loop.exit();
+            return;
+        }
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.previous);
+        self.previous = now;
+        if !self.paused {
+            self.accumulator += elapsed.min(Duration::from_millis(250));
+            let mut steps = 0;
+            while self.accumulator >= STEP && steps < 4 {
+                if let Err(error) = advance(&mut self.world, &mut self.time, self.step) {
+                    eprintln!("simulation failed: {error}");
+                    event_loop.exit();
+                    return;
+                }
+                self.accumulator -= STEP;
+                steps += 1;
+            }
+            // shortcut: drop excess wall-time debt after four fixed steps; use a separate simulation worker if sustained frame times exceed 67 ms.
+            self.accumulator = self.accumulator.min(STEP * 4);
+        }
+        let scene = match self.scene() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("scene failed: {e}");
+                event_loop.exit();
+                return;
+            }
+        };
+        let Some(graphics) = self.graphics.as_mut() else {
+            return;
+        };
+        let size = graphics.window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+        let origin = v(
+            self.yaw.sin() * 7.0,
+            self.elevation.sin() * 7.0,
+            -self.yaw.cos() * self.elevation.cos() * 7.0,
+        );
+        let camera = match Camera::look_at(origin, Vec3::ZERO, v(0.0, 1.0, 0.0), 0.95) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("camera failed: {e}");
+                event_loop.exit();
+                return;
+            }
+        };
+        let frame = match graphics.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                graphics.resize(size.width, size.height);
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
+            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Validation => {
+                eprintln!("surface lost or invalid; exiting");
+                event_loop.exit();
+                return;
+            }
+        };
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let started = Instant::now();
+        let report = now.duration_since(self.stats_since) >= Duration::from_secs(2);
+        let sampled_timer = if report {
+            graphics.timer.as_ref()
+        } else {
+            None
+        };
+        if let Err(error) = graphics.renderer.draw(
+            &graphics.device,
+            &graphics.queue,
+            &scene,
+            camera,
+            DrawOptions {
+                size: [size.width, size.height],
+                normal_debug: self.normals,
+                surface: Some(&view),
+                timer: sampled_timer,
+            },
+        ) {
+            eprintln!("render failed: {error}");
+            event_loop.exit();
+            return;
+        }
+        graphics.queue.present(frame);
+        self.cpu_total += started.elapsed();
+        self.frames += 1;
+        if report {
+            let seconds = now.duration_since(self.stats_since).as_secs_f64();
+            let gpu_time = graphics
+                .timer
+                .as_ref()
+                .map(|timer| {
+                    timer
+                        .read_ms(&graphics.device, &graphics.queue)
+                        .map(|ms| format!("{ms:.3}"))
+                })
+                .transpose();
+            let gpu_time = match gpu_time {
+                Ok(Some(ms)) => ms,
+                Ok(None) => "unavailable".to_string(),
+                Err(error) => format!("error:{error}"),
+            };
+            eprintln!(
+                "fps={:.1} cpu_submit_ms={:.2} gpu_compute_ms={} resolution={}x{} objects={} max_tests_per_frame={} ticks={} radius={:.4} backend={:?}",
+                f64::from(self.frames) / seconds,
+                self.cpu_total.as_secs_f64() * 1000.0 / f64::from(self.frames),
+                gpu_time,
+                size.width,
+                size.height,
+                scene.primitives().len(),
+                u64::from(size.width) * u64::from(size.height) * scene.primitives().len() as u64,
+                self.time.ticks(),
+                self.world.entities()[0].sphere().radius(),
+                graphics.adapter.get_info().backend
+            );
+            self.stats_since = now;
+            self.frames = 0;
+            self.cpu_total = Duration::ZERO;
+        }
+    }
+}
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.graphics.is_some() {
+            return;
+        }
+        let window = match event_loop.create_window(
+            Window::default_attributes()
+                .with_title("First Light — Experimental / Research Stage")
+                .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0)),
+        ) {
+            Ok(window) => Arc::new(window),
+            Err(error) => {
+                eprintln!("window creation failed: {error}");
+                event_loop.exit();
+                return;
+            }
+        };
+        match pollster::block_on(Graphics::open(window, self.lost.clone())) {
+            Ok(graphics) => {
+                self.graphics = Some(graphics);
+                self.previous = Instant::now();
+            }
+            Err(error) => {
+                eprintln!("GPU initialization failed: {error}");
+                event_loop.exit();
+            }
+        }
+    }
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        let Some(graphics) = self.graphics.as_mut() else {
+            return;
+        };
+        if graphics.window.id() != id {
+            return;
+        }
+        match event {
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Resized(size) => graphics.resize(size.width, size.height),
+            WindowEvent::RedrawRequested => self.redraw(event_loop),
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed && !event.repeat =>
+            {
+                if let PhysicalKey::Code(key) = event.physical_key {
+                    match key {
+                        KeyCode::Escape => event_loop.exit(),
+                        KeyCode::Space => {
+                            self.paused = !self.paused;
+                            self.accumulator = Duration::ZERO;
+                            self.previous = Instant::now();
+                        }
+                        KeyCode::KeyN => self.normals = !self.normals,
+                        KeyCode::KeyA | KeyCode::ArrowLeft => self.yaw -= 0.15,
+                        KeyCode::KeyD | KeyCode::ArrowRight => self.yaw += 0.15,
+                        KeyCode::KeyW | KeyCode::ArrowUp => {
+                            self.elevation = (self.elevation + 0.1).min(1.3)
+                        }
+                        KeyCode::KeyS | KeyCode::ArrowDown => {
+                            self.elevation = (self.elevation - 0.1).max(-1.3)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(graphics) = &self.graphics {
+            graphics.window.request_redraw();
+        }
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!(
+        "First Light controls: A/D or Left/Right orbit; W/S or Up/Down tilt; Space pause; N normals; Esc exit"
+    );
+    let event_loop = EventLoop::new()?;
+    event_loop.run_app(&mut App::new()?)?;
+    Ok(())
+}
