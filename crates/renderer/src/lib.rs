@@ -7,7 +7,7 @@ pub use gpu::{DrawOptions, GpuRenderer, GpuResult, GpuTimer};
 use analytic_field::{AxisAlignedBox, Sphere};
 use spatial_math::{Transform, Vec3};
 use std::fmt;
-use world_state::WorldState;
+use world_state::{MAX_NODES, WorldState};
 
 /// Hard cap used by both CPU snapshots and the WGSL loop.
 pub const MAX_OBJECTS: usize = 256;
@@ -282,6 +282,9 @@ pub struct Scene {
 impl Scene {
     /// Copies current world spheres into the snapshot, preserving their IDs and transforms.
     pub fn from_world(world: &WorldState) -> Result<Self, RenderError> {
+        world
+            .validate()
+            .map_err(|_| RenderError::InvalidInput("invalid world state"))?;
         let mut scene = Self::default();
         for entity in world.entities() {
             let id = u32::try_from(entity.id().value())
@@ -291,6 +294,40 @@ impl Scene {
                 entity.sphere(),
                 entity.transform(),
                 [0.25, 0.67, 0.95],
+            )?)?;
+        }
+        for organism in world.organisms() {
+            for node in organism.nodes() {
+                let id = 256
+                    + u32::try_from(organism.id().value())
+                        .map_err(|_| RenderError::InvalidInput("organism ID exceeds u32"))?
+                        * MAX_NODES as u32
+                    + node.id();
+                scene.push(Primitive::sphere(
+                    id,
+                    Sphere::new(organism.parameters().node_radius())
+                        .map_err(|_| RenderError::InvalidInput("invalid node radius"))?,
+                    Transform::new(node.position(), 1.0)
+                        .map_err(|_| RenderError::InvalidInput("invalid node position"))?,
+                    [0.30, 0.85, 0.42],
+                )?)?;
+            }
+        }
+        for source in world.sources() {
+            let id = 4096
+                + u32::try_from(source.id().value())
+                    .map_err(|_| RenderError::InvalidInput("source ID exceeds u32"))?;
+            scene.push(Primitive::sphere(
+                id,
+                Sphere::new((source.radius() * 0.06).clamp(0.05, 1.0))
+                    .map_err(|_| RenderError::InvalidInput("invalid source radius"))?,
+                Transform::new(source.position(), 1.0)
+                    .map_err(|_| RenderError::InvalidInput("invalid source position"))?,
+                if source.active() {
+                    [0.98, 0.76, 0.18]
+                } else {
+                    [0.35, 0.35, 0.38]
+                },
             )?)?;
         }
         Ok(scene)
@@ -563,6 +600,87 @@ mod tests {
                 .unwrap(),
             0.0
         );
+    }
+
+    #[test]
+    fn life_snapshot_tracks_authoritative_nodes_and_source() {
+        use world_state::{DeterministicSeed, GrowthParameters};
+        let mut world = WorldState::new(DeterministicSeed(3));
+        world
+            .spawn_organism(
+                Vec3::ZERO,
+                GrowthParameters::new(0.2, 0.4, 0.1, 1.0).unwrap(),
+            )
+            .unwrap();
+        let source = world.spawn_source(v(0.0, 1.0, 0.0), 3.0, 1.0).unwrap();
+        let before = Scene::from_world(&world).unwrap();
+        assert_eq!(before.primitives().len(), 2);
+        assert_eq!(
+            before.primitives()[0].center(),
+            world.organisms()[0].nodes()[0].position()
+        );
+        let mut time = world_simulation::SimulationTime::default();
+        world_simulation::advance_life(
+            &mut world,
+            &mut time,
+            world_simulation::SimulationStep::new(0.2).unwrap(),
+            &[],
+        )
+        .unwrap();
+        let after = Scene::from_world(&world).unwrap();
+        assert_eq!(world.organisms()[0].nodes().len(), 2);
+        assert_eq!(after.primitives().len(), 3);
+        assert_eq!(
+            after.primitives()[1].center(),
+            world.organisms()[0].nodes()[1].position()
+        );
+        world_simulation::advance_life(
+            &mut world,
+            &mut time,
+            world_simulation::SimulationStep::new(0.2).unwrap(),
+            &[world_simulation::EnvironmentEvent {
+                tick: 2,
+                order: 0,
+                kind: world_simulation::EnvironmentEventKind::MoveSource {
+                    id: source,
+                    position: v(2.0, 1.0, 0.0),
+                },
+            }],
+        )
+        .unwrap();
+        let moved = Scene::from_world(&world).unwrap();
+        assert_eq!(
+            moved.primitives().last().unwrap().center(),
+            world.sources()[0].position()
+        );
+        assert_eq!(
+            moved.primitives().len(),
+            world.organisms()[0].nodes().len() + world.sources().len()
+        );
+    }
+
+    #[test]
+    fn life_snapshot_ids_stay_disjoint_after_many_ordinary_entities() {
+        use world_state::{DeterministicSeed, GrowthParameters};
+        let mut world = WorldState::new(DeterministicSeed(1));
+        for _ in 0..16 {
+            world
+                .spawn_sphere(Sphere::new(0.1).unwrap(), Transform::identity(), 0.0)
+                .unwrap();
+        }
+        world
+            .spawn_organism(
+                Vec3::ZERO,
+                GrowthParameters::new(0.1, 0.3, 1.0, 1.0).unwrap(),
+            )
+            .unwrap();
+        world.spawn_source(v(0.0, 1.0, 0.0), 3.0, 1.0).unwrap();
+        for _ in 0..18 {
+            world.organisms_mut()[0]
+                .grow(1.0, v(0.0, 1.0, 0.0))
+                .unwrap();
+        }
+        assert_eq!(Scene::from_world(&world).unwrap().primitives().len(), 36);
     }
 
     #[test]

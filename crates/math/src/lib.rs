@@ -1,5 +1,6 @@
 //! Finite, right-handed 3D coordinates. Units are project-defined world units.
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Failure to construct or evaluate finite spatial data.
@@ -22,7 +23,8 @@ impl fmt::Display for MathError {
 impl std::error::Error for MathError {}
 
 /// A finite vector in world units.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Vec3 {
     x: f64,
     y: f64,
@@ -148,7 +150,8 @@ impl Interval {
 }
 
 /// Translation and positive uniform scale. Rotation is intentionally absent in 0.1.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Transform {
     translation: Vec3,
     scale: f64,
@@ -157,6 +160,7 @@ pub struct Transform {
 impl Transform {
     /// Constructs a spatial transform.
     pub fn new(translation: Vec3, scale: f64) -> Result<Self, MathError> {
+        Vec3::new(translation.x, translation.y, translation.z)?;
         if !scale.is_finite() {
             return Err(MathError::NonFinite);
         }

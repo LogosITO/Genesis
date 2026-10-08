@@ -1,6 +1,6 @@
 # Project Name TBD
 
-**Experimental / Research Stage.** A small foundation for mathematically defined mutable worlds. Analytic parameters, transforms, and growth rules are the source of truth; no mesh or voxel representation is stored. Foundation 0.3 adds an optional native GPU viewport for spheres and axis-aligned boxes. The CPU math and simulation remain independently testable without a GPU. No floating-point intersection is formally certified.
+**Experimental / Research Stage.** A small foundation for mathematically defined mutable worlds. Analytic parameters, transforms, and growth rules are the source of truth; no mesh or voxel representation is stored. Foundation 0.4 adds a bounded growth graph driven by a continuous resource field, tick-indexed events, and versioned saves. The CPU math and simulation remain independently testable without a GPU. No floating-point intersection is formally certified.
 
 ## Run
 
@@ -17,6 +17,18 @@ cargo run -p first-light --locked
 ```
 
 `first-light` opens a native window with a growing world sphere and a static box. It requires a compatible Vulkan or DirectX 12 adapter. Controls: **A/D** or **Left/Right** orbit; **W/S** or **Up/Down** tilt; **Space** pause; **N** normals; **Esc** exit. See the [First Light guide](docs/architecture/first-light.md).
+
+Run the First Life headless scenarios and native viewport:
+
+```sh
+cargo run -p first-life --locked -- baseline
+cargo run -p first-life --locked -- changed
+cargo run -p first-life --locked -- limited
+cargo run -p first-life --locked -- baseline --measure
+cargo run -p first-light --locked -- --life
+```
+
+The headless commands print JSON summaries computed from 120 fixed ticks. `changed` moves the resource source at tick 40; `limited` supplies too little resource to create a child. `--measure` adds local timing diagnostics on stderr. In the native First Life mode, **M** schedules a source move at the next tick; **Space** pauses or resumes. The renderer copies analytic nodes and source positions from `WorldState`. See the [growth model](docs/specifications/growth-model.md), [environment field](docs/specifications/environment-fields.md), [save contract](docs/specifications/world-persistence.md), and [replay contract](docs/specifications/replay-determinism.md).
 
 ```sh
 cargo fmt --all -- --check

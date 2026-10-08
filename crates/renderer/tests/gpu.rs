@@ -4,6 +4,7 @@ use analytic_field::{AxisAlignedBox, Ray as FieldRay, RayOptions, RayOutcome, Sp
 use analytic_renderer::{Camera, DrawOptions, GpuRenderer, GpuTimer, Primitive, Ray, Scene};
 use spatial_math::{Transform, Vec3};
 use std::{sync::mpsc, time::Instant};
+use world_state::{DeterministicSeed, GrowthParameters, WorldState};
 
 fn v(x: f64, y: f64, z: f64) -> Vec3 {
     Vec3::new(x, y, z).unwrap()
@@ -297,4 +298,105 @@ fn gpu_resolution_and_timestamp_smoke() {
             adapter.get_info().name
         );
     }
+}
+
+#[test]
+#[ignore = "requires a compatible native GPU; run explicitly"]
+fn gpu_first_life_snapshot_matches_cpu() {
+    let mut world = WorldState::new(DeterministicSeed(7));
+    world
+        .spawn_organism(
+            Vec3::ZERO,
+            GrowthParameters::new(0.14, 0.32, 0.12, 1.0).unwrap(),
+        )
+        .unwrap();
+    world.spawn_source(v(0.0, 2.0, 0.0), 4.0, 1.0).unwrap();
+    let mut time = world_simulation::SimulationTime::default();
+    let step = world_simulation::SimulationStep::new(1.0 / 60.0).unwrap();
+    for _ in 0..120 {
+        world_simulation::advance_life(&mut world, &mut time, step, &[]).unwrap();
+    }
+    let scene = Scene::from_world(&world).unwrap();
+    assert_eq!(
+        scene.primitives().len(),
+        world.organisms()[0].nodes().len() + 1
+    );
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        ..Default::default()
+    }))
+    .expect("GPU adapter required");
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+        ..Default::default()
+    }))
+    .unwrap();
+    let renderer =
+        pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+    let rays: Vec<_> = scene
+        .primitives()
+        .iter()
+        .map(|primitive| {
+            let center = primitive.center();
+            r(v(center.x(), center.y(), -3.0), v(0.0, 0.0, 1.0))
+        })
+        .collect();
+    let gpu = renderer.query(&device, &queue, &scene, &rays).unwrap();
+    for (index, (ray, actual)) in rays.iter().zip(gpu).enumerate() {
+        let expected = scene.intersect(*ray).unwrap();
+        let actual = actual.expect("GPU hit");
+        assert_eq!(actual.id, expected.id, "ray {index} identity");
+        assert!(
+            (f64::from(actual.distance) - expected.distance).abs() <= 2e-4,
+            "ray {index} distance"
+        );
+    }
+    let timer = GpuTimer::new(&device);
+    let camera =
+        Camera::look_at(v(0.0, 1.0, -7.0), v(0.0, 1.0, 0.0), v(0.0, 1.0, 0.0), 0.95).unwrap();
+    let mut submit = Vec::new();
+    let mut compute = Vec::new();
+    for i in 0..8 {
+        let started = Instant::now();
+        let _image = renderer
+            .draw(
+                &device,
+                &queue,
+                &scene,
+                camera,
+                DrawOptions {
+                    size: [1280, 720],
+                    normal_debug: false,
+                    surface: None,
+                    timer: timer.as_ref(),
+                },
+            )
+            .unwrap();
+        let cpu = started.elapsed().as_secs_f64() * 1000.0;
+        let gpu = timer
+            .as_ref()
+            .map(|timer| timer.read_ms(&device, &queue).unwrap());
+        if i >= 3 {
+            submit.push(cpu);
+            if let Some(gpu) = gpu {
+                compute.push(gpu);
+            }
+        }
+    }
+    submit.sort_by(f64::total_cmp);
+    compute.sort_by(f64::total_cmp);
+    eprintln!(
+        "first_life_gpu_parity nodes={} primitives={} resolution=1280x720 profile=dev cpu_submit_median_ms={:.3} gpu_compute_median_ms={} adapter={} backend={:?}",
+        world.organisms()[0].nodes().len(),
+        scene.primitives().len(),
+        submit[submit.len() / 2],
+        compute
+            .get(compute.len() / 2)
+            .map(|n| format!("{n:.3}"))
+            .unwrap_or_else(|| "unavailable".to_string()),
+        adapter.get_info().name,
+        adapter.get_info().backend
+    );
 }

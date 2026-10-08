@@ -6,8 +6,13 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "=1.0.150", features = ["float_roundtrip"] }
 world-state = { path = "../world" }
 world-simulation = { path = "../simulation" }
+
+[dev-dependencies]
+spatial-math = { path = "../math" }
 
 [lints]
 workspace = true

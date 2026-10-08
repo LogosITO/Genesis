@@ -1,11 +1,13 @@
 //! Fixed-step deterministic growth on one process and floating point model.
 
+use serde::{Deserialize, Serialize};
 use spatial_math::MathError;
 use std::fmt;
 use world_state::{WorldError, WorldState};
 
 /// Simulation time as an integer count of completed steps.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SimulationTime {
     ticks: u64,
 }
@@ -14,10 +16,15 @@ impl SimulationTime {
     pub fn ticks(self) -> u64 {
         self.ticks
     }
+    /// Restores a validated integer tick count.
+    pub fn from_ticks(ticks: u64) -> Self {
+        Self { ticks }
+    }
 }
 
 /// Positive finite duration of a fixed step, in seconds.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SimulationStep {
     seconds: f64,
 }
@@ -47,6 +54,8 @@ pub enum SimulationError {
     World(WorldError),
     /// Tick counter exhausted.
     TimeOverflow,
+    /// Events were not strictly ordered or exceeded the per-tick budget.
+    InvalidEvents,
 }
 impl fmt::Display for SimulationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -77,6 +86,9 @@ pub fn advance(
     time.ticks = next_tick;
     Ok(())
 }
+
+mod life;
+pub use life::{EnvironmentEvent, EnvironmentEventKind, MAX_EVENTS_PER_TICK, advance_life};
 
 #[cfg(test)]
 mod tests {

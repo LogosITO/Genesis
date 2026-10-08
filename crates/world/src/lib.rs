@@ -1,11 +1,18 @@
 //! Minimal mutable world: stable IDs and analytic spheres, with no renderer dependency.
 
 use analytic_field::Sphere;
+use serde::{Deserialize, Serialize};
 use spatial_math::{MathError, Transform, Vec3};
 use std::fmt;
 
+mod life;
+pub use life::{
+    GrowthNode, GrowthParameters, MAX_NODES, MAX_ORGANISMS, MAX_SOURCES, MAX_SPHERES, Organism,
+    ResourceSource,
+};
+
 /// A stable identifier for the lifetime of a world. IDs are never reused.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct EntityId(u64);
 impl EntityId {
     /// Numeric identifier for logs or serialization.
@@ -15,7 +22,7 @@ impl EntityId {
 }
 
 /// Seed recorded with world state for future seeded rules. The 0.1 growth rule is deterministic without randomness.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeterministicSeed(pub u64);
 
 /// Errors in world construction, queries, and mutation.
@@ -29,6 +36,12 @@ pub enum WorldError {
     IdExhausted,
     /// Radius update length did not match the number of entities.
     LengthMismatch,
+    /// A fixed world, source, or organism capacity was reached.
+    Capacity,
+    /// A value exceeds the model's documented support.
+    OutOfRange,
+    /// Invalid saved identity or growth topology.
+    InvalidStructure,
 }
 impl fmt::Display for WorldError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -43,7 +56,8 @@ impl From<MathError> for WorldError {
 }
 
 /// One mathematically defined world object.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Entity {
     id: EntityId,
     transform: Transform,
@@ -74,10 +88,13 @@ impl Entity {
 }
 
 /// Ordered entity storage with no removal in version 0.1.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorldState {
     seed: DeterministicSeed,
     entities: Vec<Entity>,
+    organisms: Vec<Organism>,
+    sources: Vec<ResourceSource>,
     next_id: u64,
 }
 impl WorldState {
@@ -86,6 +103,8 @@ impl WorldState {
         Self {
             seed,
             entities: Vec::new(),
+            organisms: Vec::new(),
+            sources: Vec::new(),
             next_id: 0,
         }
     }
@@ -101,6 +120,58 @@ impl WorldState {
     pub fn entity(&self, id: EntityId) -> Option<&Entity> {
         self.entities.iter().find(|e| e.id == id)
     }
+    /// Organisms in stable allocation order.
+    pub fn organisms(&self) -> &[Organism] {
+        &self.organisms
+    }
+    /// Resource sources in stable allocation order.
+    pub fn sources(&self) -> &[ResourceSource] {
+        &self.sources
+    }
+    /// Mutable organisms; mutation is limited to validated growth methods.
+    pub fn organisms_mut(&mut self) -> &mut [Organism] {
+        &mut self.organisms
+    }
+    /// Finds a source for a typed environmental event.
+    pub fn source_mut(&mut self, id: EntityId) -> Result<&mut ResourceSource, WorldError> {
+        self.sources
+            .iter_mut()
+            .find(|source| source.id() == id)
+            .ok_or(WorldError::UnknownEntity)
+    }
+    /// Adds a rooted organism with one stable root node.
+    pub fn spawn_organism(
+        &mut self,
+        root: Vec3,
+        parameters: GrowthParameters,
+    ) -> Result<EntityId, WorldError> {
+        if self.organisms.len() == MAX_ORGANISMS {
+            return Err(WorldError::Capacity);
+        }
+        let next = self.next_id.checked_add(1).ok_or(WorldError::IdExhausted)?;
+        let id = EntityId(self.next_id);
+        let organism = Organism::new(id, root, parameters)?;
+        self.organisms.push(organism);
+        self.next_id = next;
+        Ok(id)
+    }
+    /// Adds a continuous resource source.
+    pub fn spawn_source(
+        &mut self,
+        position: Vec3,
+        radius: f64,
+        strength: f64,
+    ) -> Result<EntityId, WorldError> {
+        if self.sources.len() == MAX_SOURCES {
+            return Err(WorldError::Capacity);
+        }
+        let next = self.next_id.checked_add(1).ok_or(WorldError::IdExhausted)?;
+        let id = EntityId(self.next_id);
+        let source = ResourceSource::new(id, position, radius, strength)?;
+        self.sources.push(source);
+        self.next_id = next;
+        Ok(id)
+    }
     /// Adds a growing sphere. Growth must be finite and nonnegative.
     pub fn spawn_sphere(
         &mut self,
@@ -108,6 +179,11 @@ impl WorldState {
         transform: Transform,
         growth_per_second: f64,
     ) -> Result<EntityId, WorldError> {
+        if self.entities.len() == MAX_SPHERES {
+            return Err(WorldError::Capacity);
+        }
+        Sphere::new(sphere.radius())?;
+        Transform::new(transform.translation(), transform.scale())?;
         if !growth_per_second.is_finite() {
             return Err(MathError::NonFinite.into());
         }
@@ -130,8 +206,55 @@ impl WorldState {
         if radii.len() != self.entities.len() {
             return Err(WorldError::LengthMismatch);
         }
+        for sphere in radii {
+            Sphere::new(sphere.radius())?;
+        }
         for (entity, sphere) in self.entities.iter_mut().zip(radii) {
             entity.sphere = *sphere;
+        }
+        Ok(())
+    }
+    /// Validates every invariant after deserialization, before a loaded world is accepted.
+    pub fn validate(&self) -> Result<(), WorldError> {
+        if self.entities.len() > MAX_SPHERES
+            || self.organisms.len() > MAX_ORGANISMS
+            || self.sources.len() > MAX_SOURCES
+        {
+            return Err(WorldError::Capacity);
+        }
+        let count = self.entities.len() + self.organisms.len() + self.sources.len();
+        if self.next_id != count as u64 {
+            return Err(WorldError::InvalidStructure);
+        }
+        let mut seen = vec![false; count];
+        for id in self
+            .entities
+            .iter()
+            .map(|e| e.id)
+            .chain(self.organisms.iter().map(Organism::id))
+            .chain(self.sources.iter().map(ResourceSource::id))
+        {
+            let index = usize::try_from(id.value()).map_err(|_| WorldError::InvalidStructure)?;
+            if index >= count || seen[index] {
+                return Err(WorldError::InvalidStructure);
+            }
+            seen[index] = true;
+        }
+        for entity in &self.entities {
+            Sphere::new(entity.sphere.radius())?;
+            Transform::new(entity.transform.translation(), entity.transform.scale())?;
+            if !entity.growth_per_second.is_finite() {
+                return Err(MathError::NonFinite.into());
+            }
+            if entity.growth_per_second < 0.0 {
+                return Err(MathError::NonPositive.into());
+            }
+        }
+        for organism in &self.organisms {
+            organism.validate()?;
+        }
+        for source in &self.sources {
+            source.validate()?;
         }
         Ok(())
     }

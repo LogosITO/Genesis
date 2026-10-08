@@ -13,4 +13,4 @@ hero:
       variant: minimal
 ---
 
-**Experimental / Research Stage.** The Rust foundation includes an optional First Light GPU viewport for analytic spheres and boxes. The world model remains independent of the renderer. There is no editor or production performance claim.
+**Experimental / Research Stage.** The Rust foundation includes an optional First Light GPU viewport and a First Life growth prototype driven by a continuous resource field. The world model remains independent of the renderer. There is no editor, validated biology, or production performance claim.

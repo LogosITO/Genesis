@@ -1,5 +1,6 @@
 //! Analytic fields with explicit guarantees. CSG is a sign field, not an exact SDF.
 
+use serde::{Deserialize, Serialize};
 use spatial_math::{MathError, Transform, Vec3};
 
 /// A scalar sample with no inside/outside semantics.
@@ -98,7 +99,8 @@ impl Gradient {
 /// let sphere = Sphere::new(2.0).unwrap();
 /// assert_eq!(sphere.sample(Vec3::ZERO).unwrap(), -2.0);
 /// ```
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Sphere {
     radius: f64,
 }

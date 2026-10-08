@@ -17,8 +17,10 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
-use world_simulation::{SimulationStep, SimulationTime, advance};
-use world_state::{DeterministicSeed, WorldState};
+use world_simulation::{
+    EnvironmentEvent, EnvironmentEventKind, SimulationStep, SimulationTime, advance, advance_life,
+};
+use world_state::{DeterministicSeed, EntityId, GrowthParameters, WorldState};
 
 const STEP: Duration = Duration::from_nanos(16_666_667);
 
@@ -133,15 +135,24 @@ struct App {
     stats_since: Instant,
     frames: u32,
     cpu_total: Duration,
+    life: bool,
+    source_id: Option<EntityId>,
+    pending_move: bool,
 }
 impl App {
-    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(life: bool) -> Result<Self, Box<dyn std::error::Error>> {
         let mut world = WorldState::new(DeterministicSeed(7));
-        world.spawn_sphere(
-            Sphere::new(0.7)?,
-            Transform::new(v(-1.4, 0.0, 0.0), 1.0)?,
-            0.12,
-        )?;
+        let source_id = if life {
+            world.spawn_organism(Vec3::ZERO, GrowthParameters::new(0.14, 0.32, 0.12, 1.0)?)?;
+            Some(world.spawn_source(v(0.0, 2.0, 0.0), 4.0, 1.0)?)
+        } else {
+            world.spawn_sphere(
+                Sphere::new(0.7)?,
+                Transform::new(v(-1.4, 0.0, 0.0), 1.0)?,
+                0.12,
+            )?;
+            None
+        };
         Ok(Self {
             graphics: None,
             lost: Arc::new(AtomicBool::new(false)),
@@ -157,16 +168,21 @@ impl App {
             stats_since: Instant::now(),
             frames: 0,
             cpu_total: Duration::ZERO,
+            life,
+            source_id,
+            pending_move: false,
         })
     }
     fn scene(&self) -> Result<Scene, Box<dyn std::error::Error>> {
         let mut scene = Scene::from_world(&self.world)?;
-        scene.push(Primitive::axis_aligned_box(
-            1,
-            AxisAlignedBox::new(v(0.9, 0.9, 0.9))?,
-            Transform::new(v(1.2, 0.0, 0.0), 1.0)?,
-            [0.95, 0.48, 0.22],
-        )?)?;
+        if !self.life {
+            scene.push(Primitive::axis_aligned_box(
+                1,
+                AxisAlignedBox::new(v(0.9, 0.9, 0.9))?,
+                Transform::new(v(1.2, 0.0, 0.0), 1.0)?,
+                [0.95, 0.48, 0.22],
+            )?)?;
+        }
         Ok(scene)
     }
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
@@ -182,11 +198,41 @@ impl App {
             self.accumulator += elapsed.min(Duration::from_millis(250));
             let mut steps = 0;
             while self.accumulator >= STEP && steps < 4 {
-                if let Err(error) = advance(&mut self.world, &mut self.time, self.step) {
+                let events = if self.life && self.pending_move {
+                    let source_id = self.source_id.expect("life source exists");
+                    let source = self
+                        .world
+                        .sources()
+                        .iter()
+                        .find(|s| s.id() == source_id)
+                        .expect("life source exists");
+                    let position = if source.position().x() == 0.0 {
+                        v(2.0, 1.0, 0.0)
+                    } else {
+                        v(0.0, 2.0, 0.0)
+                    };
+                    vec![EnvironmentEvent {
+                        tick: self.time.ticks() + 1,
+                        order: 0,
+                        kind: EnvironmentEventKind::MoveSource {
+                            id: source_id,
+                            position,
+                        },
+                    }]
+                } else {
+                    Vec::new()
+                };
+                let result = if self.life {
+                    advance_life(&mut self.world, &mut self.time, self.step, &events)
+                } else {
+                    advance(&mut self.world, &mut self.time, self.step)
+                };
+                if let Err(error) = result {
                     eprintln!("simulation failed: {error}");
                     event_loop.exit();
                     return;
                 }
+                self.pending_move = false;
                 self.accumulator -= STEP;
                 steps += 1;
             }
@@ -208,12 +254,25 @@ impl App {
         if size.width == 0 || size.height == 0 {
             return;
         }
+        let height = if self.life {
+            self.world.organisms()[0]
+                .nodes()
+                .last()
+                .expect("root exists")
+                .position()
+                .y()
+                .max(2.0)
+        } else {
+            0.0
+        };
+        let target = v(0.0, height / 2.0, 0.0);
+        let distance = (height * 1.1).max(7.0);
         let origin = v(
-            self.yaw.sin() * 7.0,
-            self.elevation.sin() * 7.0,
-            -self.yaw.cos() * self.elevation.cos() * 7.0,
+            self.yaw.sin() * distance,
+            target.y() + self.elevation.sin() * distance,
+            -self.yaw.cos() * self.elevation.cos() * distance,
         );
-        let camera = match Camera::look_at(origin, Vec3::ZERO, v(0.0, 1.0, 0.0), 0.95) {
+        let camera = match Camera::look_at(origin, target, v(0.0, 1.0, 0.0), 0.95) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("camera failed: {e}");
@@ -280,8 +339,20 @@ impl App {
                 Ok(None) => "unavailable".to_string(),
                 Err(error) => format!("error:{error}"),
             };
+            let growth = if self.life {
+                format!(
+                    "nodes={}",
+                    self.world
+                        .organisms()
+                        .iter()
+                        .map(|organism| organism.nodes().len())
+                        .sum::<usize>()
+                )
+            } else {
+                format!("radius={:.4}", self.world.entities()[0].sphere().radius())
+            };
             eprintln!(
-                "fps={:.1} cpu_submit_ms={:.2} gpu_compute_ms={} resolution={}x{} objects={} max_tests_per_frame={} ticks={} radius={:.4} backend={:?}",
+                "fps={:.1} cpu_submit_ms={:.2} gpu_compute_ms={} resolution={}x{} objects={} max_tests_per_frame={} ticks={} {} backend={:?}",
                 f64::from(self.frames) / seconds,
                 self.cpu_total.as_secs_f64() * 1000.0 / f64::from(self.frames),
                 gpu_time,
@@ -290,7 +361,7 @@ impl App {
                 scene.primitives().len(),
                 u64::from(size.width) * u64::from(size.height) * scene.primitives().len() as u64,
                 self.time.ticks(),
-                self.world.entities()[0].sphere().radius(),
+                growth,
                 graphics.adapter.get_info().backend
             );
             self.stats_since = now;
@@ -306,7 +377,11 @@ impl ApplicationHandler for App {
         }
         let window = match event_loop.create_window(
             Window::default_attributes()
-                .with_title("First Light — Experimental / Research Stage")
+                .with_title(if self.life {
+                    "First Life — Experimental / Research Stage"
+                } else {
+                    "First Light — Experimental / Research Stage"
+                })
                 .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0)),
         ) {
             Ok(window) => Arc::new(window),
@@ -350,6 +425,7 @@ impl ApplicationHandler for App {
                             self.previous = Instant::now();
                         }
                         KeyCode::KeyN => self.normals = !self.normals,
+                        KeyCode::KeyM if self.life => self.pending_move = true,
                         KeyCode::KeyA | KeyCode::ArrowLeft => self.yaw -= 0.15,
                         KeyCode::KeyD | KeyCode::ArrowRight => self.yaw += 0.15,
                         KeyCode::KeyW | KeyCode::ArrowUp => {
@@ -373,10 +449,17 @@ impl ApplicationHandler for App {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let life = match std::env::args().nth(1).as_deref() {
+        Some("--life") => true,
+        None => false,
+        Some(_) => return Err("usage: first-light [--life]".into()),
+    };
     eprintln!(
-        "First Light controls: A/D or Left/Right orbit; W/S or Up/Down tilt; Space pause; N normals; Esc exit"
+        "{} controls: A/D or Left/Right orbit; W/S or Up/Down tilt; Space pause; N normals; {}Esc exit",
+        if life { "First Life" } else { "First Light" },
+        if life { "M move resource source; " } else { "" },
     );
     let event_loop = EventLoop::new()?;
-    event_loop.run_app(&mut App::new()?)?;
+    event_loop.run_app(&mut App::new(life)?)?;
     Ok(())
 }
