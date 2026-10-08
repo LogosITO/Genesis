@@ -12,7 +12,15 @@
     "crates/simulation": { "component": "world-simulation" },
     "crates/runtime": { "component": "world-runtime" },
     "crates/renderer": { "component": "analytic-renderer" },
-    "examples/hello-world": { "component": "hello-world" },
-    "examples/first-light": { "component": "first-light" }
+    "examples/hello-world": {
+      "component": "hello-world",
+      "exclude-paths": ["examples/hello-world"],
+      "skip-github-release": true
+    },
+    "examples/first-light": {
+      "component": "first-light",
+      "exclude-paths": ["examples/first-light"],
+      "skip-github-release": true
+    }
   }
 }

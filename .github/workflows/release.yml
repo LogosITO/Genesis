@@ -20,12 +20,12 @@ jobs:
           app-id: ${{ vars.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           permission-contents: write
+          permission-issues: write
           permission-pull-requests: write
       - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
         with:
           token: ${{ steps.app.outputs.token }}
           skip-github-release: true
-          skip-labeling: true
   publish:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.RELEASE_APP_ID != ''
     environment: release
@@ -36,11 +36,11 @@ jobs:
         uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf # v2.2.1
         with:
           app-id: ${{ vars.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          private-key: ${{ secrets.RELEASE_PUBLISH_APP_PRIVATE_KEY }}
           permission-contents: write
+          permission-issues: write
           permission-pull-requests: write
       - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
         with:
           token: ${{ steps.app.outputs.token }}
           skip-github-pull-request: true
-          skip-labeling: true
