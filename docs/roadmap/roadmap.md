@@ -35,9 +35,13 @@ CPU analytic picking maps snapshot primitives to stable world targets. A tick-in
 
 One persisted kinematic sphere, tick-indexed velocity, analytic swept contact against spheres and capsules, CPU-only collision BVH, pruning-aware movement, version-4 saves, GPU body readback, and repeated prune/regrowth tests. See the [contact contract](../specifications/kinematic-contact.md) and [local measurements](../research/first-contact-measurements.md). AABB sweep, exact union contact, sliding, and cross-platform bitwise replay remain open.
 
-## Foundation 0.8 candidate
+## Foundation 0.8 — First Ecology, experimental local slice
 
-Investigate a shared CPU spatial-index contract or cached contact BVH to avoid rebuilding unchanged geometry, then test contact normals and penetration bounds near seams on Windows and Linux. Compare conservative collision against independent geometric references before adding more collider classes.
+Finite reservoirs behind analytic source fields, proportional competition among up to four authoritative organisms, per-source replenishment and withdrawal ledgers, version-5 saves, six headless scenarios, two-organism viewport, contact/pruning integration, and an offscreen GPU readback. See the [allocation contract](../specifications/resource-allocation.md), [ecosystem state](../specifications/ecosystem-state.md), and [local experiment](../research/first-ecology-experiment.md). This is a bounded toy ecosystem, not validated biology. Manual native interaction, cross-platform replay, production-scale phase timings, and full-frame ecology performance remain open.
+
+## Next candidate
+
+Investigate a cached contact BVH keyed to actual geometry changes, then independently check contact normals and penetration bounds near overlapping-primitive seams on Windows and Linux. Compare cache cost and correctness against full rebuild before adopting it.
 
 ## Later research
-Growth grammars and L-systems, finite resource budgets, destruction and recovery rules, broader physical interaction, embedding/FFI, standalone UI, and authored language. Sequence and scope will follow experiments, not promises.
+Growth grammars and L-systems, resource transport and recycling, destruction and recovery rules, broader physical interaction, embedding/FFI, standalone UI, and authored language. Sequence and scope will follow experiments, not promises.

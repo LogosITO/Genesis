@@ -409,7 +409,13 @@ impl Scene {
             primitive.target = Some(SemanticTarget::Sphere(entity.id()));
             scene.push(primitive)?;
         }
-        for organism in world.organisms() {
+        for (organism_index, organism) in world.organisms().iter().enumerate() {
+            let (node_color, connection_color) = [
+                ([0.30, 0.85, 0.42], [0.22, 0.65, 0.34]),
+                ([0.30, 0.68, 0.98], [0.19, 0.49, 0.78]),
+                ([0.96, 0.57, 0.28], [0.75, 0.39, 0.19]),
+                ([0.78, 0.50, 0.95], [0.57, 0.34, 0.73]),
+            ][organism_index];
             for node in organism.nodes() {
                 let id = u32::try_from(scene.primitives.len())
                     .map_err(|_| RenderError::TooManyObjects)?;
@@ -419,7 +425,7 @@ impl Scene {
                         .map_err(|_| RenderError::InvalidInput("invalid node radius"))?,
                     Transform::new(node.position(), 1.0)
                         .map_err(|_| RenderError::InvalidInput("invalid node position"))?,
-                    [0.30, 0.85, 0.42],
+                    node_color,
                 )?;
                 primitive.target = Some(SemanticTarget::GrowthNode {
                     organism: organism.id(),
@@ -441,7 +447,7 @@ impl Scene {
                         u32::try_from(scene.primitives.len())
                             .map_err(|_| RenderError::TooManyObjects)?,
                         capsule,
-                        [0.22, 0.65, 0.34],
+                        connection_color,
                     )?;
                     primitive.target = Some(SemanticTarget::Connection {
                         organism: organism.id(),
@@ -1017,6 +1023,31 @@ mod tests {
                 .intersect(ray(v(1.0, 0.0, -2.0), v(0.0, 0.0, 1.0)))
                 .is_some()
         );
+    }
+
+    #[test]
+    fn distinct_organisms_keep_identity_and_visual_color() {
+        use world_state::{DeterministicSeed, GrowthParameters};
+        let mut world = WorldState::new(DeterministicSeed(21));
+        let parameters = GrowthParameters::new(0.1, 0.3, 0.2, 1.0).unwrap();
+        let first = world.spawn_organism(v(-1.0, 0.0, 0.0), parameters).unwrap();
+        let second = world.spawn_organism(v(1.0, 0.0, 0.0), parameters).unwrap();
+        let scene = Scene::from_world(&world).unwrap();
+        assert_eq!(
+            scene.primitives()[0].target(),
+            Some(SemanticTarget::GrowthNode {
+                organism: first,
+                node: 0
+            })
+        );
+        assert_eq!(
+            scene.primitives()[1].target(),
+            Some(SemanticTarget::GrowthNode {
+                organism: second,
+                node: 0
+            })
+        );
+        assert_ne!(scene.primitives()[0].color(), scene.primitives()[1].color());
     }
 
     #[test]

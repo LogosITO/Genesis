@@ -17,4 +17,6 @@ GPU-окно запускается через `cargo run -p first-light --locke
 
 Для проверки контакта запустите `cargo run -p first-life --locked -- contact`, `contact-pruned` или `contact-replay`. В окне First Life клавиши **I/J/K/L** двигают оранжевое тело. [Контракт контакта](../reference/specifications/kinematic-contact/) описывает поддерживаемую геометрию и численные ограничения; технический текст пока на английском.
 
+Для проверки конкуренции за конечный ресурс запустите `cargo run -p first-life --locked -- ecology competition`; также доступны `isolated`, `separated`, `environment-change`, `pruning` и `replay`. Окно `--life` показывает два организма разных цветов, число узлов и запас источника. См. [правила распределения](../reference/specifications/resource-allocation/) и [состояние экосистемы](../reference/specifications/ecosystem-state/); подробная техническая документация пока на английском.
+
 Foundation 0.5 добавляет ограниченное ветвление и аналитические соединения-капсулы. Команда `cargo run -p first-life --locked -- scale --measure` измеряет локальное масштабирование CPU. Ограничения и результаты приведены в [контракте капсулы](../reference/specifications/capsule/) и [записи измерений First Structure](../reference/research/first-structure-measurements/). Если мир превышает бюджет GPU-снимка, программа сообщает об этом явно.

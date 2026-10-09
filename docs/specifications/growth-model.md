@@ -20,4 +20,4 @@ Rule parameters must be finite and positive: node radius and segment length ≤1
 
 ## Open questions
 
-Real resource transport, collision avoidance, branch orientation independent of world X, and scalable visibility require separate experiments. Foundation 0.7 adds [branch pruning](first-interaction.md); the current rule can still place branches close together or overlapping, and no biological or structural validity is claimed.
+Foundation 0.8 retains this structural growth rule and adds [finite proportional source allocation](resource-allocation.md). In finite mode, shared spendable budget gains exactly the units allocated to that organism; local node energy is a maturity signal and is not summed as conserved energy. The unlimited-source mode above remains available for older saves and examples. Real resource transport, collision avoidance, branch orientation independent of world X, and scalable visibility require separate experiments. Foundation 0.7 adds [branch pruning](first-interaction.md); the current rule can still place branches close together or overlapping, and no biological or structural validity is claimed.

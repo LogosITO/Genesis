@@ -1,6 +1,6 @@
 # Genesis
 
-**Experimental / Research Stage.** Genesis stores analytic parameters, transforms, growth rules, and one kinematic body as authoritative world state; no mesh or voxel geometry is stored. Foundation 0.7.1 adds reproducible sphere/capsule contact: tick-indexed movement stops at a branch, pruning changes that path, and version-4 saves retain the result. CPU math and simulation remain testable without a GPU. Contact with overlapping primitives is experimental and not a watertight union or general physics engine.
+**Experimental / Research Stage.** Genesis stores analytic parameters, transforms, growth rules, finite resource reservoirs, and one kinematic body as authoritative world state; no mesh or voxel geometry is stored. Foundation 0.8 lets bounded organisms compete for shared finite sources and persists the result in version-5 saves. CPU math, simulation, and contact remain testable without a GPU. This is neither validated biology nor a general physics engine.
 
 ## Run
 
@@ -29,12 +29,19 @@ cargo run -p first-life --locked -- pruning-replay
 cargo run -p first-life --locked -- contact
 cargo run -p first-life --locked -- contact-pruned
 cargo run -p first-life --locked -- contact-replay
+cargo run -p first-life --locked -- ecology isolated
+cargo run -p first-life --locked -- ecology competition
+cargo run -p first-life --locked -- ecology separated
+cargo run -p first-life --locked -- ecology environment-change
+cargo run -p first-life --locked -- ecology pruning
+cargo run -p first-life --locked -- ecology replay
+cargo run --release -p first-life --locked -- ecology measure
 cargo run -p first-life --locked -- baseline --measure
 cargo run -p first-life --locked -- scale --measure
 cargo run -p first-light --locked -- --life
 ```
 
-Headless scenarios print JSON summaries after 120 fixed ticks. `changed` moves the resource source at tick 40; `limited` supplies too little resource to create a child. `pruning` cuts child 1 at tick 60; `pruning-replay` saves at tick 80, reloads, and continues. `contact` moves the body toward a branch; `contact-pruned` removes that branch before movement; `contact-replay` saves midway and resumes. `--measure` adds local timing diagnostics on stderr. `scale --measure` prints controlled CPU step and snapshot medians. In native First Life mode, **left-click** selects a node or connection, **P** queues its cut, **M** moves the source, **I/J/K/L** move the body, and **Space** pauses or resumes. The title and stderr show tick, selection, and contact. Ambiguous picks cannot authorize a cut. See the [contact contract](docs/specifications/kinematic-contact.md), [interaction contract](docs/specifications/first-interaction.md), [save contract](docs/specifications/world-persistence.md), and [replay contract](docs/specifications/replay-determinism.md).
+The original headless scenarios print JSON after 120 fixed ticks. `contact` stops at a branch, `contact-pruned` passes through its cleared path, and `contact-replay` verifies save/load. The six `ecology` scenarios print JSON after 40 ticks with organism IDs, topology, source balances, allocation, and a state fingerprint. `ecology measure` reports local release-profile CPU timings for one, two, and four organisms. In native First Life mode, two differently colored organisms share one finite source; the title shows their node counts, remaining stock, allocation, and tick. **Left-click** selects a node or connection, **P** queues its cut, **M** moves the source, **I/J/K/L** move the body, and **Space** pauses or resumes. Ambiguous picks cannot authorize a cut. See the [allocation contract](docs/specifications/resource-allocation.md), [ecosystem state](docs/specifications/ecosystem-state.md), [local experiment](docs/research/first-ecology-experiment.md), [contact contract](docs/specifications/kinematic-contact.md), and [save contract](docs/specifications/world-persistence.md).
 
 ```sh
 cargo fmt --all -- --check
@@ -49,6 +56,6 @@ On a machine with a compatible GPU, run the additional offscreen parity and reso
 cargo test -p analytic-renderer --test gpu --locked -- --ignored --nocapture --test-threads=1
 ```
 
-The [architecture](docs/architecture/overview.md), [renderer design](docs/architecture/renderer.md), [contact specification](docs/specifications/kinematic-contact.md), [contact measurements](docs/research/first-contact-measurements.md), [spatial acceleration](docs/architecture/spatial-acceleration.md), [CPU/GPU contract](docs/specifications/cpu-gpu-contract.md), [field contract](docs/specifications/mathematical-fields.md), [release policy](docs/architecture/releases.md), [roadmap](docs/roadmap/roadmap.md), and [research ledger](docs/research/references.md) are canonical technical documents. The [site](site/README.md) imports these files instead of maintaining copies.
+The [architecture](docs/architecture/overview.md), [renderer design](docs/architecture/renderer.md), [resource allocation](docs/specifications/resource-allocation.md), [contact specification](docs/specifications/kinematic-contact.md), [spatial acceleration](docs/architecture/spatial-acceleration.md), [CPU/GPU contract](docs/specifications/cpu-gpu-contract.md), [field contract](docs/specifications/mathematical-fields.md), [release policy](docs/architecture/releases.md), [roadmap](docs/roadmap/roadmap.md), and [research ledger](docs/research/references.md) are canonical technical documents. The [site](site/README.md) imports these files instead of maintaining copies.
 
 License: MIT OR Apache-2.0.

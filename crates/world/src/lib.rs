@@ -9,8 +9,9 @@ mod body;
 mod life;
 pub use body::{BodyContact, ColliderId, KinematicBody, MAX_BODY_SPEED};
 pub use life::{
-    CONNECTION_RADIUS_RATIO, GrowthNode, GrowthParameters, MAX_NODE_IDS, MAX_NODES, MAX_ORGANISMS,
-    MAX_SOURCES, MAX_SPHERES, Organism, ResourceSource,
+    CONNECTION_RADIUS_RATIO, FiniteReservoir, GrowthNode, GrowthParameters, MAX_NODE_IDS,
+    MAX_NODES, MAX_ORGANISMS, MAX_SOURCES, MAX_SPHERES, Organism, OrganismLifecycle,
+    ResourceSource,
 };
 
 /// A stable identifier for the lifetime of a world. IDs are never reused.
@@ -137,6 +138,10 @@ impl WorldState {
     pub fn sources(&self) -> &[ResourceSource] {
         &self.sources
     }
+    /// Mutable sources; changes remain subject to validated source methods.
+    pub fn sources_mut(&mut self) -> &mut [ResourceSource] {
+        &mut self.sources
+    }
     /// The sole kinematic body, if present.
     pub fn body(&self) -> Option<&KinematicBody> {
         self.body.as_ref()
@@ -207,12 +212,50 @@ impl WorldState {
         radius: f64,
         strength: f64,
     ) -> Result<EntityId, WorldError> {
+        if self
+            .sources
+            .iter()
+            .any(|source| source.reservoir().is_some())
+        {
+            return Err(WorldError::InvalidStructure);
+        }
         if self.sources.len() == MAX_SOURCES {
             return Err(WorldError::Capacity);
         }
         let next = self.next_id.checked_add(1).ok_or(WorldError::IdExhausted)?;
         let id = EntityId(self.next_id);
         let source = ResourceSource::new(id, position, radius, strength)?;
+        self.sources.push(source);
+        self.next_id = next;
+        Ok(id)
+    }
+    /// Adds a finite resource source; a world cannot mix finite and legacy unlimited sources.
+    pub fn spawn_finite_source(
+        &mut self,
+        position: Vec3,
+        radius: f64,
+        strength: f64,
+        stored: f64,
+        capacity: f64,
+        replenish_per_tick: f64,
+    ) -> Result<EntityId, WorldError> {
+        if self
+            .sources
+            .iter()
+            .any(|source| source.reservoir().is_none())
+        {
+            return Err(WorldError::InvalidStructure);
+        }
+        if self.sources.len() == MAX_SOURCES {
+            return Err(WorldError::Capacity);
+        }
+        let next = self.next_id.checked_add(1).ok_or(WorldError::IdExhausted)?;
+        let id = EntityId(self.next_id);
+        let source = ResourceSource::new(id, position, radius, strength)?.with_reservoir(
+            stored,
+            capacity,
+            replenish_per_tick,
+        )?;
         self.sources.push(source);
         self.next_id = next;
         Ok(id)
@@ -304,6 +347,17 @@ impl WorldState {
         }
         for source in &self.sources {
             source.validate()?;
+        }
+        if self
+            .sources
+            .iter()
+            .any(|source| source.reservoir().is_some())
+            && self
+                .sources
+                .iter()
+                .any(|source| source.reservoir().is_none())
+        {
+            return Err(WorldError::InvalidStructure);
         }
         if let Some(body) = &self.body {
             body.validate()?;

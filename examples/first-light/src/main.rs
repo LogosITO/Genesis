@@ -152,8 +152,10 @@ impl App {
     fn new(life: bool) -> Result<Self, Box<dyn std::error::Error>> {
         let mut world = WorldState::new(DeterministicSeed(7));
         let source_id = if life {
-            world.spawn_organism(Vec3::ZERO, GrowthParameters::new(0.14, 0.32, 0.12, 1.0)?)?;
-            Some(world.spawn_source(v(0.0, 2.0, 0.0), 4.0, 1.0)?)
+            let parameters = GrowthParameters::new(0.14, 0.32, 0.12, 1.0)?;
+            world.spawn_organism(v(-0.6, 0.0, 0.0), parameters)?;
+            world.spawn_organism(v(0.6, 0.0, 0.0), parameters)?;
+            Some(world.spawn_finite_source(v(0.0, 2.0, 0.0), 4.0, 10.0, 0.0, 0.02, 0.02)?)
         } else {
             world.spawn_sphere(
                 Sphere::new(0.7)?,
@@ -428,9 +430,10 @@ impl App {
             return;
         }
         let height = if self.life {
-            self.world.organisms()[0]
-                .nodes()
+            self.world
+                .organisms()
                 .iter()
+                .flat_map(|organism| organism.nodes())
                 .map(|node| node.position().y())
                 .fold(2.0, f64::max)
         } else {
@@ -452,10 +455,29 @@ impl App {
             }
         };
         self.last_camera = None;
+        let ecology = if self.life {
+            let counts: Vec<_> = self
+                .world
+                .organisms()
+                .iter()
+                .map(|organism| organism.nodes().len())
+                .collect();
+            let stock = self.world.sources()[0]
+                .reservoir()
+                .expect("finite life source");
+            format!(
+                " — nodes {counts:?} — resource {:.3} (allocated {:.3})",
+                stock.stored(),
+                stock.last_allocated()
+            )
+        } else {
+            String::new()
+        };
         graphics.window.set_title(&format!(
-            "First {} — tick {} — selected {:?} — contact {:?}{}",
+            "First {} — tick {}{} — selected {:?} — contact {:?}{}",
             if self.life { "Life" } else { "Light" },
             self.time.ticks(),
+            ecology,
             self.selected,
             self.world
                 .body()

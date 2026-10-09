@@ -14,3 +14,5 @@ The [GPU BVH experiment](../reference/research/gpu-bvh-acceleration/) compares C
 The [First Interaction measurements](../reference/research/first-interaction-measurements/) record CPU picking, pruning, snapshot/BVH rebuilds, GPU changes, and deterministic save/replay outcomes. The [interaction contract](../reference/specifications/first-interaction/) defines what a selected branch means.
 
 The [First Contact measurements](../reference/research/first-contact-measurements/) compare direct and BVH collision queries, narrow phase, rebuild and full tick costs, plus contact/pruning replay outcomes. The [contact contract](../reference/specifications/kinematic-contact/) states the numerical and geometry limits.
+
+The [First Ecology experiment](../reference/research/first-ecology-experiment/) records six finite-resource scenarios, local CPU timings, replay, contact integration, and open measurement gaps.

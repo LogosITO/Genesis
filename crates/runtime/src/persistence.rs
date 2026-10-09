@@ -11,7 +11,7 @@ use std::{
 
 /// Maximum encoded save size, in bytes.
 pub const MAX_SAVE_BYTES: usize = 64 * 1024;
-const FORMAT_VERSION: u32 = 4;
+const FORMAT_VERSION: u32 = 5;
 
 /// Save and load failure; a failed load leaves an existing runtime unchanged.
 #[derive(Debug)]
@@ -52,7 +52,7 @@ struct SaveFile {
 }
 
 impl Runtime {
-    /// Encodes a validated version-4 save. JSON is for inspection, not a stable public API.
+    /// Encodes a validated version-5 save. JSON is for inspection, not a stable public API.
     pub fn save_bytes(&self) -> Result<Vec<u8>, PersistenceError> {
         self.validate()?;
         let bytes = serde_json::to_vec_pretty(&SaveFile {
@@ -72,6 +72,16 @@ impl Runtime {
         let mut save: SaveFile = serde_json::from_slice(bytes)?;
         if !(1..=FORMAT_VERSION).contains(&save.format_version) {
             return Err(PersistenceError::Version(save.format_version));
+        }
+        if save.format_version < 5
+            && save
+                .runtime
+                .world
+                .sources()
+                .iter()
+                .any(|source| source.reservoir().is_some())
+        {
+            return Err(PersistenceError::InvalidState("finite source requires v5"));
         }
         if save.format_version < 3 {
             save.runtime.world.migrate_legacy_node_ids();

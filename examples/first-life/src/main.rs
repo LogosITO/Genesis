@@ -7,6 +7,8 @@ use world_runtime::{PersistenceError, Runtime};
 use world_simulation::{EnvironmentEventKind, SimulationStep};
 use world_state::{DeterministicSeed, GrowthNode, GrowthParameters, WorldState};
 
+mod ecology;
+
 const TICKS: u64 = 120;
 
 fn point(x: f64, y: f64, z: f64) -> Vec3 {
@@ -233,6 +235,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         results.push(scale_sample(4, 48)?);
         println!("{}", serde_json::Value::Array(results));
+        return Ok(());
+    }
+    if args.first().is_some_and(|arg| arg == "ecology") {
+        if args.len() == 2 && args[1] == "measure" {
+            println!("{}", ecology::measure()?);
+            return Ok(());
+        }
+        if args.len() != 2 {
+            return Err("usage: first-life ecology <scenario>".into());
+        }
+        let (_, summary) = ecology::run(&args[1])?;
+        println!("{summary}");
         return Ok(());
     }
     let name = args.first().map(String::as_str).unwrap_or("baseline");

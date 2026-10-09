@@ -1829,6 +1829,74 @@ fn gpu_body_snapshot_follows_authoritative_fixed_step() {
 
 #[test]
 #[ignore = "requires a compatible native GPU; run explicitly"]
+fn gpu_ecology_snapshot_matches_authoritative_growth() {
+    use world_simulation::{SimulationStep, SimulationTime, advance_life};
+    let mut world = WorldState::new(DeterministicSeed(33));
+    let parameters = GrowthParameters::new(0.14, 0.32, 0.5, 1.0).unwrap();
+    world.spawn_organism(v(-0.6, 0.0, 0.0), parameters).unwrap();
+    world.spawn_organism(v(0.6, 0.0, 0.0), parameters).unwrap();
+    world
+        .spawn_finite_source(v(0.0, 2.0, 0.0), 4.0, 10.0, 0.0, 0.2, 0.2)
+        .unwrap();
+    let before = Scene::from_world(&world).unwrap();
+    let mut time = SimulationTime::default();
+    for _ in 0..10 {
+        advance_life(
+            &mut world,
+            &mut time,
+            SimulationStep::new(0.1).unwrap(),
+            &[],
+        )
+        .unwrap();
+    }
+    let after = Scene::from_world(&world).unwrap();
+    assert!(after.primitives().len() > before.primitives().len());
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        ..Default::default()
+    }))
+    .expect("GPU adapter required");
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let renderer =
+        pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+    let camera =
+        Camera::look_at(v(0.0, 1.5, -6.0), v(0.0, 0.8, 0.0), v(0.0, 1.0, 0.0), 0.8).unwrap();
+    const SIZE: u32 = 512;
+    let render = |scene: &Scene, mode| {
+        let image = renderer
+            .draw_with_traversal(
+                &device,
+                &queue,
+                scene,
+                camera,
+                mode,
+                DrawOptions {
+                    size: [SIZE, SIZE],
+                    normal_debug: false,
+                    surface: None,
+                    timer: None,
+                },
+            )
+            .unwrap();
+        read_rgb(&device, &queue, &image, SIZE, SIZE)
+    };
+    let old = render(&before, GpuTraversal::Direct);
+    let direct = render(&after, GpuTraversal::Direct);
+    let bvh = render(&after, GpuTraversal::Bvh);
+    assert_ne!(old, direct);
+    assert_eq!(direct, bvh);
+    if let Ok(path) = std::env::var("GENESIS_ECOLOGY_CAPTURE") {
+        let mut ppm = format!("P6\n{SIZE} {SIZE}\n255\n").into_bytes();
+        ppm.extend_from_slice(&direct);
+        std::fs::write(path, ppm).unwrap();
+    }
+}
+
+#[test]
+#[ignore = "requires a compatible native GPU; run explicitly"]
 fn gpu_bvh_offscreen_image_parity() {
     let instance = wgpu::Instance::default();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {

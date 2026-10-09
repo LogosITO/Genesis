@@ -2,6 +2,8 @@
 
 Foundation 0.7.1 draws the kinematic sphere from the same authoritative body state used by CPU contact. The source marker is visible but is not a physical collider. See the [contact specification](../specifications/kinematic-contact.md).
 
+Foundation 0.8 assigns each of the four bounded organism slots a distinct node/connection color. The First Life viewport shows two organisms and source ledger values in its title. The colors and marker do not determine resource allocation; the source remains [authoritative mathematical state](../specifications/ecosystem-state.md).
+
 ## First Structure extension
 
 `Scene::from_world` also copies every parent-child edge as an analytic capsule with stable connection identity. Its endpoints come from `WorldState`; the renderer calculates no growth. CPU and WGSL intersect capsule sides and hemispherical caps directly. Overlapping node spheres and capsules are separate nearest-hit solids and do not form a tested watertight union. See the [capsule contract](../specifications/capsule.md) and [growth model](../specifications/growth-model.md).

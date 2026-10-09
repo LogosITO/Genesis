@@ -315,10 +315,10 @@ mod tests {
         let good = runtime.save_bytes().unwrap();
         let original = runtime.clone();
         let mut value: serde_json::Value = serde_json::from_slice(&good).unwrap();
-        value["format_version"] = 5.into();
+        value["format_version"] = 6.into();
         assert!(matches!(
             runtime.load_into(&serde_json::to_vec(&value).unwrap()),
-            Err(PersistenceError::Version(5))
+            Err(PersistenceError::Version(6))
         ));
         value["format_version"] = 1.into();
         value["runtime"]["world"]["organisms"][0]
@@ -591,6 +591,165 @@ mod tests {
             Runtime::load_bytes(&serde_json::to_vec(&json).unwrap()).unwrap(),
             legacy
         );
+    }
+
+    #[test]
+    fn finite_resource_save_replay_and_v4_legacy_migration() {
+        let mut world = WorldState::new(DeterministicSeed(32));
+        world
+            .spawn_organism(
+                Vec3::ZERO,
+                GrowthParameters::new(0.1, 0.3, 0.5, 1.0).unwrap(),
+            )
+            .unwrap();
+        let source = world
+            .spawn_finite_source(Vec3::new(0.0, 2.0, 0.0).unwrap(), 4.0, 10.0, 0.0, 0.2, 0.2)
+            .unwrap();
+        let mut continuous = Runtime::new(world, SimulationStep::new(0.1).unwrap());
+        continuous
+            .schedule(
+                15,
+                EnvironmentEventKind::SetSourceActive {
+                    id: source,
+                    active: false,
+                },
+            )
+            .unwrap();
+        for _ in 0..10 {
+            continuous.tick().unwrap();
+        }
+        let saved = continuous.save_bytes().unwrap();
+        let mut mislabeled: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+        mislabeled["format_version"] = 4.into();
+        assert!(Runtime::load_bytes(&serde_json::to_vec(&mislabeled).unwrap()).is_err());
+        let mut resumed = Runtime::load_bytes(&saved).unwrap();
+        for _ in 10..30 {
+            continuous.tick().unwrap();
+            resumed.tick().unwrap();
+        }
+        assert_eq!(continuous, resumed);
+        let mut bad: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+        bad["runtime"]["world"]["sources"][0]["reservoir"]["stored"] = (-1.0).into();
+        let before = resumed.clone();
+        assert!(
+            resumed
+                .load_into(&serde_json::to_vec(&bad).unwrap())
+                .is_err()
+        );
+        assert_eq!(resumed, before);
+
+        let (legacy, _) = fixture();
+        let mut old: serde_json::Value =
+            serde_json::from_slice(&legacy.save_bytes().unwrap()).unwrap();
+        old["format_version"] = 4.into();
+        old["runtime"]["world"]["sources"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("reservoir");
+        assert_eq!(
+            Runtime::load_bytes(&serde_json::to_vec(&old).unwrap()).unwrap(),
+            legacy
+        );
+    }
+
+    #[test]
+    fn finite_ecology_growth_and_pruning_refresh_body_colliders() {
+        use world_simulation::contact::{ContactScene, SweepOutcome};
+        let mut world = WorldState::new(DeterministicSeed(34));
+        let parameters = GrowthParameters::new(0.14, 0.32, 0.1, 1.0).unwrap();
+        let organism = world
+            .spawn_organism(Vec3::new(0.6, 0.0, 0.0).unwrap(), parameters)
+            .unwrap();
+        world
+            .spawn_organism(Vec3::new(-0.6, 0.0, 0.0).unwrap(), parameters)
+            .unwrap();
+        let source = world
+            .spawn_finite_source(Vec3::new(0.0, 2.0, 0.0).unwrap(), 4.0, 10.0, 0.0, 0.2, 0.2)
+            .unwrap();
+        let start = Vec3::new(0.6, 0.32, -1.0).unwrap();
+        let movement = Vec3::new(0.0, 0.0, 2.0).unwrap();
+        let body = world.spawn_body(start, 0.1).unwrap();
+        let mut runtime = Runtime::new(world, SimulationStep::new(0.1).unwrap());
+        runtime.tick().unwrap();
+        let grown = ContactScene::from_world(runtime.world()).unwrap();
+        assert!(matches!(
+            grown.sweep(start, movement, 0.1).unwrap(),
+            SweepOutcome::Hit(_)
+        ));
+        assert_eq!(
+            grown.sweep(start, movement, 0.1),
+            grown.sweep_direct(start, movement, 0.1)
+        );
+        runtime
+            .schedule(2, EnvironmentEventKind::PruneBranch { organism, child: 1 })
+            .unwrap();
+        runtime
+            .schedule(
+                2,
+                EnvironmentEventKind::SetSourceActive {
+                    id: source,
+                    active: false,
+                },
+            )
+            .unwrap();
+        runtime.tick().unwrap();
+        assert!(runtime.world().organisms()[0].node(1).is_none());
+        let pruned = ContactScene::from_world(runtime.world()).unwrap();
+        assert_eq!(
+            pruned.sweep(start, movement, 0.1).unwrap(),
+            SweepOutcome::Miss
+        );
+        assert_eq!(
+            pruned.sweep(start, movement, 0.1),
+            pruned.sweep_direct(start, movement, 0.1)
+        );
+        runtime
+            .schedule(
+                3,
+                EnvironmentEventKind::SetBodyVelocity {
+                    id: body,
+                    velocity: Vec3::new(0.0, 0.0, 4.0).unwrap(),
+                },
+            )
+            .unwrap();
+        for _ in 0..5 {
+            runtime.tick().unwrap();
+        }
+        assert!(runtime.world().body().unwrap().position().z() > 0.9);
+        assert!(runtime.world().body().unwrap().contact().is_none());
+    }
+
+    #[test]
+    fn four_organism_finite_ecology_stays_bounded_for_two_thousand_ticks() {
+        let mut world = WorldState::new(DeterministicSeed(35));
+        let parameters = GrowthParameters::new(0.1, 0.3, 0.5, 1.0).unwrap();
+        for x in [-1.5, -0.5, 0.5, 1.5] {
+            world
+                .spawn_organism(Vec3::new(x, 0.0, 0.0).unwrap(), parameters)
+                .unwrap();
+        }
+        world
+            .spawn_finite_source(Vec3::new(0.0, 2.0, 0.0).unwrap(), 4.0, 10.0, 0.0, 0.2, 0.2)
+            .unwrap();
+        let mut runtime = Runtime::new(world, SimulationStep::new(0.1).unwrap());
+        for _ in 0..2000 {
+            runtime
+                .tick()
+                .unwrap_or_else(|error| panic!("tick {}: {error:?}", runtime.time().ticks() + 1));
+            let stock = runtime.world().sources()[0].reservoir().unwrap();
+            assert!((0.0..=stock.capacity()).contains(&stock.stored()));
+            assert!(stock.last_allocated() <= 0.2 + 1e-12);
+            assert!(
+                runtime
+                    .world()
+                    .organisms()
+                    .iter()
+                    .all(|organism| organism.budget() >= 0.0)
+            );
+        }
+        let saved = runtime.save_bytes().unwrap();
+        assert_eq!(Runtime::load_bytes(&saved).unwrap(), runtime);
+        assert_eq!(runtime.time().ticks(), 2000);
     }
 
     #[test]
