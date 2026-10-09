@@ -1,7 +1,9 @@
 //! Opt-in native GPU parity and offscreen graph execution.
 use analytic_renderer::{
     Camera, Ray,
-    field_graph_gpu::{GraphGpuOutcome, GraphGpuRenderer, GraphTracePolicy},
+    field_graph_gpu::{
+        GraphGpuIssue, GraphGpuOutcome, GraphGpuRenderer, GraphRenderOptions, GraphTracePolicy,
+    },
 };
 use spatial_math::Vec3;
 use std::time::Instant;
@@ -220,6 +222,101 @@ fn field_graph_gpu_numerical_boundaries() {
     );
 }
 
+#[test]
+#[ignore = "requires native GPU; run explicitly with --ignored --nocapture"]
+fn field_graph_gpu_samples_preserve_shared_face_diagnostic() {
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        apply_limit_buckets: false,
+    }))
+    .unwrap();
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let renderer = pollster::block_on(GraphGpuRenderer::new(&device)).unwrap();
+    let graph = compile_json(br#"{"format_version":1,"id":"shared","root":"u","nodes":[{"op":"box","id":"b","half_extent":[1,1,1]},{"op":"translate","id":"l","child":"b","offset":[-1,0,0]},{"op":"translate","id":"r","child":"b","offset":[1,0,0]},{"op":"union","id":"u","left":"l","right":"r"}]}"#).unwrap();
+    assert!(
+        renderer
+            .sample_points(&device, &queue, &graph, camera(), &[])
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        renderer
+            .sample_points(&device, &queue, &graph, camera(), &vec![Vec3::ZERO; 4097])
+            .is_err()
+    );
+    let points = [
+        v(-2.01, 0.0, 0.0),
+        v(-2.0, 0.0, 0.0),
+        v(-1.5, 0.0, 0.0),
+        Vec3::ZERO,
+        v(0.5, 0.0, 0.0),
+        v(2.0, 0.0, 0.0),
+        v(2.01, 0.0, 0.0),
+    ];
+    let gpu = renderer
+        .sample_points(&device, &queue, &graph, camera(), &points)
+        .unwrap();
+    for (&point, observed) in points.iter().zip(&gpu) {
+        let cpu = graph.sample(point).unwrap();
+        let observed = observed.expect("supported sample must remain finite");
+        assert!(
+            (cpu - f64::from(observed)).abs() <= 0.0001,
+            "point {point:?}: CPU {cpu}, GPU {observed}"
+        );
+        if cpu.abs() > 0.001 {
+            assert_eq!(
+                cpu.is_sign_negative(),
+                observed.is_sign_negative(),
+                "point {point:?}"
+            );
+        }
+    }
+    assert_eq!(graph.sample(Vec3::ZERO).unwrap(), 0.0);
+    let internal = Ray::new(Vec3::ZERO, v(1.0, 0.0, 0.0), 0.0, 1.0).unwrap();
+    assert!(matches!(
+        renderer
+            .query(
+                &device,
+                &queue,
+                &graph,
+                camera(),
+                &[internal],
+                GraphTracePolicy::default()
+            )
+            .unwrap()[0],
+        GraphGpuOutcome::Uncertain(GraphGpuIssue::UndefinedNormal | GraphGpuIssue::Inside)
+    ));
+    let transformed = compile_json(br#"{"format_version":1,"id":"scaled","root":"m","nodes":[{"op":"sphere","id":"s","radius":1},{"op":"scale","id":"z","child":"s","factor":2},{"op":"translate","id":"m","child":"z","offset":[3,0,0]}]}"#).unwrap();
+    let transformed_points = [
+        v(0.9, 0.0, 0.0),
+        v(1.0, 0.0, 0.0),
+        v(1.00001, 0.0, 0.0),
+        v(3.0, 0.0, 0.0),
+        v(5.0, 0.0, 0.0),
+        v(5.01, 0.0, 0.0),
+    ];
+    for (&point, observed) in transformed_points.iter().zip(
+        renderer
+            .sample_points(&device, &queue, &transformed, camera(), &transformed_points)
+            .unwrap(),
+    ) {
+        let cpu = transformed.sample(point).unwrap();
+        assert!(
+            (cpu - f64::from(observed.unwrap())).abs() <= 0.0001,
+            "transformed point {point:?}"
+        );
+    }
+    println!(
+        "adapter={} shared_face_gpu_sample={:?}",
+        adapter.get_info().name,
+        gpu[3]
+    );
+}
+
 fn generated_scene(leaves: usize) -> String {
     let mut nodes = vec![r#"{"op":"sphere","id":"s","radius":0.45}"#.to_owned()];
     let mut level = Vec::new();
@@ -267,9 +364,13 @@ fn field_graph_scaling_measurements() {
         apply_limit_buckets: false,
     }))
     .unwrap();
-    let (device, queue) =
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+        ..Default::default()
+    }))
+    .unwrap();
     let renderer = pollster::block_on(GraphGpuRenderer::new(&device)).unwrap();
+    let timer = analytic_renderer::GpuTimer::new(&device);
     for leaves in [1, 4, 8, 16] {
         let source = generated_scene(leaves);
         let graph = compile_json(source.as_bytes()).unwrap();
@@ -307,21 +408,37 @@ fn field_graph_scaling_measurements() {
                 .collect();
             let mut query = Vec::new();
             let mut frame = Vec::new();
+            let mut compute = Vec::new();
+            let mut prepare = Vec::new();
+            let mut readback = Vec::new();
             for _ in 0..12 {
                 let start = Instant::now();
                 let _ = renderer
                     .query(&device, &queue, &graph, camera(), &rays, policy)
                     .unwrap();
                 query.push(start.elapsed().as_secs_f64() * 1e3);
-                frame.push(
-                    renderer
-                        .render_rgba(&device, &queue, &graph, camera(), [320, 240], policy)
-                        .unwrap()
-                        .full_frame_ms,
-                );
+                let result = renderer
+                    .render_rgba_timed(
+                        &device,
+                        &queue,
+                        &graph,
+                        camera(),
+                        GraphRenderOptions {
+                            size: [320, 240],
+                            policy,
+                            timer: timer.as_ref(),
+                        },
+                    )
+                    .unwrap();
+                frame.push(result.full_frame_ms);
+                prepare.push(result.cpu_prepare_ms);
+                readback.push(result.readback_wait_ms);
+                if let Some(ms) = result.gpu_compute_ms {
+                    compute.push(ms);
+                }
             }
             println!(
-                "field_graph_bench adapter={} backend={:?} profile={} nodes={} visits={} budget={} parse_ms={:?} compile_including_parse_ms={:?} cpu_sample_ms={:?} gpu_query_512_readback_ms={:?} gpu_frame_320x240_readback_ms={:?} node_bytes={}",
+                "field_graph_bench adapter={} backend={:?} profile={} nodes={} visits={} budget={} parse_ms={:?} compile_including_parse_ms={:?} cpu_sample_ms={:?} gpu_query_512_readback_ms={:?} gpu_frame_320x240_readback_ms={:?} cpu_prepare_ms={:?} readback_wait_ms={:?} gpu_compute_ms={:?} node_bytes={}",
                 adapter.get_info().name,
                 adapter.get_info().backend,
                 if cfg!(debug_assertions) {
@@ -337,6 +454,9 @@ fn field_graph_scaling_measurements() {
                 stats(cpu.clone()),
                 stats(query),
                 stats(frame),
+                stats(prepare),
+                stats(readback),
+                (!compute.is_empty()).then(|| stats(compute)),
                 graph.nodes().len() * 32
             );
         }

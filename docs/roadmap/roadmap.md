@@ -73,6 +73,15 @@ A bounded version-one JSON graph now compiles into typed operations, evaluates o
 
 ## Next candidate
 
+Foundation 0.12.1 locally distinguishes occupied solids from zero sets, adds an
+ideal-model region estimate and restricted exterior CPU entry query, and records
+GPU sample/timestamp evidence. The [solid contract](../specifications/field-graph.md),
+[research record](../research/foundation-0121.md), and [world integration proposal](../architecture/field-world-integration.md)
+state why field graphs still have no collision authority. The next focused research
+step is validated floating-point error bounds and exterior moving-body parity
+across more rays and adapters before a world-save migration is considered.
+
+
 Measure larger authored and field workloads on additional adapters. Define a numerically defensible occupied-solid and contact contract before considering authoritative field-graph instances. Verify native selection/contact and packaged builds on a second supported machine. Any rotation or living growth contract should follow tested CPU/GPU/contact semantics.
 
 ## Later research

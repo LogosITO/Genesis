@@ -46,9 +46,9 @@ pub struct GpuResult {
 
 /// One sampled compute-pass duration, available only with `TIMESTAMP_QUERY`.
 pub struct GpuTimer {
-    queries: wgpu::QuerySet,
-    resolved: wgpu::Buffer,
-    readback: wgpu::Buffer,
+    pub(crate) queries: wgpu::QuerySet,
+    pub(crate) resolved: wgpu::Buffer,
+    pub(crate) readback: wgpu::Buffer,
 }
 
 /// One frame's viewport and optional presentation or timing targets.

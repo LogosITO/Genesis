@@ -1,6 +1,6 @@
 //! Direct WGSL interpretation of the bounded authored field graph.
 
-use crate::{Camera, Ray, RenderError};
+use crate::{Camera, GpuTimer, Ray, RenderError};
 use bytemuck::{Pod, Zeroable};
 use std::{sync::mpsc, time::Instant};
 use wgpu::util::DeviceExt;
@@ -107,6 +107,22 @@ pub struct GraphFrame {
     pub rgba: Vec<u8>,
     /// CPU time from command creation through GPU readback completion.
     pub full_frame_ms: f64,
+    /// CPU preparation before command submission, including small buffer uploads.
+    pub cpu_prepare_ms: f64,
+    /// CPU wait, transfer and mapping after submission; this can include GPU execution.
+    pub readback_wait_ms: f64,
+    /// Compute-pass timestamp when the device supports and enables `TIMESTAMP_QUERY`.
+    pub gpu_compute_ms: Option<f64>,
+}
+
+/// Offscreen graph draw size, trace policy, and optional compute timestamp sampler.
+pub struct GraphRenderOptions<'a> {
+    /// Pixel dimensions, each from 1 to 2048.
+    pub size: [u32; 2],
+    /// Bounded field tracer settings.
+    pub policy: GraphTracePolicy,
+    /// Timestamp sampler created from a device with `TIMESTAMP_QUERY` enabled.
+    pub timer: Option<&'a GpuTimer>,
 }
 
 /// Isolated research pipeline; does not mutate world state or existing renderer buffers.
@@ -114,6 +130,7 @@ pub struct GraphGpuRenderer {
     layout: wgpu::BindGroupLayout,
     render_pipeline: wgpu::ComputePipeline,
     query_pipeline: wgpu::ComputePipeline,
+    sample_pipeline: wgpu::ComputePipeline,
 }
 
 fn vec4(v: spatial_math::Vec3, w: f32) -> [f32; 4] {
@@ -229,6 +246,7 @@ impl GraphGpuRenderer {
         };
         let render_pipeline = pipeline("render");
         let query_pipeline = pipeline("query");
+        let sample_pipeline = pipeline("sample_query");
         if let Some(error) = scope.pop().await {
             return Err(RenderError::Gpu(error.to_string()));
         }
@@ -236,6 +254,7 @@ impl GraphGpuRenderer {
             layout,
             render_pipeline,
             query_pipeline,
+            sample_pipeline,
         })
     }
 
@@ -373,6 +392,33 @@ impl GraphGpuRenderer {
         size: [u32; 2],
         policy: GraphTracePolicy,
     ) -> Result<GraphFrame, RenderError> {
+        self.render_rgba_timed(
+            device,
+            queue,
+            graph,
+            camera,
+            GraphRenderOptions {
+                size,
+                policy,
+                timer: None,
+            },
+        )
+    }
+
+    /// Render with optional GPU compute timestamps, separate from CPU preparation and readback.
+    pub fn render_rgba_timed(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        graph: &Graph,
+        camera: Camera,
+        options: GraphRenderOptions<'_>,
+    ) -> Result<GraphFrame, RenderError> {
+        let GraphRenderOptions {
+            size,
+            policy,
+            timer,
+        } = options;
         let started = Instant::now();
         let config = Self::config(graph, camera, size, policy)?;
         if size[0] > device.limits().max_texture_dimension_2d
@@ -413,13 +459,22 @@ impl GraphGpuRenderer {
             label: Some("field render"),
         });
         {
+            let timestamps = timer.map(|timer| wgpu::ComputePassTimestampWrites {
+                query_set: &timer.queries,
+                beginning_of_pass_write_index: Some(0),
+                end_of_pass_write_index: Some(1),
+            });
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("field evaluate"),
-                timestamp_writes: None,
+                timestamp_writes: timestamps,
             });
             pass.set_pipeline(&self.render_pipeline);
             pass.set_bind_group(0, &group, &[]);
             pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
+        }
+        if let Some(timer) = timer {
+            encoder.resolve_query_set(&timer.queries, 0..2, &timer.resolved, 0);
+            encoder.copy_buffer_to_buffer(&timer.resolved, 0, &timer.readback, 0, 16);
         }
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -442,15 +497,24 @@ impl GraphGpuRenderer {
                 depth_or_array_layers: 1,
             },
         );
+        let cpu_prepare_ms = started.elapsed().as_secs_f64() * 1000.0;
         queue.submit([encoder.finish()]);
+        let readback_started = Instant::now();
         let bytes = read_buffer(device, &output)?;
+        let readback_wait_ms = readback_started.elapsed().as_secs_f64() * 1000.0;
         let mut rgba = Vec::with_capacity((row_bytes * size[1]) as usize);
         for row in bytes.chunks_exact(aligned as usize) {
             rgba.extend_from_slice(&row[..row_bytes as usize]);
         }
+        let full_frame_ms = started.elapsed().as_secs_f64() * 1000.0;
         Ok(GraphFrame {
             rgba,
-            full_frame_ms: started.elapsed().as_secs_f64() * 1000.0,
+            full_frame_ms,
+            cpu_prepare_ms,
+            readback_wait_ms,
+            gpu_compute_ms: timer
+                .map(|timer| timer.read_ms(device, queue))
+                .transpose()?,
         })
     }
 
@@ -470,7 +534,6 @@ impl GraphGpuRenderer {
         if rays.len() > 4096 {
             return Err(RenderError::InvalidInput("too many field query rays"));
         }
-        let config = Self::config(graph, camera, [1, 1], policy)?;
         let data: Vec<GpuRay> = rays
             .iter()
             .map(|ray| {
@@ -481,6 +544,86 @@ impl GraphGpuRenderer {
                 }
             })
             .collect();
+        let config = Self::config(graph, camera, [1, 1], policy)?;
+        let raw = self.dispatch_query(device, queue, graph, config, &data, &self.query_pipeline)?;
+        Ok(raw
+            .iter()
+            .map(|r| match r.meta[0] {
+                0 => GraphGpuOutcome::Miss,
+                1 => GraphGpuOutcome::Hit {
+                    distance: r.distance_normal[3],
+                    normal: [
+                        r.distance_normal[0],
+                        r.distance_normal[1],
+                        r.distance_normal[2],
+                    ],
+                },
+                3 => GraphGpuOutcome::Exhausted,
+                _ => GraphGpuOutcome::Uncertain(match r.meta[2] {
+                    2 => GraphGpuIssue::Inside,
+                    3 => GraphGpuIssue::UndefinedNormal,
+                    4 => GraphGpuIssue::NoProgress,
+                    _ => GraphGpuIssue::Numeric,
+                }),
+            })
+            .collect())
+    }
+
+    /// Read the WGSL evaluator's `f32` field samples. `None` denotes invalid GPU arithmetic.
+    /// Samples are diagnostic and never certify a mathematical sign or boundary.
+    pub fn sample_points(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        graph: &Graph,
+        camera: Camera,
+        points: &[spatial_math::Vec3],
+    ) -> Result<Vec<Option<f32>>, RenderError> {
+        if points.is_empty() {
+            return Ok(Vec::new());
+        }
+        if points.len() > 4096 {
+            return Err(RenderError::InvalidInput("too many field sample points"));
+        }
+        if points
+            .iter()
+            .any(|p| [p.x(), p.y(), p.z()].iter().any(|x| x.abs() > 10_000.0))
+        {
+            return Err(RenderError::InvalidInput(
+                "field sample outside supported coordinates",
+            ));
+        }
+        let data: Vec<GpuRay> = points
+            .iter()
+            .map(|&point| GpuRay {
+                origin_near: vec4(point, 0.0),
+                direction_far: [0.0; 4],
+            })
+            .collect();
+        let config = Self::config(graph, camera, [1, 1], GraphTracePolicy::default())?;
+        let raw =
+            self.dispatch_query(device, queue, graph, config, &data, &self.sample_pipeline)?;
+        Ok(raw
+            .iter()
+            .map(|r| (r.meta[0] == 1).then_some(r.distance_normal[0]))
+            .collect())
+    }
+
+    fn dispatch_query(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        graph: &Graph,
+        config: GpuConfig,
+        data: &[GpuRay],
+        pipeline: &wgpu::ComputePipeline,
+    ) -> Result<Vec<GpuOutcome>, RenderError> {
+        if data.is_empty() {
+            return Ok(Vec::new());
+        }
+        if data.len() > 4096 {
+            return Err(RenderError::InvalidInput("too many field query inputs"));
+        }
         let image = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("field query dummy"),
             size: wgpu::Extent3d {
@@ -496,7 +639,7 @@ impl GraphGpuRenderer {
             view_formats: &[],
         });
         let view = image.create_view(&wgpu::TextureViewDescriptor::default());
-        let (group, output) = self.group(device, graph, config, &view, &data)?;
+        let (group, output) = self.group(device, graph, config, &view, data)?;
         let size = (data.len() * std::mem::size_of::<GpuOutcome>()) as u64;
         if size > device.limits().max_buffer_size
             || size > device.limits().max_storage_buffer_binding_size
@@ -519,34 +662,14 @@ impl GraphGpuRenderer {
                 label: Some("field query"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.query_pipeline);
+            pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &group, &[]);
-            pass.dispatch_workgroups((rays.len() as u32).div_ceil(64), 1, 1);
+            pass.dispatch_workgroups((data.len() as u32).div_ceil(64), 1, 1);
         }
         encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, size);
         queue.submit([encoder.finish()]);
         let bytes = read_buffer(device, &readback)?;
-        Ok(bytemuck::cast_slice::<u8, GpuOutcome>(&bytes)
-            .iter()
-            .map(|r| match r.meta[0] {
-                0 => GraphGpuOutcome::Miss,
-                1 => GraphGpuOutcome::Hit {
-                    distance: r.distance_normal[3],
-                    normal: [
-                        r.distance_normal[0],
-                        r.distance_normal[1],
-                        r.distance_normal[2],
-                    ],
-                },
-                3 => GraphGpuOutcome::Exhausted,
-                _ => GraphGpuOutcome::Uncertain(match r.meta[2] {
-                    2 => GraphGpuIssue::Inside,
-                    3 => GraphGpuIssue::UndefinedNormal,
-                    4 => GraphGpuIssue::NoProgress,
-                    _ => GraphGpuIssue::Numeric,
-                }),
-            })
-            .collect())
+        Ok(bytemuck::cast_slice::<u8, GpuOutcome>(&bytes).to_vec())
     }
 }
 

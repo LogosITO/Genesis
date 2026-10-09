@@ -8,6 +8,12 @@ use serde::Deserialize;
 use spatial_math::{MathError, Vec3};
 use std::collections::BTreeMap;
 
+mod spatial;
+pub use spatial::{
+    IdealRegionEstimate, RegionAabb, SampleSign, SolidEntryOutcome, SolidQueryIssue,
+    SolidRayOptions, classify_sample, estimate_region, trace_exterior_entry,
+};
+
 /// Maximum accepted source size for the research preview.
 pub const MAX_SOURCE_BYTES: usize = 16 * 1024;
 /// Maximum distinct nodes. Evaluation may visit shared children more than once.
@@ -117,6 +123,15 @@ pub struct Graph {
     exact_sdf: bool,
 }
 
+/// Strongest supported ideal-arithmetic distance contract; neither variant certifies rounding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DistanceSemantics {
+    /// One primitive under translation and positive uniform scale.
+    ExactSdf,
+    /// A union sign field with known global Lipschitz bound one, without exact SDF status.
+    SignedUnitLipschitz,
+}
+
 impl Graph {
     /// Logical author-chosen identity, not a filesystem path.
     pub fn id(&self) -> &str {
@@ -138,9 +153,13 @@ impl Graph {
     pub fn visits(&self) -> usize {
         self.visits
     }
-    /// True only for a single primitive under translation and positive scale.
-    pub fn is_exact_sdf(&self) -> bool {
-        self.exact_sdf
+    /// Strongest supported ideal-arithmetic distance contract.
+    pub fn distance_semantics(&self) -> DistanceSemantics {
+        if self.exact_sdf {
+            DistanceSemantics::ExactSdf
+        } else {
+            DistanceSemantics::SignedUnitLipschitz
+        }
     }
     /// Conservative bounds in world units, using ideal arithmetic.
     pub fn bounds(&self) -> Bounds {
@@ -528,7 +547,10 @@ mod tests {
     fn evaluated_graph_contract() {
         let g = compile_json(SOURCE.as_bytes()).unwrap();
         assert_eq!(g.nodes().len(), 4);
-        assert!(!g.is_exact_sdf());
+        assert_eq!(
+            g.distance_semantics(),
+            DistanceSemantics::SignedUnitLipschitz
+        );
         assert_eq!(g.ideal_lipschitz_bound(), 1.0);
         assert_eq!(g.sample(v(-0.5, 0.0, 0.0)).unwrap(), -1.0);
         assert_eq!(g.sample(v(2.0, 0.0, 0.0)).unwrap(), 1.5);
@@ -592,7 +614,7 @@ mod tests {
     fn transforms_and_scale() {
         let source = r#"{"format_version":1,"id":"scaled","root":"s","nodes":[{"op":"sphere","id":"ball","radius":1},{"op":"scale","id":"z","child":"ball","factor":2},{"op":"translate","id":"s","child":"z","offset":[2,0,0]}]}"#;
         let g = compile_json(source.as_bytes()).unwrap();
-        assert!(g.is_exact_sdf());
+        assert_eq!(g.distance_semantics(), DistanceSemantics::ExactSdf);
         assert_eq!(g.sample(v(4.0, 0.0, 0.0)).unwrap(), 0.0);
         assert_eq!(g.bounds().max, v(4.0, 2.0, 2.0));
     }
@@ -651,7 +673,7 @@ mod tests {
                 r#"{{"format_version":1,"id":"ball","root":"s","nodes":[{{"op":"sphere","id":"s","radius":{radius}}}]}}"#
             );
             let g = compile_json(source.as_bytes()).unwrap();
-            assert!(g.is_exact_sdf());
+            assert_eq!(g.distance_semantics(), DistanceSemantics::ExactSdf);
             assert_eq!(g.sample(v(0.0, 0.0, 0.0)).unwrap(), -radius);
             assert_eq!(g.sample(v(radius, 0.0, 0.0)).unwrap(), 0.0);
             assert_eq!(g.sample(v(radius * 2.0, 0.0, 0.0)).unwrap(), radius);

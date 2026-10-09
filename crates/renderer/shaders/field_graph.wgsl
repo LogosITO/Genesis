@@ -130,3 +130,10 @@ fn query(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ray = rays[gid.x];
     outcomes[gid.x] = trace(ray.origin_near.xyz, normalize(ray.direction_far.xyz), ray.origin_near.w, ray.direction_far.w);
 }
+
+@compute @workgroup_size(64)
+fn sample_query(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= arrayLength(&rays)) { return; }
+    let value = sample(rays[gid.x].origin_near.xyz);
+    outcomes[gid.x] = Outcome(vec4<f32>(value, 0.0, 0.0, 0.0), vec4<u32>(select(2u, 1u, finite(value)), 0u, 0u, 0u));
+}

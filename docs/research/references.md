@@ -3,6 +3,7 @@
 ## Established knowledge
 - Inigo Quilez, [Distance Functions](https://iquilezles.org/articles/distfunctions/): common analytic primitive and CSG formulas. The code in this repository is independently written and licensed here.
 - Hart, *Sphere Tracing: A Geometric Method for the Antialiased Ray Tracing of Implicit Surfaces* (1996), [DOI:10.1007/s003710050084](https://doi.org/10.1007/s003710050084): distance bounds for sphere tracing.
+- Snyder, *Interval Analysis for Computer Graphics* (SIGGRAPH 1992): interval methods for implicit geometry. Its ideal enclosure ideas do not themselves certify this project's floating-point implementation.
 - Rust project, [The Cargo Book](https://doc.rust-lang.org/cargo/) and [Rust Reference](https://doc.rust-lang.org/reference/): workspace and language behavior.
 
 ## Hypotheses
@@ -15,4 +16,4 @@ The four ADRs record current engineering decisions, not research findings.
 Robust conservative bounds for composed fields, scaling of graph evaluation, deterministic cross-platform rule evaluation, and data format for persistent world state.
 
 ## Experimental findings
-None published yet. Local correctness checks are reported in the repository and are not performance experiments.
+Local [Foundation 0.12.1 experiments](foundation-0121.md) record the shared-face counterexample, selected CPU/GPU readback and timestamp measurements. They are local evidence, not a formal numerical proof.

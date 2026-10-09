@@ -84,7 +84,7 @@ fn preview(
     };
     println!(
         "{}",
-        serde_json::json!({"id":graph.id(),"sha256":revision,"nodes":graph.nodes().len(),"visits_per_sample":graph.visits(),"exact_sdf":graph.is_exact_sdf(),"ideal_lipschitz":graph.ideal_lipschitz_bound(),"sample_origin":graph.sample(Vec3::ZERO)?,"cpu_center_ray":format!("{cpu:?}"),"gpu_center_ray":gpu_summary,"capture":capture,"full_frame_ms":frame.full_frame_ms,"rgba_bytes":frame.rgba.len()})
+        serde_json::json!({"id":graph.id(),"sha256":revision,"nodes":graph.nodes().len(),"visits_per_sample":graph.visits(),"distance_semantics":format!("{:?}",graph.distance_semantics()),"ideal_lipschitz":graph.ideal_lipschitz_bound(),"sample_origin":graph.sample(Vec3::ZERO)?,"cpu_center_ray":format!("{cpu:?}"),"gpu_center_ray":gpu_summary,"capture":capture,"full_frame_ms":frame.full_frame_ms,"rgba_bytes":frame.rgba.len()})
     );
     Ok(())
 }
