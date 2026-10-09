@@ -3,8 +3,9 @@ use analytic_field::{AxisAlignedBox, ScalarField};
 use spatial_math::Vec3;
 use world_authoring::field_graph::{
     IdealRegionEstimate, RegionAabb, RegionExclusion, SampleSign, SolidEntryOutcome,
-    SolidQueryIssue, SolidRayOptions, TraceOptions, classify_sample, compile_json, estimate_region,
-    exclude_region, trace_exterior_entry, trace_exterior_entry_report,
+    SolidQueryIssue, SolidRayOptions, SolidSweepOptions, TraceOptions, classify_sample,
+    compile_json, estimate_region, exclude_region, sweep_sphere_exterior, trace_exterior_entry,
+    trace_exterior_entry_report,
 };
 
 fn v(x: f64, y: f64, z: f64) -> Vec3 {
@@ -415,4 +416,76 @@ fn query_diagnostics_count_charged_work_without_changing_the_outcome() {
         SolidEntryOutcome::Indeterminate(SolidQueryIssue::Numeric)
     );
     assert_eq!((overflow.samples, overflow.charged_visits), (1, 1));
+}
+
+#[test]
+fn moving_sphere_reports_approximate_entry_and_uncertainty() {
+    let g = graph(vec![sphere("s", 1.0)], "s");
+    let options = SolidSweepOptions {
+        tolerance: 1e-5,
+        iterations: 256,
+        safety: 0.8,
+        max_work: 16_384,
+    };
+    let head_on =
+        sweep_sphere_exterior(&g, v(-10.0, 0.0, 0.0), v(20.0, 0.0, 0.0), 0.5, options).unwrap();
+    assert!(
+        matches!(head_on.outcome, SolidEntryOutcome::ApproximateEntry{distance} if (distance-8.5).abs()<1e-4)
+    );
+    assert_eq!(
+        sweep_sphere_exterior(&g, Vec3::ZERO, v(2.0, 0.0, 0.0), 0.5, options)
+            .unwrap()
+            .outcome,
+        SolidEntryOutcome::Indeterminate(SolidQueryIssue::StartsInside)
+    );
+    assert_eq!(
+        sweep_sphere_exterior(&g, v(-1.5, 0.0, 0.0), v(2.0, 0.0, 0.0), 0.5, options)
+            .unwrap()
+            .outcome,
+        SolidEntryOutcome::Indeterminate(SolidQueryIssue::StartNearZero)
+    );
+    assert_eq!(
+        sweep_sphere_exterior(&g, v(-10.0, 4.0, 0.0), v(20.0, 0.0, 0.0), 0.5, options)
+            .unwrap()
+            .outcome,
+        SolidEntryOutcome::BoundsMiss
+    );
+    assert_eq!(
+        sweep_sphere_exterior(&g, v(-10.0, 1.2, 1.2), v(20.0, 0.0, 0.0), 0.5, options)
+            .unwrap()
+            .outcome,
+        SolidEntryOutcome::Indeterminate(SolidQueryIssue::UncertifiedAdvance)
+    );
+    let budget = SolidSweepOptions {
+        max_work: 1,
+        ..options
+    };
+    assert_eq!(
+        sweep_sphere_exterior(&g, v(-10.0, 0.0, 0.0), v(20.0, 0.0, 0.0), 0.5, budget)
+            .unwrap()
+            .outcome,
+        SolidEntryOutcome::Indeterminate(SolidQueryIssue::WorkBudget)
+    );
+    assert!(sweep_sphere_exterior(&g, Vec3::ZERO, Vec3::ZERO, 0.5, options).is_err());
+    assert!(sweep_sphere_exterior(&g, Vec3::ZERO, v(1.0, 0.0, 0.0), f64::NAN, options).is_err());
+
+    let thin_box = graph(
+        vec![serde_json::json!({"op":"box","id":"b","half_extent":[0.1,1.0,1.0]})],
+        "b",
+    );
+    let box_hit = sweep_sphere_exterior(
+        &thin_box,
+        v(-10.0, 0.0, 0.0),
+        v(20.0, 0.0, 0.0),
+        0.5,
+        options,
+    )
+    .unwrap();
+    assert!(
+        matches!(box_hit.outcome, SolidEntryOutcome::ApproximateEntry { distance } if (distance - 9.4).abs() < 1e-4)
+    );
+
+    let touching =
+        sweep_sphere_exterior(&g, v(-10.0, 1.5, 0.0), v(20.0, 0.0, 0.0), 0.5, options).unwrap();
+    assert!(!matches!(touching.outcome, SolidEntryOutcome::BoundsMiss));
 }

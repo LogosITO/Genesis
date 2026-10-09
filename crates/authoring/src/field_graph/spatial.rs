@@ -110,7 +110,14 @@ fn rounded_ray_axis(origin: f64, direction: f64, parameter: f64) -> Option<(f64,
     (lo.is_finite() && hi.is_finite()).then_some((lo, hi))
 }
 
-fn ray_segment_excluded(graph: &Graph, origin: Vec3, direction: Vec3, near: f64, far: f64) -> bool {
+fn ray_segment_excluded(
+    graph: &Graph,
+    origin: Vec3,
+    direction: Vec3,
+    near: f64,
+    far: f64,
+    radius: f64,
+) -> bool {
     let bounds = graph.bounds();
     [
         (origin.x(), direction.x(), bounds.min.x(), bounds.max.x()),
@@ -119,6 +126,14 @@ fn ray_segment_excluded(graph: &Graph, origin: Vec3, direction: Vec3, near: f64,
     ]
     .into_iter()
     .any(|(o, d, bound_lo, bound_hi)| {
+        let (bound_lo, bound_hi) = if radius == 0.0 {
+            (bound_lo, bound_hi)
+        } else {
+            (
+                (bound_lo - radius).next_down(),
+                (bound_hi + radius).next_up(),
+            )
+        };
         match (rounded_ray_axis(o, d, near), rounded_ray_axis(o, d, far)) {
             (Some(a), Some(b)) => a.1.max(b.1) < bound_lo || a.0.min(b.0) > bound_hi,
             _ => false,
@@ -184,6 +199,19 @@ pub struct SolidRayOptions {
     /// Existing near/far, tolerance, safety, and iteration limits.
     pub ray: TraceOptions,
     /// Positive maximum expanded node visits, including the start classification.
+    pub max_work: usize,
+}
+
+/// Bounded exterior sphere-sweep policy. The complete displacement is queried.
+#[derive(Clone, Copy, Debug)]
+pub struct SolidSweepOptions {
+    /// Positive world-unit threshold for an approximate first contact.
+    pub tolerance: f64,
+    /// Maximum field samples, from 1 to 512.
+    pub iterations: u32,
+    /// Fraction of the ideal exterior distance step, in `(0, 1]`.
+    pub safety: f64,
+    /// Positive maximum charged expanded node visits, up to one million.
     pub max_work: usize,
 }
 
@@ -257,6 +285,69 @@ pub fn trace_exterior_entry_report(
     direction: Vec3,
     options: SolidRayOptions,
 ) -> Result<SolidQueryReport, MathError> {
+    trace_exterior_entry_with_radius(graph, origin, direction, options, 0.0)
+}
+
+/// Experimental sweep of a moving sphere against the supported closed union.
+/// The result is a travel distance, not a time fraction. An approximate entry is
+/// not an authoritative collision: field samples and roots have no certified
+/// floating-point enclosure. Starting inside or near the inflated zero set is
+/// indeterminate. A confirmed miss requires strict separation from expanded bounds.
+pub fn sweep_sphere_exterior(
+    graph: &Graph,
+    start: Vec3,
+    displacement: Vec3,
+    radius: f64,
+    options: SolidSweepOptions,
+) -> Result<SolidQueryReport, MathError> {
+    if !radius.is_finite() {
+        return Err(MathError::NonFinite);
+    }
+    if !(0.001..=10.0).contains(&radius) {
+        return Err(MathError::OutOfRange);
+    }
+    let end = start.checked_add(displacement)?;
+    if [start, end]
+        .into_iter()
+        .flat_map(|p| [p.x(), p.y(), p.z()])
+        .any(|x| x.abs() > 1000.0)
+    {
+        return Err(MathError::OutOfRange);
+    }
+    let distance = displacement.length()?;
+    if distance == 0.0 {
+        return Err(MathError::NonPositive);
+    }
+    let mut result = trace_exterior_entry_with_radius(
+        graph,
+        start,
+        displacement,
+        SolidRayOptions {
+            ray: TraceOptions {
+                near: 0.0,
+                far: distance,
+                tolerance: options.tolerance,
+                iterations: options.iterations,
+                safety: options.safety,
+            },
+            max_work: options.max_work,
+        },
+        radius,
+    )?;
+    // Use the original displacement for a confirmed miss; normalization is rounded.
+    if ray_segment_excluded(graph, start, displacement, 0.0, 1.0, radius) {
+        result.outcome = SolidEntryOutcome::BoundsMiss;
+    }
+    Ok(result)
+}
+
+fn trace_exterior_entry_with_radius(
+    graph: &Graph,
+    origin: Vec3,
+    direction: Vec3,
+    options: SolidRayOptions,
+    radius: f64,
+) -> Result<SolidQueryReport, MathError> {
     let o = options.ray;
     if !o.near.is_finite()
         || !o.far.is_finite()
@@ -305,8 +396,15 @@ pub fn trace_exterior_entry_report(
         work += graph.visits();
         samples += 1;
         let value = match graph.sample(point) {
-            Ok(v) => v,
+            Ok(v) if (v - radius).is_finite() => v - radius,
             Err(_) => {
+                return Ok(report(
+                    SolidEntryOutcome::Indeterminate(SolidQueryIssue::Numeric),
+                    samples,
+                    work,
+                ));
+            }
+            _ => {
                 return Ok(report(
                     SolidEntryOutcome::Indeterminate(SolidQueryIssue::Numeric),
                     samples,
@@ -329,7 +427,7 @@ pub fn trace_exterior_entry_report(
                     work,
                 ));
             }
-            if ray_segment_excluded(graph, origin, direction, o.near, o.far) {
+            if radius == 0.0 && ray_segment_excluded(graph, origin, direction, o.near, o.far, 0.0) {
                 return Ok(report(SolidEntryOutcome::BoundsMiss, samples, work));
             }
         } else {

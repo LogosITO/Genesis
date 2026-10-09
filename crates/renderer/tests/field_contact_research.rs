@@ -1,7 +1,9 @@
 //! Research comparison only: field graph geometry has no WorldState collision authority.
 use analytic_field::Sphere;
 use spatial_math::{Transform, Vec3};
-use world_authoring::field_graph::compile_json;
+use world_authoring::field_graph::{
+    SolidEntryOutcome, SolidSweepOptions, compile_json, sweep_sphere_exterior,
+};
 use world_simulation::contact::{ContactScene, SweepOutcome};
 use world_state::{DeterministicSeed, WorldState};
 
@@ -59,5 +61,22 @@ fn exterior_sphere_expansion_agrees_with_analytic_sweeps_away_from_tangencies() 
         );
         // The supported exact primitive distances make min(F_i-r) an exterior step bound.
         assert!(graph.sample(start).unwrap() - radius > 0.0);
+        let field_contact = sweep_sphere_exterior(
+            &graph,
+            start,
+            movement,
+            radius,
+            SolidSweepOptions {
+                tolerance: 1e-5,
+                iterations: 256,
+                safety: 0.8,
+                max_work: 16_384,
+            },
+        )
+        .unwrap();
+        let SolidEntryOutcome::ApproximateEntry { distance } = field_contact.outcome else {
+            panic!("expected approximate field contact: {field_contact:?}");
+        };
+        assert!((distance / 8.0 - contact.fraction).abs() < 1e-4);
     }
 }

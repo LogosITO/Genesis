@@ -104,6 +104,36 @@ The result is not suitable for authoritative picking/contact without a certified
 floating-point policy. Existing `trace` and WGSL tracing are older zero-set preview
 queries and can classify an interior zero start differently.
 
+### Experimental moving-sphere query (Foundation 0.12.4)
+
+`sweep_sphere_exterior` accepts a positive body radius in `[0.001,10]` world units,
+a finite nonzero displacement and start/end centres within ±1000 per axis. It
+queries the complete segment with a bounded sample and expanded-node work budget.
+The return distance is measured along the path; divide by the displacement length
+for a `[0,1]` time fraction. A zero displacement is rejected. There is no velocity
+or acceleration model within the step.
+
+For supported primitive spheres and boxes, the ideal field is their exact SDF.
+Each positive uniform scale and translation preserves that property for one
+primitive. For their union, `F(p) - r = min_i (SDF_i(p) - r)` has the sign of the
+union of the primitives expanded by a Euclidean ball of radius `r`. Its positive
+exterior values are ideal step bounds to that expanded union. This supports a
+restricted **first exterior entry** estimate, including high-speed movement
+without fixed time sampling. A field value below zero at the start reports
+`StartsInside`; a near-zero start reports `StartNearZero`. Tangency can be an
+approximate entry, exhaustion or indeterminate. A later negative sample is
+indeterminate. The same outward-rounded graph bounds are enlarged by `r`; only
+strict separation from the original (unnormalized) swept centre segment yields
+`BoundsMiss`. All other apparent misses remain uncertain or exhausted.
+
+This is a read-only research query. Its approximate entry uses ordinary `f64`
+field samples and is **not** a certified contact time. The reported distance uses
+the computed normalized direction, while `BoundsMiss` checks the original
+displacement endpoints to avoid a false exclusion from normalization rounding.
+The query has no normal, collider identity or response policy. It does not enter
+`WorldState`, `ContactScene`, the runtime tick or gameplay collision. See the
+[contact comparison](../research/foundation-0124.md) for tested cases and limits.
+
 CPU sampling is `f64`; the GPU interpreter is `f32`. The GPU diagnostic
 `sample_points` reads raw finite field values and marks invalid arithmetic as `None`.
 For samples farther than 0.001 from zero, the local shared-face test compares signs;
