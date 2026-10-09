@@ -139,6 +139,9 @@ struct App {
     cpu_total: Duration,
     life: bool,
     source_id: Option<EntityId>,
+    body_id: Option<EntityId>,
+    body_keys: [bool; 4],
+    body_input_dirty: bool,
     pending_move: bool,
     pending_prune: Option<(EntityId, u32)>,
     selected: Option<SemanticTarget>,
@@ -159,6 +162,11 @@ impl App {
             )?;
             None
         };
+        let body_id = if life {
+            Some(world.spawn_body(v(0.12, 0.32, -1.2), 0.11)?)
+        } else {
+            None
+        };
         Ok(Self {
             graphics: None,
             lost: Arc::new(AtomicBool::new(false)),
@@ -176,6 +184,9 @@ impl App {
             cpu_total: Duration::ZERO,
             life,
             source_id,
+            body_id,
+            body_keys: [false; 4],
+            body_input_dirty: false,
             pending_move: false,
             pending_prune: None,
             selected: None,
@@ -345,6 +356,23 @@ impl App {
                         kind: EnvironmentEventKind::PruneBranch { organism, child },
                     });
                 }
+                if self.body_input_dirty {
+                    let x = f64::from(i32::from(self.body_keys[3]) - i32::from(self.body_keys[2]));
+                    let z = f64::from(i32::from(self.body_keys[0]) - i32::from(self.body_keys[1]));
+                    events.push(EnvironmentEvent {
+                        tick: self.time.ticks() + 1,
+                        order: events.len() as u64,
+                        kind: EnvironmentEventKind::SetBodyVelocity {
+                            id: self.body_id.expect("life body exists"),
+                            velocity: v(x * 2.0, 0.0, z * 2.0),
+                        },
+                    });
+                }
+                let previous_contact = self
+                    .world
+                    .body()
+                    .and_then(|body| body.contact())
+                    .map(|hit| hit.collider);
                 let result = if self.life {
                     advance_life(&mut self.world, &mut self.time, self.step, &events)
                 } else {
@@ -356,6 +384,19 @@ impl App {
                     return;
                 }
                 self.pending_move = false;
+                self.body_input_dirty = false;
+                let contact = self
+                    .world
+                    .body()
+                    .and_then(|body| body.contact())
+                    .map(|hit| hit.collider);
+                if contact != previous_contact && contact.is_some() {
+                    eprintln!(
+                        "contact tick={} {:?}",
+                        self.time.ticks(),
+                        self.world.body().and_then(|body| body.contact())
+                    );
+                }
                 if let Some((organism, child)) = self.pending_prune.take() {
                     self.selected = None;
                     eprintln!(
@@ -412,10 +453,14 @@ impl App {
         };
         self.last_camera = None;
         graphics.window.set_title(&format!(
-            "First {} — tick {} — selected {:?}{}",
+            "First {} — tick {} — selected {:?} — contact {:?}{}",
             if self.life { "Life" } else { "Light" },
             self.time.ticks(),
             self.selected,
+            self.world
+                .body()
+                .and_then(|body| body.contact())
+                .map(|hit| hit.collider),
             if self.pending_prune.is_some() {
                 " — prune queued"
             } else {
@@ -572,6 +617,10 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
+            WindowEvent::Focused(false) if self.life => {
+                self.body_keys = [false; 4];
+                self.body_input_dirty = true;
+            }
             WindowEvent::CursorMoved { position, .. } => self.cursor = Some(position),
             WindowEvent::CursorLeft { .. } => self.cursor = None,
             WindowEvent::MouseInput {
@@ -579,6 +628,28 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } if self.life => self.pick_cursor(),
+            WindowEvent::KeyboardInput { event, .. }
+                if self.life
+                    && matches!(
+                        event.physical_key,
+                        PhysicalKey::Code(
+                            KeyCode::KeyI | KeyCode::KeyK | KeyCode::KeyJ | KeyCode::KeyL
+                        )
+                    ) =>
+            {
+                let index = match event.physical_key {
+                    PhysicalKey::Code(KeyCode::KeyI) => 0,
+                    PhysicalKey::Code(KeyCode::KeyK) => 1,
+                    PhysicalKey::Code(KeyCode::KeyJ) => 2,
+                    PhysicalKey::Code(KeyCode::KeyL) => 3,
+                    _ => unreachable!(),
+                };
+                let pressed = event.state == ElementState::Pressed;
+                if self.body_keys[index] != pressed {
+                    self.body_keys[index] = pressed;
+                    self.body_input_dirty = true;
+                }
+            }
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed && !event.repeat =>
             {
@@ -637,7 +708,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "{} controls: A/D or Left/Right orbit; W/S or Up/Down tilt; Space pause; N normals; {}Esc exit",
         if life { "First Life" } else { "First Light" },
         if life {
-            "M move resource source; Left click select; P prune selected branch; "
+            "M move resource source; Left click select; P prune selected branch; I/J/K/L move body; "
         } else {
             ""
         },

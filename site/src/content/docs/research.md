@@ -12,3 +12,5 @@ The [First Scale measurement record](../reference/research/first-scale-benchmark
 The [GPU BVH experiment](../reference/research/gpu-bvh-acceleration/) compares CPU direct, CPU BVH, GPU direct, and GPU BVH using offscreen readback and matched-scene timings.
 
 The [First Interaction measurements](../reference/research/first-interaction-measurements/) record CPU picking, pruning, snapshot/BVH rebuilds, GPU changes, and deterministic save/replay outcomes. The [interaction contract](../reference/specifications/first-interaction/) defines what a selected branch means.
+
+The [First Contact measurements](../reference/research/first-contact-measurements/) compare direct and BVH collision queries, narrow phase, rebuild and full tick costs, plus contact/pruning replay outcomes. The [contact contract](../reference/specifications/kinematic-contact/) states the numerical and geometry limits.

@@ -12,7 +12,7 @@ pub use gpu::{
 use analytic_field::{AxisAlignedBox, Capsule, Sphere};
 use spatial_math::{Transform, Vec3};
 use std::fmt;
-use world_state::{EntityId, WorldState};
+use world_state::{CONNECTION_RADIUS_RATIO, EntityId, WorldState};
 
 /// Supported world-coordinate magnitude for the first GPU prototype.
 pub const MAX_COORDINATE: f64 = 10_000.0;
@@ -232,6 +232,8 @@ pub enum SemanticTarget {
     },
     /// Resource-source marker.
     Source(EntityId),
+    /// Authoritative kinematic sphere.
+    Body(EntityId),
 }
 
 /// A CPU analytic pick with a stable world target and an outward unit normal.
@@ -432,7 +434,7 @@ impl Scene {
                     let capsule = Capsule::new(
                         a,
                         node.position(),
-                        organism.parameters().node_radius() * 0.55,
+                        organism.parameters().node_radius() * CONNECTION_RADIUS_RATIO,
                     )
                     .map_err(|_| RenderError::InvalidInput("invalid growth connection"))?;
                     let mut primitive = Primitive::capsule(
@@ -465,6 +467,20 @@ impl Scene {
                 },
             )?;
             primitive.target = Some(SemanticTarget::Source(source.id()));
+            scene.push(primitive)?;
+        }
+        if let Some(body) = world.body() {
+            let id =
+                u32::try_from(scene.primitives.len()).map_err(|_| RenderError::TooManyObjects)?;
+            let mut primitive = Primitive::sphere(
+                id,
+                Sphere::new(body.radius())
+                    .map_err(|_| RenderError::InvalidInput("invalid body radius"))?,
+                Transform::new(body.position(), 1.0)
+                    .map_err(|_| RenderError::InvalidInput("invalid body position"))?,
+                [0.98, 0.34, 0.18],
+            )?;
+            primitive.target = Some(SemanticTarget::Body(body.id()));
             scene.push(primitive)?;
         }
         Ok(scene)
@@ -972,6 +988,34 @@ mod tests {
                 .signed_distance(v(2.0, 0.0, -2.0))
                 .unwrap(),
             0.0
+        );
+    }
+
+    #[test]
+    fn body_snapshot_uses_authoritative_position_and_stable_semantic_id() {
+        use world_state::DeterministicSeed;
+        let mut world = WorldState::new(DeterministicSeed(19));
+        let id = world.spawn_body(v(-1.0, 0.0, 0.0), 0.2).unwrap();
+        let before = Scene::from_world(&world).unwrap();
+        assert_eq!(
+            before.primitives()[0].target(),
+            Some(SemanticTarget::Body(id))
+        );
+        world
+            .body_mut(id)
+            .unwrap()
+            .apply_motion(v(1.0, 0.0, 0.0), None)
+            .unwrap();
+        let after = Scene::from_world(&world).unwrap();
+        assert_eq!(after.primitives()[0].center(), v(1.0, 0.0, 0.0));
+        assert_eq!(
+            after.primitives()[0].target(),
+            Some(SemanticTarget::Body(id))
+        );
+        assert!(
+            after
+                .intersect(ray(v(1.0, 0.0, -2.0), v(0.0, 0.0, 1.0)))
+                .is_some()
         );
     }
 

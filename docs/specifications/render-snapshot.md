@@ -1,5 +1,7 @@
 # Render snapshot and capacity
 
+Foundation 0.7.1 also copies the authoritative kinematic sphere into the snapshot with `SemanticTarget::Body`. Its position is never computed from rendering frame time. GPU direct and BVH readback of the moved body is tested separately from CPU collision; source markers remain non-solid.
+
 `WorldState` owns analytic geometry and simulation. `Scene::from_world` copies all supported ordinary spheres, organism node spheres, parent-child capsules, and source markers. Each primitive carries a `SemanticTarget` with stable world/entity/node identity; its numeric renderer ID and array index are not persistent event targets. A connection maps to its child node ID. The snapshot does not truncate at 256. Duplicate numeric IDs and invalid world data are errors. It can be rebuilt after growth, source movement, or pruning without changing the world. A topology cut changes packed geometry, so the cached GPU BVH is rebuilt. See [First Interaction](first-interaction.md).
 
 The GPU record is 64 bytes (`center_kind`, `dimensions`, `color`, `identity`: four 16-byte vectors). WGSL reads a runtime-sized storage array and an explicit active count, bounded again by `arrayLength`. An empty scene allocates one zeroed dummy record but has active count zero. Shader and Rust layouts are checked by tests. The buffer is reused when the snapshot's packed data is unchanged and reallocated only when capacity must grow; its current capacity may exceed the active record bytes. Snapshot construction and CPU-to-GPU upload are distinct operations.

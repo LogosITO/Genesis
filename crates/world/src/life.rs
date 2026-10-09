@@ -10,6 +10,8 @@ pub const MAX_ORGANISMS: usize = 4;
 pub const MAX_NODES: usize = 48;
 /// Maximum lifetime node allocations per organism; pruned IDs are not reused.
 pub const MAX_NODE_IDS: u32 = 1024;
+/// Connection capsule radius as a fraction of its endpoint node radius.
+pub const CONNECTION_RADIUS_RATIO: f64 = 0.55;
 /// Maximum resource sources in one world.
 pub const MAX_SOURCES: usize = 4;
 /// Authoritative ordinary sphere capacity, independent of GPU snapshot capacity.
@@ -573,6 +575,33 @@ mod tests {
         assert_eq!(tree.node(5).unwrap().parent(), Some(0));
         world.validate().unwrap();
         assert_eq!(world.prune_branch(organism, 2), Ok(1));
+    }
+
+    #[test]
+    fn lifetime_node_id_exhaustion_is_atomic() {
+        let mut world = WorldState::new(DeterministicSeed(11));
+        let id = world
+            .spawn_organism(
+                Vec3::ZERO,
+                GrowthParameters::new(0.1, 0.5, 1.0, 1.0)
+                    .unwrap()
+                    .with_max_children(1)
+                    .unwrap(),
+            )
+            .unwrap();
+        let up = Vec3::new(0.0, 1.0, 0.0).unwrap();
+        for expected in 1..MAX_NODE_IDS {
+            world.organisms_mut()[0].grow(&[(1.0, up)]).unwrap();
+            assert_eq!(world.organisms()[0].nodes()[1].id(), expected);
+            world.prune_branch(id, expected).unwrap();
+        }
+        let before = world.clone();
+        assert_eq!(
+            world.organisms_mut()[0].grow(&[(1.0, up)]),
+            Err(WorldError::IdExhausted)
+        );
+        assert_eq!(world, before);
+        world.validate().unwrap();
     }
 }
 

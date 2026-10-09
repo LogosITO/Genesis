@@ -1,5 +1,7 @@
 # Renderer architecture
 
+Foundation 0.7.1 draws the kinematic sphere from the same authoritative body state used by CPU contact. The source marker is visible but is not a physical collider. See the [contact specification](../specifications/kinematic-contact.md).
+
 ## First Structure extension
 
 `Scene::from_world` also copies every parent-child edge as an analytic capsule with stable connection identity. Its endpoints come from `WorldState`; the renderer calculates no growth. CPU and WGSL intersect capsule sides and hemispherical caps directly. Overlapping node spheres and capsules are separate nearest-hit solids and do not form a tested watertight union. See the [capsule contract](../specifications/capsule.md) and [growth model](../specifications/growth-model.md).

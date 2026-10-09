@@ -1,5 +1,7 @@
 # Architecture overview
 
+Foundation 0.7.1 adds a single kinematic body and CPU-only analytic sphere/capsule sweep in `world-simulation`. Contact uses a conservative, rebuild-on-step CPU BVH; the renderer maintains its own GPU acceleration. The body and velocity events persist in version-4 saves. See the [contact specification](../specifications/kinematic-contact.md).
+
 **Status: experimental / research stage.** Foundation 0.1 established analytic geometry, mutable state, fixed-step growth, and an embeddable coordinator. Foundation 0.2 added gradients, ideal Lipschitz zero-set bounds, and bounded CPU primitive ray queries. Foundation 0.3 added an optional native GPU prototype for two analytic primitives. Foundation 0.4 adds a bounded mathematical growth graph and continuous resource environment. It is not a complete engine.
 
 The source of truth is analytic parameters and rules. Sampling at a point is a query, not a stored mesh or voxel model. The current renderer produces pixels and textures without changing this source of truth; future acceleration structures may do the same.

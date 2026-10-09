@@ -56,6 +56,8 @@ pub enum SimulationError {
     TimeOverflow,
     /// Events were not strictly ordered or exceeded the per-tick budget.
     InvalidEvents,
+    /// Contact could not be safely classified or movement exceeded its numeric domain.
+    Contact(contact::ContactError),
 }
 impl fmt::Display for SimulationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -89,6 +91,7 @@ pub fn advance(
 
 mod life;
 pub use life::{EnvironmentEvent, EnvironmentEventKind, MAX_EVENTS_PER_TICK, advance_life};
+pub mod contact;
 
 #[cfg(test)]
 mod tests {

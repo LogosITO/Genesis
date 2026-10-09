@@ -1,5 +1,6 @@
 //! Tick-indexed environmental events and atomic bounded growth.
 
+use crate::contact::{ContactScene, SweepOutcome};
 use crate::{SimulationError, SimulationStep, SimulationTime, advance};
 use serde::{Deserialize, Serialize};
 use spatial_math::Vec3;
@@ -31,6 +32,13 @@ pub enum EnvironmentEventKind {
         organism: EntityId,
         /// Stable non-root child node ID; the connection is identified by this child.
         child: u32,
+    },
+    /// Set the sole kinematic body's desired velocity before growth and movement.
+    SetBodyVelocity {
+        /// Stable body identity.
+        id: EntityId,
+        /// World units per simulated second.
+        velocity: Vec3,
     },
 }
 
@@ -81,6 +89,11 @@ pub fn advance_life(
                     .prune_branch(organism, child)
                     .map_err(SimulationError::World)?;
             }
+            EnvironmentEventKind::SetBodyVelocity { id, velocity } => proposed
+                .body_mut(id)
+                .map_err(SimulationError::World)?
+                .set_desired_velocity(velocity)
+                .map_err(SimulationError::World)?,
         }
     }
     let sources = proposed.sources().to_vec();
@@ -152,6 +165,47 @@ pub fn advance_life(
     }
     let mut next_time = *time;
     advance(&mut proposed, &mut next_time, step)?;
+    if let Some(body) = proposed.body().cloned() {
+        let movement = body
+            .desired_velocity()
+            .checked_scale(step.seconds())
+            .map_err(SimulationError::Math)?;
+        let scene = ContactScene::from_world(&proposed).map_err(SimulationError::Contact)?;
+        let outcome = scene
+            .sweep(body.position(), movement, body.radius())
+            .map_err(SimulationError::Contact)?;
+        let (fraction, contact) = match outcome {
+            SweepOutcome::Hit(hit) => {
+                let length = movement.length().map_err(SimulationError::Math)?;
+                let margin = if length == 0.0 {
+                    0.0
+                } else {
+                    (1e-9 / length).min(hit.fraction)
+                };
+                (hit.fraction - margin, Some(hit))
+            }
+            SweepOutcome::Miss => (1.0, None),
+            SweepOutcome::Indeterminate => {
+                return Err(SimulationError::Contact(
+                    crate::contact::ContactError::Indeterminate,
+                ));
+            }
+        };
+        let position = body
+            .position()
+            .checked_add(
+                movement
+                    .checked_scale(fraction)
+                    .map_err(SimulationError::Math)?,
+            )
+            .map_err(SimulationError::Math)?;
+        proposed
+            .body_mut(body.id())
+            .map_err(SimulationError::World)?
+            .apply_motion(position, contact)
+            .map_err(SimulationError::World)?;
+    }
+    proposed.validate().map_err(SimulationError::World)?;
     *world = proposed;
     *time = next_time;
     Ok(())

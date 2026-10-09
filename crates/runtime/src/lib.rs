@@ -24,6 +24,8 @@ pub enum ScheduleError {
     InvalidSource,
     /// Growth target is absent, the root, or conflicts with an already queued cut.
     InvalidTarget,
+    /// Body identity or requested velocity is invalid.
+    InvalidBody,
 }
 impl std::fmt::Display for ScheduleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -117,6 +119,10 @@ impl Runtime {
                     .prune_branch(*organism, *child)
                     .map_err(|_| ScheduleError::InvalidTarget)?;
             }
+            EnvironmentEventKind::SetBodyVelocity { id, velocity } => probe
+                .body_mut(*id)
+                .and_then(|body| body.set_desired_velocity(*velocity))
+                .map_err(|_| ScheduleError::InvalidBody)?,
         }
         self.events.push(EnvironmentEvent {
             tick,
@@ -201,6 +207,10 @@ impl Runtime {
                         .prune_branch(organism, child)
                         .map_err(|_| PersistenceError::InvalidState("event target"))?;
                 }
+                EnvironmentEventKind::SetBodyVelocity { id, velocity } => probe
+                    .body_mut(id)
+                    .and_then(|body| body.set_desired_velocity(velocity))
+                    .map_err(|_| PersistenceError::InvalidState("event body"))?,
             }
             previous_order = Some(event.order);
         }
@@ -305,10 +315,10 @@ mod tests {
         let good = runtime.save_bytes().unwrap();
         let original = runtime.clone();
         let mut value: serde_json::Value = serde_json::from_slice(&good).unwrap();
-        value["format_version"] = 4.into();
+        value["format_version"] = 5.into();
         assert!(matches!(
             runtime.load_into(&serde_json::to_vec(&value).unwrap()),
-            Err(PersistenceError::Version(4))
+            Err(PersistenceError::Version(5))
         ));
         value["format_version"] = 1.into();
         value["runtime"]["world"]["organisms"][0]
@@ -430,6 +440,10 @@ mod tests {
         assert!(runtime.world().organisms()[0].node(1).is_none());
         assert!(runtime.pending_events().is_empty());
         assert_eq!(
+            runtime.schedule(13, kind.clone()),
+            Err(ScheduleError::InvalidTarget)
+        );
+        assert_eq!(
             Runtime::load_bytes(&runtime.save_bytes().unwrap()).unwrap(),
             runtime
         );
@@ -478,6 +492,249 @@ mod tests {
             Runtime::load_bytes(&serde_json::to_vec(&value).unwrap()).unwrap(),
             runtime
         );
+    }
+
+    #[test]
+    fn body_events_save_resume_validation_and_atomic_failure() {
+        let (mut runtime, source) = fixture();
+        let body = runtime
+            .world
+            .spawn_body(Vec3::new(0.12, 0.3, -1.0).unwrap(), 0.1)
+            .unwrap();
+        let move_event = EnvironmentEventKind::SetBodyVelocity {
+            id: body,
+            velocity: Vec3::new(0.0, 0.0, 2.0).unwrap(),
+        };
+        assert_eq!(
+            runtime.schedule(
+                1,
+                EnvironmentEventKind::SetBodyVelocity {
+                    id: source,
+                    velocity: Vec3::ZERO
+                }
+            ),
+            Err(ScheduleError::InvalidBody)
+        );
+        assert_eq!(
+            runtime.schedule(
+                1,
+                EnvironmentEventKind::SetBodyVelocity {
+                    id: body,
+                    velocity: Vec3::new(101.0, 0.0, 0.0).unwrap()
+                }
+            ),
+            Err(ScheduleError::InvalidBody)
+        );
+        runtime.schedule(1, move_event).unwrap();
+        runtime
+            .schedule(
+                1,
+                EnvironmentEventKind::SetBodyVelocity {
+                    id: body,
+                    velocity: Vec3::new(0.0, 0.0, 1.0).unwrap(),
+                },
+            )
+            .unwrap();
+        let saved = runtime.save_bytes().unwrap();
+        let mut bad: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+        bad["runtime"]["world"]["body"]["radius"] = (-1.0).into();
+        assert!(matches!(
+            Runtime::load_bytes(&serde_json::to_vec(&bad).unwrap()),
+            Err(PersistenceError::InvalidState("world"))
+        ));
+        let mut bad: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+        bad["runtime"]["world"]["body"]["desired_velocity"]["x"] = 101.0.into();
+        assert!(matches!(
+            Runtime::load_bytes(&serde_json::to_vec(&bad).unwrap()),
+            Err(PersistenceError::InvalidState("world"))
+        ));
+        let mut resumed = Runtime::load_bytes(&saved).unwrap();
+        for _ in 0..30 {
+            runtime.tick().unwrap();
+            resumed.tick().unwrap();
+        }
+        assert_eq!(runtime, resumed);
+        assert_eq!(runtime.world.body().unwrap().id(), body);
+        assert_eq!(
+            runtime.world.body().unwrap().desired_velocity(),
+            Vec3::new(0.0, 0.0, 1.0).unwrap()
+        );
+        let before = runtime.clone();
+        let invalid = [EnvironmentEvent {
+            tick: 31,
+            order: 0,
+            kind: EnvironmentEventKind::SetBodyVelocity {
+                id: body,
+                velocity: Vec3::new(101.0, 0.0, 0.0).unwrap(),
+            },
+        }];
+        assert!(
+            advance_life(
+                &mut runtime.world,
+                &mut runtime.time,
+                runtime.step,
+                &invalid
+            )
+            .is_err()
+        );
+        assert_eq!(runtime, before);
+
+        let (legacy, _) = fixture();
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&legacy.save_bytes().unwrap()).unwrap();
+        json["format_version"] = 3.into();
+        json["runtime"]["world"]
+            .as_object_mut()
+            .unwrap()
+            .remove("body");
+        assert_eq!(
+            Runtime::load_bytes(&serde_json::to_vec(&json).unwrap()).unwrap(),
+            legacy
+        );
+    }
+
+    #[test]
+    fn new_growth_overlapping_body_is_reported_without_teleporting() {
+        let mut world = WorldState::new(DeterministicSeed(17));
+        world
+            .spawn_organism(
+                Vec3::ZERO,
+                GrowthParameters::new(0.1, 0.3, 0.1, 1.0)
+                    .unwrap()
+                    .with_max_children(1)
+                    .unwrap(),
+            )
+            .unwrap();
+        world
+            .spawn_source(Vec3::new(0.0, 1.0, 0.0).unwrap(), 3.0, 10.0)
+            .unwrap();
+        let position = Vec3::new(0.0, 0.3, 0.0).unwrap();
+        world.spawn_body(position, 0.1).unwrap();
+        let mut runtime = Runtime::new(world, SimulationStep::new(0.1).unwrap());
+        runtime.tick().unwrap();
+        let body = runtime.world().body().unwrap();
+        assert_eq!(body.position(), position);
+        assert!(body.contact().unwrap().initial_overlap);
+        assert_eq!(body.contact().unwrap().fraction, 0.0);
+        assert_eq!(body.last_displacement(), Vec3::ZERO);
+    }
+
+    #[test]
+    fn repeated_fast_body_steps_stop_at_sphere_and_invalid_sweep_rolls_back() {
+        let mut world = WorldState::new(DeterministicSeed(24));
+        world
+            .spawn_organism(
+                Vec3::ZERO,
+                GrowthParameters::new(1.0, 0.3, 0.1, 1.0).unwrap(),
+            )
+            .unwrap();
+        let body = world
+            .spawn_body(Vec3::new(-5.0, 0.0, 0.0).unwrap(), 0.5)
+            .unwrap();
+        let mut runtime = Runtime::new(world, SimulationStep::new(0.1).unwrap());
+        runtime
+            .schedule(
+                1,
+                EnvironmentEventKind::SetBodyVelocity {
+                    id: body,
+                    velocity: Vec3::new(100.0, 0.0, 0.0).unwrap(),
+                },
+            )
+            .unwrap();
+        for _ in 0..10 {
+            runtime.tick().unwrap();
+            let x = runtime.world().body().unwrap().position().x();
+            assert!((-1.50000001..=-1.5).contains(&x));
+            assert!(runtime.world().body().unwrap().contact().is_some());
+        }
+        let mut far = WorldState::new(DeterministicSeed(25));
+        let id = far
+            .spawn_body(Vec3::new(999.0, 0.0, 0.0).unwrap(), 0.1)
+            .unwrap();
+        let mut invalid = Runtime::new(far, SimulationStep::new(1.0).unwrap());
+        invalid
+            .schedule(
+                1,
+                EnvironmentEventKind::SetBodyVelocity {
+                    id,
+                    velocity: Vec3::new(100.0, 0.0, 0.0).unwrap(),
+                },
+            )
+            .unwrap();
+        let before = invalid.clone();
+        assert!(invalid.tick().is_err());
+        assert_eq!(invalid, before);
+    }
+
+    #[test]
+    fn two_thousand_ticks_of_prune_regrow_and_save_resume_are_bounded() {
+        use world_simulation::contact::ContactScene;
+        let mut world = WorldState::new(DeterministicSeed(18));
+        let organism = world
+            .spawn_organism(
+                Vec3::ZERO,
+                GrowthParameters::new(0.1, 0.3, 0.12, 1.0)
+                    .unwrap()
+                    .with_max_children(1)
+                    .unwrap(),
+            )
+            .unwrap();
+        world
+            .spawn_source(Vec3::new(0.0, 2.0, 0.0).unwrap(), 4.0, 1.0)
+            .unwrap();
+        world
+            .spawn_body(Vec3::new(0.12, 0.32, -1.0).unwrap(), 0.1)
+            .unwrap();
+        let mut continuous = Runtime::new(world, SimulationStep::new(0.01).unwrap());
+        fn drive(runtime: &mut Runtime, organism: world_state::EntityId) {
+            if runtime.time().ticks() % 25 == 24
+                && let Some(child) = runtime.world().organisms()[0]
+                    .nodes()
+                    .iter()
+                    .find(|node| node.parent() == Some(0))
+                    .map(|node| node.id())
+            {
+                runtime
+                    .schedule(
+                        runtime.time().ticks() + 1,
+                        EnvironmentEventKind::PruneBranch { organism, child },
+                    )
+                    .unwrap();
+            }
+            let previous_id = runtime.world().organisms()[0].next_node_id();
+            runtime.tick().unwrap();
+            runtime.world().validate().unwrap();
+            assert!(runtime.world().organisms()[0].next_node_id() >= previous_id);
+            assert!(runtime.world().organisms()[0].nodes().len() <= world_state::MAX_NODES);
+            if runtime.time().ticks().is_multiple_of(100) {
+                let scene = ContactScene::from_world(runtime.world()).unwrap();
+                assert!(scene.solid_count() < world_state::MAX_NODES * 2);
+                assert_eq!(
+                    scene.sweep(
+                        Vec3::new(0.12, 0.32, -1.0).unwrap(),
+                        Vec3::new(0.0, 0.0, 2.0).unwrap(),
+                        0.1
+                    ),
+                    scene.sweep_direct(
+                        Vec3::new(0.12, 0.32, -1.0).unwrap(),
+                        Vec3::new(0.0, 0.0, 2.0).unwrap(),
+                        0.1
+                    )
+                );
+                assert!(runtime.save_bytes().unwrap().len() < MAX_SAVE_BYTES);
+            }
+        }
+        for _ in 0..1000 {
+            drive(&mut continuous, organism);
+        }
+        let mut replay = Runtime::load_bytes(&continuous.save_bytes().unwrap()).unwrap();
+        for _ in 1000..2000 {
+            drive(&mut continuous, organism);
+            drive(&mut replay, organism);
+        }
+        assert_eq!(continuous, replay);
+        assert!(continuous.world().organisms()[0].next_node_id() > 20);
+        assert_eq!(continuous.time().ticks(), 2000);
     }
 
     #[test]

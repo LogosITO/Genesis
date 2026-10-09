@@ -1752,6 +1752,83 @@ fn read_rgb(
 
 #[test]
 #[ignore = "requires a compatible native GPU; run explicitly"]
+fn gpu_body_snapshot_follows_authoritative_fixed_step() {
+    use world_simulation::{
+        EnvironmentEvent, EnvironmentEventKind, SimulationStep, SimulationTime, advance_life,
+    };
+    let mut world = WorldState::new(DeterministicSeed(23));
+    let id = world.spawn_body(v(-1.0, 0.0, 0.0), 0.2).unwrap();
+    let before = Scene::from_world(&world).unwrap();
+    let mut time = SimulationTime::default();
+    advance_life(
+        &mut world,
+        &mut time,
+        SimulationStep::new(0.5).unwrap(),
+        &[EnvironmentEvent {
+            tick: 1,
+            order: 0,
+            kind: EnvironmentEventKind::SetBodyVelocity {
+                id,
+                velocity: v(2.0, 0.0, 0.0),
+            },
+        }],
+    )
+    .unwrap();
+    let after = Scene::from_world(&world).unwrap();
+    assert_eq!(
+        after.primitives()[0].target(),
+        Some(SemanticTarget::Body(id))
+    );
+    assert_eq!(world.body().unwrap().position(), Vec3::ZERO);
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        ..Default::default()
+    }))
+    .expect("GPU adapter required");
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let renderer =
+        pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+    let ray = r(v(0.0, 0.0, -3.0), v(0.0, 0.0, 1.0));
+    assert!(renderer.query(&device, &queue, &before, &[ray]).unwrap()[0].is_none());
+    assert_eq!(
+        renderer
+            .query_with_traversal(&device, &queue, &after, &[ray], GpuTraversal::Bvh)
+            .unwrap()[0]
+            .unwrap()
+            .id,
+        after.intersect(ray).unwrap().id
+    );
+    let camera = Camera::look_at(v(0.0, 0.0, -4.0), Vec3::ZERO, v(0.0, 1.0, 0.0), 0.8).unwrap();
+    let render = |scene: &Scene, mode| {
+        let image = renderer
+            .draw_with_traversal(
+                &device,
+                &queue,
+                scene,
+                camera,
+                mode,
+                DrawOptions {
+                    size: [256, 256],
+                    normal_debug: false,
+                    surface: None,
+                    timer: None,
+                },
+            )
+            .unwrap();
+        read_rgb(&device, &queue, &image, 256, 256)
+    };
+    let old = render(&before, GpuTraversal::Direct);
+    let direct = render(&after, GpuTraversal::Direct);
+    let accelerated = render(&after, GpuTraversal::Bvh);
+    assert_ne!(old, direct);
+    assert_eq!(direct, accelerated);
+}
+
+#[test]
+#[ignore = "requires a compatible native GPU; run explicitly"]
 fn gpu_bvh_offscreen_image_parity() {
     let instance = wgpu::Instance::default();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {

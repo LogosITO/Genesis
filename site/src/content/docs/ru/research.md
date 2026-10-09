@@ -12,3 +12,5 @@ template: splash
 [Эксперимент GPU BVH](../reference/research/gpu-bvh-acceleration/) сравнивает CPU и GPU пути по реальному считыванию результатов и замерам одинаковых сцен. Технический отчёт пока доступен на английском языке.
 
 [Измерения First Interaction](../reference/research/first-interaction-measurements/) и [контракт взаимодействия](../reference/specifications/first-interaction/) описывают выбор ветви, обрезку, сохранение и replay. Технические страницы пока доступны на английском языке.
+
+[Измерения First Contact](../reference/research/first-contact-measurements/) сравнивают прямой контактный запрос и BVH, стоимость узкой фазы и пересборки, а также сценарии сохранения и продолжения. Технический текст пока на английском языке.

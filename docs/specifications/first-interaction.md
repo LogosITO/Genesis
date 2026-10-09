@@ -1,5 +1,7 @@
 # First Interaction: authoritative branch pruning
 
+Foundation 0.7.1 additionally maps the kinematic body to `SemanticTarget::Body`; selecting that target cannot authorize a branch cut. See the [contact contract](kinematic-contact.md).
+
 **Status:** experimental Foundation 0.7 vertical slice. `WorldState` remains authoritative; CPU picking reads a `Scene::from_world` snapshot and cannot mutate it. GPU traversal only draws that snapshot.
 
 ## Semantic identity and picking
