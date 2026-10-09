@@ -1,8 +1,10 @@
 //! Headless, isolated field graph preview. Output pixels come from the GPU interpreter.
 
+use analytic_field::Sphere;
 use analytic_renderer::{
-    Camera, Ray,
+    Camera, GpuRenderer, Ray,
     field_graph_gpu::{GraphGpuOutcome, GraphGpuRenderer, GraphTracePolicy, WorldFieldGpuOutcome},
+    mixed::{MixedRenderOptions, MixedSource, render_mixed_rgba},
 };
 use spatial_math::{Transform, Vec3};
 use std::{
@@ -177,6 +179,60 @@ fn preview_world_fixture() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn preview_mixed_fixture() -> Result<(), Box<dyn Error>> {
+    let mut world = WorldState::new(DeterministicSeed(31));
+    world.spawn_sphere(
+        Sphere::new(0.65)?,
+        Transform::new(v(-1.0, 0.0, -1.0), 1.0)?,
+        0.0,
+    )?;
+    world.spawn_authored(
+        include_bytes!("../../authoring/world-single.json"),
+        Transform::new(v(0.0, -0.9, -0.5), 1.0)?,
+        false,
+    )?;
+    let source = br#"{"format_version":1,"id":"mixed-sphere","root":"s","nodes":[{"op":"sphere","id":"s","radius":0.75}]}"#;
+    let rear = world.spawn_field(source, Transform::new(v(-1.0, 0.0, 1.0), 1.0)?)?;
+    let front = world.spawn_field(source, Transform::new(v(1.0, 0.0, -1.0), 1.0)?)?;
+    let instance = wgpu::Instance::default();
+    let adapter =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))?;
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))?;
+    let analytic = pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm))?;
+    let fields = pollster::block_on(GraphGpuRenderer::new(&device))?;
+    let camera = Camera::look_at(v(0.0, 0.0, -6.0), Vec3::ZERO, v(0.0, 1.0, 0.0), 0.8)?;
+    let started = Instant::now();
+    let frame = render_mixed_rgba(
+        &analytic,
+        &fields,
+        &device,
+        &queue,
+        &world,
+        camera,
+        MixedRenderOptions {
+            size: [256, 256],
+            policy: GraphTracePolicy::default(),
+        },
+    )?;
+    let output = Path::new("target/field-graph-captures");
+    fs::create_dir_all(output)?;
+    let capture = output.join("mixed-world.ppm");
+    save_ppm(&capture, &frame.rgba, frame.size)?;
+    let count = |target| {
+        frame
+            .sources
+            .iter()
+            .filter(|&&source| source == target)
+            .count()
+    };
+    println!(
+        "{}",
+        serde_json::json!({"capture":capture,"adapter":adapter.get_info().name,"backend":format!("{:?}",adapter.get_info().backend),"analytic_pixels":frame.sources.iter().filter(|source| matches!(source,MixedSource::Analytic(_))).count(),"rear_field_pixels":count(MixedSource::Field(rear)),"front_field_pixels":count(MixedSource::Field(front)),"uncertain_pixels":count(MixedSource::Uncertain),"exhausted_pixels":count(MixedSource::Exhausted),"ambiguous_pixels":count(MixedSource::Ambiguous),"full_blocking_ms":started.elapsed().as_secs_f64()*1000.0})
+    );
+    Ok(())
+}
+
 fn inspect(path: &Path) -> Result<(), Box<dyn Error>> {
     let source = read_graph_source(path)?;
     let graph = compile_json(&source)?;
@@ -200,7 +256,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args().skip(1);
     let first = args
         .next()
-        .ok_or("usage: field-graph-preview <definition.json> [--watch] | --inspect <definition.json> | --world-fixture")?;
+        .ok_or("usage: field-graph-preview <definition.json> [--watch] | --inspect <definition.json> | --world-fixture | --mixed-world-fixture")?;
+    if first == "--mixed-world-fixture" {
+        if args.next().is_some() {
+            return Err("--mixed-world-fixture accepts no other arguments".into());
+        }
+        return preview_mixed_fixture();
+    }
     if first == "--inspect" {
         let path = args.next().ok_or("--inspect requires a definition path")?;
         if args.next().is_some() {

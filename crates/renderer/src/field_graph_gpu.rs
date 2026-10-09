@@ -614,6 +614,7 @@ impl GraphGpuRenderer {
         rays: &[Ray],
         policy: GraphTracePolicy,
     ) -> Result<Vec<WorldFieldGpuOutcome>, RenderError> {
+        policy.validate()?;
         world
             .validate()
             .map_err(|_| RenderError::InvalidInput("invalid world"))?;

@@ -77,6 +77,7 @@ cargo run -p field-graph-preview --locked -- examples/field-graph/definitions/tw
 cargo run -p field-graph-preview --locked -- examples/field-graph/definitions/plinth.json
 cargo run -p field-graph-preview --locked -- examples/field-graph/definitions/twin.json --watch
 cargo run -p field-graph-preview --locked -- --world-fixture
+cargo run -p field-graph-preview --locked -- --mixed-world-fixture
 cargo run -p field-graph-preview --locked -- --inspect examples/field-graph/definitions/balanced-16.json
 ```
 

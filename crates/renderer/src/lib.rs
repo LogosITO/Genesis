@@ -4,6 +4,7 @@
 mod acceleration;
 pub mod field_graph_gpu;
 mod gpu;
+pub mod mixed;
 pub use acceleration::{Bvh, PrimitiveBounds};
 pub use gpu::{
     DrawOptions, GpuAccelerationStats, GpuRenderer, GpuResult, GpuTimer, GpuTraversal,

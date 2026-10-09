@@ -26,6 +26,15 @@ Existing authored capsule instances remain intact.
   exhausted occurrence blocks a nearest-hit claim. The two-instance fixture
   assembles GPU ray readback into a PPM image. This is a research display path;
   it uploads graph buffers per occurrence and query chunk.
+- A bounded mixed-depth reference uses one `Camera::ray` stream for the existing
+  analytic GPU query and every enabled world-owned field query. It compares
+  normalized world-ray distances after positive-scale conversion, preserves
+  stable instance IDs and maps unresolved field results to visible diagnostics.
+  Both WGSL query paths normalize the same uploaded `f32` ray direction before
+  tracing; this avoids comparing distances in different ray parameters.
+  Analytic and field data are read back before CPU color composition. This
+  reference is deliberately limited to 256×256 and cannot be used as a native
+  real-time renderer. It gives a tested depth policy for a future GPU compositor.
 
 ## Open gates
 

@@ -7,6 +7,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+analytic-field = { path = "../../crates/field" }
 world-authoring = { path = "../../crates/authoring" }
 analytic-renderer = { path = "../../crates/renderer" }
 spatial-math = { path = "../../crates/math" }

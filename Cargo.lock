@@ -433,6 +433,7 @@ dependencies = [
 name = "field-graph-preview"
 version = "0.1.0"
 dependencies = [
+ "analytic-field",
  "analytic-renderer",
  "pollster",
  "serde_json",

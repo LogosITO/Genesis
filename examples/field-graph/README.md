@@ -7,6 +7,7 @@ cargo run -p field-graph-preview --locked -- examples/field-graph/definitions/tw
 cargo run -p field-graph-preview --locked -- examples/field-graph/definitions/plinth.json
 cargo run -p field-graph-preview --locked -- examples/field-graph/definitions/twin.json --watch
 cargo run -p field-graph-preview --locked -- --world-fixture
+cargo run -p field-graph-preview --locked -- --mixed-world-fixture
 cargo run -p field-graph-preview --locked -- examples/field-graph/definitions/shared-face.json
 cargo run -p field-graph-preview --locked -- examples/field-graph/definitions/balanced-16.json
 cargo run -p field-graph-preview --locked -- --inspect examples/field-graph/definitions/balanced-16.json
@@ -21,6 +22,15 @@ pixels. The JSON summary gives stable IDs, outcome counts, adapter and full
 query/readback time. This fixture does not change The Passage. The canonical
 [field graph contract](../../docs/specifications/field-graph.md) states budgets
 and numerical limits.
+
+`--mixed-world-fixture` builds a `WorldState` with one analytic sphere, one
+world-authored capsule and two instances sharing one field definition. It uses
+the same camera rays for both GPU query paths, compares approximate world-unit
+hit distances and writes `target/field-graph-captures/mixed-world.ppm`. Red
+pixels mean an unresolved field query, yellow means exhausted tracing, and
+magenta means the display-only depth tie band cannot order two hits. The JSON
+summary reports source counts and full blocking time. This is a 256×256
+offscreen reference, not the interactive Passage viewport.
 
 `shared-face.json` joins adjacent boxes. Its origin is a zero sample on an
 internal face, so it must not be treated as an external surface. `balanced-16.json`
