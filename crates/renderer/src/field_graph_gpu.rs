@@ -5,6 +5,7 @@ use bytemuck::{Pod, Zeroable};
 use std::{sync::mpsc, time::Instant};
 use wgpu::util::DeviceExt;
 use world_authoring::field_graph::{Graph, Node};
+use world_state::{EntityId, WorldState};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -99,6 +100,34 @@ pub enum GraphGpuIssue {
     UndefinedNormal,
     /// Ray distance could not advance in `f32`.
     NoProgress,
+}
+
+/// Display-only nearest result across enabled world-owned graph occurrences.
+#[derive(Clone, Copy, Debug)]
+pub enum WorldFieldGpuOutcome {
+    /// Approximate nearest world-space entry, tied by occurrence allocation order.
+    Hit {
+        /// Stable world occurrence ID.
+        id: EntityId,
+        /// Approximate world-unit ray distance.
+        distance: f32,
+        /// Display normal in world coordinates under uniform positive scale.
+        normal: [f32; 3],
+    },
+    /// Every enabled graph's GPU tracer returned its ideal-model miss status.
+    Miss,
+    /// One graph cannot be classified; a nearest hit cannot be guaranteed.
+    Uncertain {
+        /// First occurrence that prevented classification.
+        id: EntityId,
+        /// GPU tracing failure reason.
+        issue: GraphGpuIssue,
+    },
+    /// One graph exhausted its sample budget.
+    Exhausted {
+        /// First occurrence that exhausted its sample budget.
+        id: EntityId,
+    },
 }
 
 /// Timings and output for one blocking offscreen frame.
@@ -567,6 +596,92 @@ impl GraphGpuRenderer {
                 }),
             })
             .collect())
+    }
+
+    /// GPU ray diagnostics for visible world-owned fields. Graph buffers are derived
+    /// from the world and uploaded per occurrence; no contact authority is implied.
+    pub fn query_world_fields(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        world: &WorldState,
+        camera: Camera,
+        rays: &[Ray],
+        policy: GraphTracePolicy,
+    ) -> Result<Vec<WorldFieldGpuOutcome>, RenderError> {
+        world
+            .validate()
+            .map_err(|_| RenderError::InvalidInput("invalid world"))?;
+        if rays.len() > 4096 {
+            return Err(RenderError::InvalidInput("too many field query rays"));
+        }
+        let mut nearest = vec![WorldFieldGpuOutcome::Miss; rays.len()];
+        for instance in world.field_instances().iter().filter(|item| item.enabled()) {
+            let scale = instance.transform().scale();
+            let local_rays = rays
+                .iter()
+                .map(|ray| {
+                    let local_origin = instance
+                        .transform()
+                        .to_local(ray.origin())
+                        .map_err(|_| RenderError::InvalidInput("field local ray overflow"))?;
+                    let (near, far) = ray.interval();
+                    Ray::new(local_origin, ray.direction(), near / scale, far / scale)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let graph = world
+                .field_graph(instance.id())
+                .ok_or(RenderError::InvalidInput("missing field graph"))?;
+            for (slot, outcome) in nearest.iter_mut().zip(self.query(
+                device,
+                queue,
+                graph,
+                camera,
+                &local_rays,
+                policy,
+            )?) {
+                match outcome {
+                    GraphGpuOutcome::Hit { distance, normal } => {
+                        let distance = distance * scale as f32;
+                        if !distance.is_finite() {
+                            return Err(RenderError::InvalidInput("field hit overflow"));
+                        }
+                        if matches!(slot, WorldFieldGpuOutcome::Miss)
+                            || matches!(slot, WorldFieldGpuOutcome::Hit { distance: prior, .. } if distance < *prior)
+                        {
+                            *slot = WorldFieldGpuOutcome::Hit {
+                                id: instance.id(),
+                                distance,
+                                normal,
+                            };
+                        }
+                    }
+                    GraphGpuOutcome::Uncertain(issue) => {
+                        if !matches!(
+                            slot,
+                            WorldFieldGpuOutcome::Uncertain { .. }
+                                | WorldFieldGpuOutcome::Exhausted { .. }
+                        ) {
+                            *slot = WorldFieldGpuOutcome::Uncertain {
+                                id: instance.id(),
+                                issue,
+                            };
+                        }
+                    }
+                    GraphGpuOutcome::Exhausted => {
+                        if !matches!(
+                            slot,
+                            WorldFieldGpuOutcome::Uncertain { .. }
+                                | WorldFieldGpuOutcome::Exhausted { .. }
+                        ) {
+                            *slot = WorldFieldGpuOutcome::Exhausted { id: instance.id() };
+                        }
+                    }
+                    GraphGpuOutcome::Miss => {}
+                }
+            }
+        }
+        Ok(nearest)
     }
 
     /// Read the WGSL evaluator's `f32` field samples. `None` denotes invalid GPU arithmetic.

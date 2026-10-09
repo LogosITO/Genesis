@@ -1,6 +1,6 @@
 # Genesis
 
-**Experimental / Research Stage.** Genesis stores analytic parameters, transforms, growth rules, finite resource reservoirs, authored definitions and occurrences, and one kinematic body as authoritative world state; no mesh or voxel geometry is stored. Foundation 0.11 adds bounded authored instances and version-6 saves. CPU math, simulation, and contact remain testable without a GPU. This is neither validated biology nor a general physics engine.
+**Experimental / Research Stage.** Genesis stores analytic parameters, transforms, growth rules, finite resource reservoirs, authored definitions and occurrences, and one kinematic body as authoritative world state; no mesh or voxel geometry is stored. Foundation 0.13 adds bounded visual field instances and version-7 saves; field collisions remain disabled. CPU math, simulation, and contact remain testable without a GPU. This is neither validated biology nor a general physics engine.
 
 ## Run
 
@@ -70,12 +70,13 @@ cargo run -p first-light --locked -- --authored-world examples/authoring/world-s
 
 The headless command prints deterministic JSON after creating two occurrences from one definition, picking and contacting a capsule, applying typed tick events, saving, loading, and replaying. In the native window, click to select, press **E** to toggle the instance, or **M** to move it one unit along +X. See the [authored instance contract](docs/specifications/authored-world-instances.md) and [local evaluation](docs/research/foundation-011.md).
 
-Render an external implicit field graph directly on the GPU, independently of `WorldState`:
+Render an external implicit field graph directly on the GPU, or capture a world-owned two-instance fixture:
 
 ```sh
 cargo run -p field-graph-preview --locked -- examples/field-graph/definitions/twin.json
 cargo run -p field-graph-preview --locked -- examples/field-graph/definitions/plinth.json
 cargo run -p field-graph-preview --locked -- examples/field-graph/definitions/twin.json --watch
+cargo run -p field-graph-preview --locked -- --world-fixture
 ```
 
 The headless preview writes GPU-readback PPM captures under `target/field-graph-captures/` and prints CPU/GPU ray results as JSON. Editing the file in `--watch` mode reloads valid changes while preserving the previous preview on validation failure. See the [example guide](examples/field-graph/README.md) and [bounded graph contract](docs/specifications/field-graph.md).

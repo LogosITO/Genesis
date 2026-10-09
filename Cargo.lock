@@ -439,6 +439,7 @@ dependencies = [
  "spatial-math",
  "wgpu",
  "world-authoring",
+ "world-state",
 ]
 
 [[package]]

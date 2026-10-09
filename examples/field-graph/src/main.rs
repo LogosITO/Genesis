@@ -2,9 +2,9 @@
 
 use analytic_renderer::{
     Camera, Ray,
-    field_graph_gpu::{GraphGpuOutcome, GraphGpuRenderer, GraphTracePolicy},
+    field_graph_gpu::{GraphGpuOutcome, GraphGpuRenderer, GraphTracePolicy, WorldFieldGpuOutcome},
 };
-use spatial_math::Vec3;
+use spatial_math::{Transform, Vec3};
 use std::{
     error::Error,
     fs,
@@ -17,6 +17,7 @@ use world_authoring::field_graph::{
     Graph, MAX_SOURCE_BYTES, SolidRayOptions, TraceOptions, compile_json, trace,
     trace_exterior_entry_report,
 };
+use world_state::{DeterministicSeed, WorldState};
 
 fn read_graph_source(path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut bytes = Vec::new();
@@ -98,12 +99,96 @@ fn preview(
     Ok(())
 }
 
+fn preview_world_fixture() -> Result<(), Box<dyn Error>> {
+    let mut world = WorldState::new(DeterministicSeed(12));
+    let first = world.spawn_field(
+        include_bytes!("../definitions/twin.json"),
+        Transform::new(v(-1.7, 0.0, 0.0), 1.0)?,
+    )?;
+    let second = world.spawn_field(
+        include_bytes!("../definitions/plinth.json"),
+        Transform::new(v(1.7, 0.0, 0.0), 1.0)?,
+    )?;
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        apply_limit_buckets: false,
+    }))?;
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))?;
+    let renderer = pollster::block_on(GraphGpuRenderer::new(&device))?;
+    let camera = Camera::look_at(v(0.0, 0.0, -6.0), Vec3::ZERO, v(0.0, 1.0, 0.0), 0.8)?;
+    let size = [128, 128];
+    let rays = (0..size[1])
+        .flat_map(|y| (0..size[0]).map(move |x| camera.ray(x, y, size[0], size[1])))
+        .collect::<Result<Vec<_>, _>>()?;
+    let started = Instant::now();
+    let mut outcomes = Vec::with_capacity(rays.len());
+    for chunk in rays.chunks(4096) {
+        outcomes.extend(renderer.query_world_fields(
+            &device,
+            &queue,
+            &world,
+            camera,
+            chunk,
+            GraphTracePolicy::default(),
+        )?);
+    }
+    let full_query_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let mut rgba = Vec::with_capacity(outcomes.len() * 4);
+    let mut counts = [0usize; 4];
+    for outcome in outcomes {
+        let color = match outcome {
+            WorldFieldGpuOutcome::Hit { id, normal, .. } => {
+                counts[0] += 1;
+                let shade = (0.2 + 0.8 * normal[2].abs()).clamp(0.0, 1.0);
+                let base = if id == first {
+                    [40.0, 180.0, 225.0]
+                } else {
+                    [230.0, 155.0, 50.0]
+                };
+                base.map(|channel| (channel * shade) as u8)
+            }
+            WorldFieldGpuOutcome::Miss => {
+                counts[1] += 1;
+                [9, 14, 23]
+            }
+            WorldFieldGpuOutcome::Uncertain { .. } => {
+                counts[2] += 1;
+                [230, 25, 25]
+            }
+            WorldFieldGpuOutcome::Exhausted { .. } => {
+                counts[3] += 1;
+                [230, 190, 15]
+            }
+        };
+        rgba.extend_from_slice(&[color[0], color[1], color[2], 255]);
+    }
+    let output = Path::new("target/field-graph-captures");
+    fs::create_dir_all(output)?;
+    let capture = output.join("world-instances.ppm");
+    save_ppm(&capture, &rgba, size)?;
+    println!(
+        "{}",
+        serde_json::json!({"capture":capture,"adapter":adapter.get_info().name,"instances":[first.value(),second.value()],"hits":counts[0],"misses":counts[1],"uncertain":counts[2],"exhausted":counts[3],"full_query_ms":full_query_ms,"size":size})
+    );
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args().skip(1);
-    let path = PathBuf::from(
-        args.next()
-            .ok_or("usage: field-graph-preview <definition.json> [--watch]")?,
-    );
+    let first = args
+        .next()
+        .ok_or("usage: field-graph-preview <definition.json> [--watch] | --world-fixture")?;
+    if first == "--world-fixture" {
+        if args.next().is_some() {
+            return Err("--world-fixture accepts no other arguments".into());
+        }
+        return preview_world_fixture();
+    }
+    let path = PathBuf::from(first);
     let watch = match args.next().as_deref() {
         None => false,
         Some("--watch") => true,

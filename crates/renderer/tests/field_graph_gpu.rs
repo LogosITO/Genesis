@@ -3,11 +3,87 @@ use analytic_renderer::{
     Camera, Ray,
     field_graph_gpu::{
         GraphGpuIssue, GraphGpuOutcome, GraphGpuRenderer, GraphRenderOptions, GraphTracePolicy,
+        WorldFieldGpuOutcome,
     },
 };
-use spatial_math::Vec3;
+use spatial_math::{Transform, Vec3};
 use std::time::Instant;
 use world_authoring::field_graph::{TraceOptions, TraceOutcome, compile_json, trace};
+use world_state::{DeterministicSeed, WorldState};
+
+#[test]
+#[ignore = "requires native GPU; world-owned graph readback"]
+fn world_field_occurrences_query_real_gpu_without_becoming_colliders() {
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        apply_limit_buckets: false,
+    }))
+    .unwrap();
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let renderer = pollster::block_on(GraphGpuRenderer::new(&device)).unwrap();
+    let source = include_bytes!("../../../examples/field-graph/definitions/twin.json");
+    let mut world = WorldState::new(DeterministicSeed(90));
+    let left = world
+        .spawn_field(source, Transform::new(v(-3.0, 0.0, 0.0), 1.0).unwrap())
+        .unwrap();
+    let right = world
+        .spawn_field(source, Transform::new(v(3.0, 0.0, 0.0), 1.0).unwrap())
+        .unwrap();
+    assert_eq!(world.field_definitions().len(), 1);
+    assert_eq!(
+        world_simulation::contact::ContactScene::from_world(&world)
+            .unwrap()
+            .solid_count(),
+        0
+    );
+    let rays = [
+        Ray::new(v(-3.0, 0.0, -6.0), v(0.0, 0.0, 1.0), 0.001, 12.0).unwrap(),
+        Ray::new(v(3.0, 0.0, -6.0), v(0.0, 0.0, 1.0), 0.001, 12.0).unwrap(),
+    ];
+    let query = |world: &WorldState| {
+        renderer
+            .query_world_fields(
+                &device,
+                &queue,
+                world,
+                camera(),
+                &rays,
+                GraphTracePolicy::default(),
+            )
+            .unwrap()
+    };
+    let hits = query(&world);
+    assert!(
+        matches!(hits[0], WorldFieldGpuOutcome::Hit{id,distance,..} if id==left && (distance-5.38).abs()<0.02)
+    );
+    assert!(
+        matches!(hits[1], WorldFieldGpuOutcome::Hit{id,distance,..} if id==right && (distance-5.38).abs()<0.02)
+    );
+    world
+        .set_field_transform(right, Transform::new(v(-3.0, 0.0, -2.0), 1.0).unwrap())
+        .unwrap();
+    assert!(matches!(query(&world)[0], WorldFieldGpuOutcome::Hit { id, .. } if id == right));
+    world
+        .set_field_transform(right, Transform::new(v(-3.0, 0.0, 2.0), 1.0).unwrap())
+        .unwrap();
+    assert!(matches!(query(&world)[0], WorldFieldGpuOutcome::Hit { id, .. } if id == left));
+    world
+        .set_field_transform(right, Transform::new(v(-3.0, 0.0, 0.0), 1.0).unwrap())
+        .unwrap();
+    assert!(matches!(query(&world)[0], WorldFieldGpuOutcome::Hit { id, .. } if id == left));
+    world.set_field_enabled(right, false).unwrap();
+    assert!(matches!(query(&world)[1], WorldFieldGpuOutcome::Miss));
+    world.remove_field(left).unwrap();
+    assert!(
+        query(&world)
+            .iter()
+            .all(|outcome| matches!(outcome, WorldFieldGpuOutcome::Miss))
+    );
+}
 
 fn v(x: f64, y: f64, z: f64) -> Vec3 {
     Vec3::new(x, y, z).unwrap()

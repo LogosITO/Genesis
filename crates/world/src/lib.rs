@@ -7,6 +7,7 @@ use std::fmt;
 
 mod authored;
 mod body;
+mod field;
 mod life;
 pub use authored::{
     AuthoredCapsule, AuthoredDefinition, AuthoredInstance, AuthoredSegmentRef,
@@ -14,6 +15,8 @@ pub use authored::{
 };
 use authored::{new_instance, transformed};
 pub use body::{BodyContact, ColliderId, KinematicBody, MAX_BODY_SPEED};
+use field::transformed_bounds;
+pub use field::{FieldDefinition, FieldInstance, MAX_FIELD_DEFINITIONS, MAX_FIELD_INSTANCES};
 pub use life::{
     CONNECTION_RADIUS_RATIO, FiniteReservoir, GrowthNode, GrowthParameters, MAX_NODE_IDS,
     MAX_NODES, MAX_ORGANISMS, MAX_SOURCES, MAX_SPHERES, Organism, OrganismLifecycle,
@@ -115,6 +118,10 @@ pub struct WorldState {
     authored_definitions: Vec<AuthoredDefinition>,
     #[serde(default)]
     authored_instances: Vec<AuthoredInstance>,
+    #[serde(default)]
+    field_definitions: Vec<FieldDefinition>,
+    #[serde(default)]
+    field_instances: Vec<FieldInstance>,
     next_id: u64,
 }
 impl WorldState {
@@ -128,6 +135,8 @@ impl WorldState {
             body: None,
             authored_definitions: Vec::new(),
             authored_instances: Vec::new(),
+            field_definitions: Vec::new(),
+            field_instances: Vec::new(),
             next_id: 0,
         }
     }
@@ -172,6 +181,181 @@ impl WorldState {
         self.authored_instances
             .iter()
             .find(|instance| instance.id() == id)
+    }
+    /// Distinct exact visual field revisions retained by the world.
+    pub fn field_definitions(&self) -> &[FieldDefinition] {
+        &self.field_definitions
+    }
+    /// Visual field occurrences in stable allocation order.
+    pub fn field_instances(&self) -> &[FieldInstance] {
+        &self.field_instances
+    }
+    /// Finds one visual field occurrence by its stable world ID.
+    pub fn field_instance(&self, id: EntityId) -> Option<&FieldInstance> {
+        self.field_instances.iter().find(|item| item.id() == id)
+    }
+    /// Graph referenced by an occurrence; visual diagnostics only.
+    pub fn field_graph(&self, id: EntityId) -> Option<&world_authoring::field_graph::Graph> {
+        let instance = self.field_instance(id)?;
+        self.field_definitions
+            .iter()
+            .find(|item| item.revision() == instance.revision())?
+            .graph()
+    }
+    /// Creates a world-owned visual occurrence from a validated exact-byte graph source.
+    pub fn spawn_field(
+        &mut self,
+        source: &[u8],
+        transform: Transform,
+    ) -> Result<EntityId, WorldError> {
+        if self.field_instances.len() == MAX_FIELD_INSTANCES {
+            return Err(WorldError::Capacity);
+        }
+        let next = self.next_id.checked_add(1).ok_or(WorldError::IdExhausted)?;
+        let revision = DefinitionRevision::of(source);
+        let existing = self
+            .field_definitions
+            .iter()
+            .find(|item| item.revision() == revision);
+        let definition = match existing {
+            Some(item) if item.source() == source => item.clone(),
+            Some(_) => return Err(WorldError::InvalidStructure),
+            None => {
+                if self.field_definitions.len() == MAX_FIELD_DEFINITIONS {
+                    return Err(WorldError::Capacity);
+                }
+                FieldDefinition::from_source(source)?
+            }
+        };
+        let graph = definition.graph().ok_or(WorldError::InvalidStructure)?;
+        transformed_bounds(graph, transform)?;
+        let id = EntityId(self.next_id);
+        if existing.is_none() {
+            self.field_definitions.push(definition);
+        }
+        self.field_instances
+            .push(FieldInstance::new(id, revision, transform));
+        self.next_id = next;
+        Ok(id)
+    }
+    /// Removes a visual occurrence without reusing its ID.
+    pub fn remove_field(&mut self, id: EntityId) -> Result<(), WorldError> {
+        let index = self
+            .field_instances
+            .iter()
+            .position(|item| item.id() == id)
+            .ok_or(WorldError::UnknownEntity)?;
+        self.field_instances.remove(index);
+        self.field_definitions.retain(|definition| {
+            self.field_instances
+                .iter()
+                .any(|item| item.revision() == definition.revision())
+        });
+        Ok(())
+    }
+    /// Atomically changes the source revision pinned by an occurrence.
+    pub fn replace_field(&mut self, id: EntityId, source: &[u8]) -> Result<(), WorldError> {
+        let index = self
+            .field_instances
+            .iter()
+            .position(|item| item.id() == id)
+            .ok_or(WorldError::UnknownEntity)?;
+        let revision = DefinitionRevision::of(source);
+        let existing = self
+            .field_definitions
+            .iter()
+            .find(|item| item.revision() == revision);
+        let definition = match existing {
+            Some(item) if item.source() == source => item.clone(),
+            Some(_) => return Err(WorldError::InvalidStructure),
+            None => {
+                let old = self.field_instances[index].revision();
+                let old_is_unique = self
+                    .field_instances
+                    .iter()
+                    .filter(|item| item.revision() == old)
+                    .count()
+                    == 1;
+                if self.field_definitions.len() == MAX_FIELD_DEFINITIONS && !old_is_unique {
+                    return Err(WorldError::Capacity);
+                }
+                FieldDefinition::from_source(source)?
+            }
+        };
+        transformed_bounds(
+            definition.graph().ok_or(WorldError::InvalidStructure)?,
+            self.field_instances[index].transform(),
+        )?;
+        let mut proposed = self.field_instances[index].clone();
+        proposed.set_revision(revision)?;
+        if existing.is_none() {
+            self.field_definitions.push(definition);
+        }
+        self.field_instances[index] = proposed;
+        self.field_definitions.retain(|definition| {
+            self.field_instances
+                .iter()
+                .any(|item| item.revision() == definition.revision())
+        });
+        Ok(())
+    }
+    /// Atomically edits the transform of a visual occurrence.
+    pub fn set_field_transform(
+        &mut self,
+        id: EntityId,
+        transform: Transform,
+    ) -> Result<(), WorldError> {
+        let index = self
+            .field_instances
+            .iter()
+            .position(|item| item.id() == id)
+            .ok_or(WorldError::UnknownEntity)?;
+        let graph = self.field_graph(id).ok_or(WorldError::InvalidStructure)?;
+        transformed_bounds(graph, transform)?;
+        let mut proposed = self.field_instances[index].clone();
+        proposed.set_transform(transform)?;
+        self.field_instances[index] = proposed;
+        Ok(())
+    }
+    /// Toggles visual participation without changing the graph source.
+    pub fn set_field_enabled(&mut self, id: EntityId, enabled: bool) -> Result<(), WorldError> {
+        let instance = self
+            .field_instances
+            .iter_mut()
+            .find(|item| item.id() == id)
+            .ok_or(WorldError::UnknownEntity)?;
+        instance.set_enabled(enabled)
+    }
+    /// Outward-rounded derived bounds of an enabled visual occurrence.
+    pub fn field_bounds(
+        &self,
+        id: EntityId,
+    ) -> Result<world_authoring::field_graph::Bounds, WorldError> {
+        let instance = self
+            .field_instance(id)
+            .filter(|item| item.enabled())
+            .ok_or(WorldError::UnknownEntity)?;
+        transformed_bounds(
+            self.field_graph(id).ok_or(WorldError::InvalidStructure)?,
+            instance.transform(),
+        )
+    }
+    /// Read-only world-unit sample of an enabled visual field; never a collision answer.
+    pub fn field_sample(&self, id: EntityId, point: Vec3) -> Result<f64, WorldError> {
+        let instance = self
+            .field_instance(id)
+            .filter(|item| item.enabled())
+            .ok_or(WorldError::UnknownEntity)?;
+        let local = instance.transform().to_local(point)?;
+        let value = self
+            .field_graph(id)
+            .ok_or(WorldError::InvalidStructure)?
+            .sample(local)?
+            * instance.transform().scale();
+        if !value.is_finite() {
+            return Err(WorldError::Math(MathError::NonFinite));
+        }
+        Ok(value)
     }
     /// Loads exact source bytes and atomically inserts a validated authored occurrence.
     pub fn spawn_authored(
@@ -390,6 +574,13 @@ impl WorldState {
         }
         Ok(())
     }
+    /// Rebuilds disposable visual field graphs after parsing a save.
+    pub fn rebuild_fields(&mut self) -> Result<(), WorldError> {
+        for definition in &mut self.field_definitions {
+            definition.rebuild()?;
+        }
+        Ok(())
+    }
     /// Creates one kinematic body with a world-stable ID.
     pub fn spawn_body(&mut self, position: Vec3, radius: f64) -> Result<EntityId, WorldError> {
         if self.body.is_some() {
@@ -553,6 +744,8 @@ impl WorldState {
             || self.sources.len() > MAX_SOURCES
             || self.authored_definitions.len() > MAX_AUTHORED_DEFINITIONS
             || self.authored_instances.len() > MAX_AUTHORED_INSTANCES
+            || self.field_definitions.len() > MAX_FIELD_DEFINITIONS
+            || self.field_instances.len() > MAX_FIELD_INSTANCES
         {
             return Err(WorldError::Capacity);
         }
@@ -560,7 +753,8 @@ impl WorldState {
             + self.organisms.len()
             + self.sources.len()
             + usize::from(self.body.is_some())
-            + self.authored_instances.len();
+            + self.authored_instances.len()
+            + self.field_instances.len();
         if self.next_id < count as u64 {
             return Err(WorldError::InvalidStructure);
         }
@@ -573,6 +767,7 @@ impl WorldState {
             .chain(self.sources.iter().map(ResourceSource::id))
             .chain(self.body.iter().map(KinematicBody::id))
             .chain(self.authored_instances.iter().map(AuthoredInstance::id))
+            .chain(self.field_instances.iter().map(FieldInstance::id))
         {
             if id.value() >= self.next_id || !seen.insert(id.value()) {
                 return Err(WorldError::InvalidStructure);
@@ -610,6 +805,21 @@ impl WorldState {
         }
         if segment_count > MAX_AUTHORED_SEGMENTS {
             return Err(WorldError::Capacity);
+        }
+        let mut field_revisions = std::collections::HashSet::new();
+        for definition in &self.field_definitions {
+            if !field_revisions.insert(definition.revision())
+                || definition.graph().is_none()
+                || DefinitionRevision::of(definition.source()) != definition.revision()
+            {
+                return Err(WorldError::InvalidStructure);
+            }
+        }
+        for instance in &self.field_instances {
+            let graph = self
+                .field_graph(instance.id())
+                .ok_or(WorldError::InvalidStructure)?;
+            transformed_bounds(graph, instance.transform())?;
         }
         for entity in &self.entities {
             Sphere::new(entity.sphere.radius())?;

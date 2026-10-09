@@ -1,6 +1,6 @@
 # Bounded implicit field graph v1
 
-**Status: experimental / research stage.** This is an isolated, non-colliding CPU/GPU preview. It does not change `WorldState`, version-6 saves, authored capsule instances, The Passage, or the analytic direct/BVH renderer.
+**Status: experimental / research stage.** `WorldState` now owns visual field instances, but they do not participate in contact, growth, picking or The Passage. The isolated CPU/GPU graph preview and analytic direct/BVH renderer remain available.
 
 ## Source and validation
 
@@ -159,4 +159,16 @@ The GPU preview accepts 1–2048 pixels per image dimension, 4096 query rays per
 
 ## Integration boundary
 
-This preview has no `EntityId`, contact, growth, persistence, or gameplay semantics. A later milestone must define occupancy/boundary behavior, conservative floating-point query policy, provenance, instance transforms, save migration, and collision authority before field graphs can enter `WorldState`. Reusing the exact-byte `DefinitionRevision` is provenance only. The present graph never replaces a world-owned authored capsule definition.
+The graph definition itself has no world identity or collision authority. `WorldState`
+retains exact-byte definitions and distinct visual occurrences with stable
+`EntityId`, transform, enabled state and generation. Up to four graph revisions
+and eight occurrences are supported. Definitions share one compiled graph;
+version-7 saves persist source bytes and revision, then recompile on load. CPU
+instance sampling and outward-derived bounds are read-only diagnostics. The GPU
+query path transforms rays to each visible graph's local coordinates and chooses
+the nearest displayed hit; uncertainty and exhaustion remain explicit. The
+`--world-fixture` example writes a 128×128 PPM capture from actual GPU ray
+readback. Node data is currently reuploaded per instance and query chunk, with
+color composition on the CPU. This is a visual prototype, not an optimized
+integrated viewport or authoritative pick. See the
+[world integration record](../research/foundation-0130.md).
