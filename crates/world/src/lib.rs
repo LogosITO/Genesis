@@ -5,9 +5,12 @@ use serde::{Deserialize, Serialize};
 use spatial_math::{MathError, Transform, Vec3};
 use std::fmt;
 
+mod body;
 mod life;
+pub use body::{BodyContact, ColliderId, KinematicBody, MAX_BODY_SPEED};
 pub use life::{
-    GrowthNode, GrowthParameters, MAX_NODES, MAX_ORGANISMS, MAX_SOURCES, MAX_SPHERES, Organism,
+    CONNECTION_RADIUS_RATIO, FiniteReservoir, GrowthNode, GrowthParameters, MAX_NODE_IDS,
+    MAX_NODES, MAX_ORGANISMS, MAX_SOURCES, MAX_SPHERES, Organism, OrganismLifecycle,
     ResourceSource,
 };
 
@@ -32,6 +35,10 @@ pub enum WorldError {
     Math(MathError),
     /// No entity with this ID exists.
     UnknownEntity,
+    /// No active growth node has this stable local ID.
+    UnknownNode,
+    /// The root cannot be pruned.
+    RootPrune,
     /// Entity ID space is exhausted.
     IdExhausted,
     /// Radius update length did not match the number of entities.
@@ -95,6 +102,8 @@ pub struct WorldState {
     entities: Vec<Entity>,
     organisms: Vec<Organism>,
     sources: Vec<ResourceSource>,
+    #[serde(default)]
+    body: Option<KinematicBody>,
     next_id: u64,
 }
 impl WorldState {
@@ -105,6 +114,7 @@ impl WorldState {
             entities: Vec::new(),
             organisms: Vec::new(),
             sources: Vec::new(),
+            body: None,
             next_id: 0,
         }
     }
@@ -128,9 +138,49 @@ impl WorldState {
     pub fn sources(&self) -> &[ResourceSource] {
         &self.sources
     }
+    /// Mutable sources; changes remain subject to validated source methods.
+    pub fn sources_mut(&mut self) -> &mut [ResourceSource] {
+        &mut self.sources
+    }
+    /// The sole kinematic body, if present.
+    pub fn body(&self) -> Option<&KinematicBody> {
+        self.body.as_ref()
+    }
+    /// Creates one kinematic body with a world-stable ID.
+    pub fn spawn_body(&mut self, position: Vec3, radius: f64) -> Result<EntityId, WorldError> {
+        if self.body.is_some() {
+            return Err(WorldError::Capacity);
+        }
+        let next = self.next_id.checked_add(1).ok_or(WorldError::IdExhausted)?;
+        let id = EntityId(self.next_id);
+        self.body = Some(KinematicBody::new(id, position, radius)?);
+        self.next_id = next;
+        Ok(id)
+    }
+    /// Finds the body for a validated movement event.
+    pub fn body_mut(&mut self, id: EntityId) -> Result<&mut KinematicBody, WorldError> {
+        self.body
+            .as_mut()
+            .filter(|body| body.id() == id)
+            .ok_or(WorldError::UnknownEntity)
+    }
     /// Mutable organisms; mutation is limited to validated growth methods.
     pub fn organisms_mut(&mut self) -> &mut [Organism] {
         &mut self.organisms
+    }
+    /// Prunes an authoritative non-root branch of one organism.
+    pub fn prune_branch(&mut self, organism: EntityId, child: u32) -> Result<usize, WorldError> {
+        self.organisms
+            .iter_mut()
+            .find(|entry| entry.id() == organism)
+            .ok_or(WorldError::UnknownEntity)?
+            .prune_branch(child)
+    }
+    /// Migrates the dense node allocators in supported legacy save formats.
+    pub fn migrate_legacy_node_ids(&mut self) {
+        for organism in &mut self.organisms {
+            organism.migrate_legacy_node_ids();
+        }
     }
     /// Finds a source for a typed environmental event.
     pub fn source_mut(&mut self, id: EntityId) -> Result<&mut ResourceSource, WorldError> {
@@ -162,12 +212,50 @@ impl WorldState {
         radius: f64,
         strength: f64,
     ) -> Result<EntityId, WorldError> {
+        if self
+            .sources
+            .iter()
+            .any(|source| source.reservoir().is_some())
+        {
+            return Err(WorldError::InvalidStructure);
+        }
         if self.sources.len() == MAX_SOURCES {
             return Err(WorldError::Capacity);
         }
         let next = self.next_id.checked_add(1).ok_or(WorldError::IdExhausted)?;
         let id = EntityId(self.next_id);
         let source = ResourceSource::new(id, position, radius, strength)?;
+        self.sources.push(source);
+        self.next_id = next;
+        Ok(id)
+    }
+    /// Adds a finite resource source; a world cannot mix finite and legacy unlimited sources.
+    pub fn spawn_finite_source(
+        &mut self,
+        position: Vec3,
+        radius: f64,
+        strength: f64,
+        stored: f64,
+        capacity: f64,
+        replenish_per_tick: f64,
+    ) -> Result<EntityId, WorldError> {
+        if self
+            .sources
+            .iter()
+            .any(|source| source.reservoir().is_none())
+        {
+            return Err(WorldError::InvalidStructure);
+        }
+        if self.sources.len() == MAX_SOURCES {
+            return Err(WorldError::Capacity);
+        }
+        let next = self.next_id.checked_add(1).ok_or(WorldError::IdExhausted)?;
+        let id = EntityId(self.next_id);
+        let source = ResourceSource::new(id, position, radius, strength)?.with_reservoir(
+            stored,
+            capacity,
+            replenish_per_tick,
+        )?;
         self.sources.push(source);
         self.next_id = next;
         Ok(id)
@@ -222,7 +310,10 @@ impl WorldState {
         {
             return Err(WorldError::Capacity);
         }
-        let count = self.entities.len() + self.organisms.len() + self.sources.len();
+        let count = self.entities.len()
+            + self.organisms.len()
+            + self.sources.len()
+            + usize::from(self.body.is_some());
         if self.next_id != count as u64 {
             return Err(WorldError::InvalidStructure);
         }
@@ -233,6 +324,7 @@ impl WorldState {
             .map(|e| e.id)
             .chain(self.organisms.iter().map(Organism::id))
             .chain(self.sources.iter().map(ResourceSource::id))
+            .chain(self.body.iter().map(KinematicBody::id))
         {
             let index = usize::try_from(id.value()).map_err(|_| WorldError::InvalidStructure)?;
             if index >= count || seen[index] {
@@ -255,6 +347,41 @@ impl WorldState {
         }
         for source in &self.sources {
             source.validate()?;
+        }
+        if self
+            .sources
+            .iter()
+            .any(|source| source.reservoir().is_some())
+            && self
+                .sources
+                .iter()
+                .any(|source| source.reservoir().is_none())
+        {
+            return Err(WorldError::InvalidStructure);
+        }
+        if let Some(body) = &self.body {
+            body.validate()?;
+            if let Some(contact) = body.contact() {
+                let valid = match contact.collider {
+                    ColliderId::Sphere(id) => self.entity(id).is_some(),
+                    ColliderId::Node { organism, node }
+                    | ColliderId::Connection {
+                        organism,
+                        child: node,
+                    } => self
+                        .organisms
+                        .iter()
+                        .find(|tree| tree.id() == organism)
+                        .is_some_and(|tree| {
+                            node < tree.next_node_id()
+                                && (matches!(contact.collider, ColliderId::Node { .. })
+                                    || node != 0)
+                        }),
+                };
+                if !valid {
+                    return Err(WorldError::InvalidStructure);
+                }
+            }
         }
         Ok(())
     }

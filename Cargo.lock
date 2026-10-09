@@ -23,7 +23,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "analytic-field"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proptest",
  "serde",
@@ -32,7 +32,7 @@ dependencies = [
 
 [[package]]
 name = "analytic-renderer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "analytic-field",
  "bytemuck",
@@ -385,7 +385,7 @@ checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
 name = "first-life"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "analytic-renderer",
  "serde_json",
@@ -397,14 +397,16 @@ dependencies = [
 
 [[package]]
 name = "first-light"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "analytic-field",
  "analytic-renderer",
+ "font8x8",
  "pollster",
  "spatial-math",
  "wgpu",
  "winit",
+ "world-runtime",
  "world-simulation",
  "world-state",
 ]
@@ -414,6 +416,12 @@ name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
+name = "font8x8"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "875488b8711a968268c7cf5d139578713097ca4635a76044e8fe8eedf831d07e"
 
 [[package]]
 name = "foreign-types"
@@ -547,7 +555,7 @@ dependencies = [
 
 [[package]]
 name = "hello-world"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "analytic-field",
  "spatial-math",
@@ -1515,9 +1523,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.150"
+version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
+checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
  "itoa",
  "memchr",
@@ -1596,7 +1604,7 @@ dependencies = [
 
 [[package]]
 name = "spatial-math"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
 ]
@@ -2379,7 +2387,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "world-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2390,7 +2398,7 @@ dependencies = [
 
 [[package]]
 name = "world-simulation"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "analytic-field",
  "serde",
@@ -2400,7 +2408,7 @@ dependencies = [
 
 [[package]]
 name = "world-state"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "analytic-field",
  "serde",

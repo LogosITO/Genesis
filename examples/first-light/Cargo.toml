@@ -1,6 +1,6 @@
 [package]
 name = "first-light"
-version = "0.1.0"
+version = "0.1.1"
 publish = false
 edition.workspace = true
 license.workspace = true
@@ -12,9 +12,11 @@ analytic-field = { path = "../../crates/field" }
 spatial-math = { path = "../../crates/math" }
 world-state = { path = "../../crates/world" }
 world-simulation = { path = "../../crates/simulation" }
+world-runtime = { path = "../../crates/runtime" }
 wgpu = { version = "=30.0.1", default-features = false, features = ["std", "wgsl", "dx12", "vulkan"] }
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland"] }
 pollster = "=1.0.1"
+font8x8 = "=0.3.1"
 
 [lints]
 workspace = true

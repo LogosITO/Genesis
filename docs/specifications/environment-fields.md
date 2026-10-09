@@ -1,6 +1,6 @@
 # First Life environment field
 
-## Decision
+## Historical unlimited-source decision
 
 A source has a stable world entity ID, centre `s`, positive influence radius `r ≤ 100` world units, peak strength `q ∈ [0,100]`, and an active flag. At finite point `p`, its concentration is
 
@@ -12,4 +12,4 @@ Source positions must stay in ±1000 world units. Move and active-state changes 
 
 ## Limitations and hypothesis
 
-This is an analytic concentration field, not the signed geometry field API and not a physical energy model. The hypothesis is that even this minimal environmental coupling can produce a reproducible change in graph topology and direction. The baseline, changed, and limited scenarios test that hypothesis locally; they do not validate biology.
+This remains the supported unlimited-source mode for earlier saves and examples. Foundation 0.8 adds a finite reservoir and proportional allocation while preserving this analytic influence function; see the [resource allocation contract](resource-allocation.md). The field is not the signed geometry field API or a physical energy model. The baseline, changed, and limited scenarios test reproducible topology changes locally; they do not validate biology.

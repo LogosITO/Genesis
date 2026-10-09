@@ -1,8 +1,6 @@
-# Project Name TBD
+# Genesis
 
-Foundation 0.5 adds a bounded branching organism and analytic capsule connections. **Experimental / Research Stage.** The default First Life rule has at most two children per node, a shared resource budget, deterministic node-ID allocation, and version-2 saves that load valid version-1 state. The renderer shows overlapping primitives as separate solids; it does not provide watertight CSG geometry.
-
-**Experimental / Research Stage.** A small foundation for mathematically defined mutable worlds. Analytic parameters, transforms, and growth rules are the source of truth; no mesh or voxel representation is stored. Foundation 0.4 adds a bounded growth graph driven by a continuous resource field, tick-indexed events, and versioned saves. The CPU math and simulation remain independently testable without a GPU. No floating-point intersection is formally certified.
+**Experimental / Research Stage.** Genesis stores analytic parameters, transforms, growth rules, finite resource reservoirs, and one kinematic body as authoritative world state; no mesh or voxel geometry is stored. Foundation 0.8 lets bounded organisms compete for shared finite sources and persists the result in version-5 saves. CPU math, simulation, and contact remain testable without a GPU. This is neither validated biology nor a general physics engine.
 
 ## Run
 
@@ -26,12 +24,33 @@ Run the First Life headless scenarios and native viewport:
 cargo run -p first-life --locked -- baseline
 cargo run -p first-life --locked -- changed
 cargo run -p first-life --locked -- limited
+cargo run -p first-life --locked -- pruning
+cargo run -p first-life --locked -- pruning-replay
+cargo run -p first-life --locked -- contact
+cargo run -p first-life --locked -- contact-pruned
+cargo run -p first-life --locked -- contact-replay
+cargo run -p first-life --locked -- ecology isolated
+cargo run -p first-life --locked -- ecology competition
+cargo run -p first-life --locked -- ecology separated
+cargo run -p first-life --locked -- ecology environment-change
+cargo run -p first-life --locked -- ecology pruning
+cargo run -p first-life --locked -- ecology replay
+cargo run --release -p first-life --locked -- ecology measure
 cargo run -p first-life --locked -- baseline --measure
 cargo run -p first-life --locked -- scale --measure
 cargo run -p first-light --locked -- --life
 ```
 
-The first three headless scenarios print JSON summaries after 120 fixed ticks. `changed` moves the resource source at tick 40; `limited` supplies too little resource to create a child. `--measure` adds local timing diagnostics on stderr. `scale --measure` prints controlled CPU step and snapshot medians for 1–48 nodes and a four-organism overflow case; it is not a full-frame benchmark. In native First Life mode, **M** schedules a source move at the next tick; **Space** pauses or resumes. The renderer copies node positions, connections, and sources from `WorldState`. See the [growth model](docs/specifications/growth-model.md), [capsule contract](docs/specifications/capsule.md), [save contract](docs/specifications/world-persistence.md), and [replay contract](docs/specifications/replay-determinism.md).
+The original headless scenarios print JSON after 120 fixed ticks. `contact` stops at a branch, `contact-pruned` passes through its cleared path, and `contact-replay` verifies save/load. The six `ecology` scenarios print JSON after 40 ticks with organism IDs, topology, source balances, allocation, and a state fingerprint. `ecology measure` reports local release-profile CPU timings for one, two, and four organisms. In native First Life mode, two differently colored organisms share one finite source; the title shows their node counts, remaining stock, allocation, and tick. **Left-click** selects a node or connection, **P** queues its cut, **M** moves the source, **I/J/K/L** move the body, and **Space** pauses or resumes. Ambiguous picks cannot authorize a cut. See the [allocation contract](docs/specifications/resource-allocation.md), [ecosystem state](docs/specifications/ecosystem-state.md), [local experiment](docs/research/first-ecology-experiment.md), [contact contract](docs/specifications/kinematic-contact.md), and [save contract](docs/specifications/world-persistence.md).
+
+Play the local **The Passage** prototype:
+
+```sh
+cargo run --release -p first-light --locked -- --passage
+cargo test -p first-light passage_playthrough --locked -- --nocapture
+```
+
+The orange body must cross a growing analytic branch after moving a finite resource source and pruning the stem. An in-window HUD shows controls and feedback; the headless playthrough prints a JSON success record. See the [player guide](docs/guides/the-passage.md), [manual QA checklist](docs/guides/playtest-qa.md), and [research record](docs/research/first-playable.md). On Windows, `powershell -ExecutionPolicy Bypass -File tools/package-passage.ps1` creates and checks a local ZIP under `target/dist/`; it is not published.
 
 ```sh
 cargo fmt --all -- --check
@@ -43,9 +62,9 @@ cargo doc --workspace --no-deps --locked
 On a machine with a compatible GPU, run the additional offscreen parity and resolution checks:
 
 ```sh
-cargo test -p analytic-renderer --test gpu --locked -- --ignored --nocapture
+cargo test -p analytic-renderer --test gpu --locked -- --ignored --nocapture --test-threads=1
 ```
 
-The [architecture](docs/architecture/overview.md), [renderer design](docs/architecture/renderer.md), [CPU/GPU contract](docs/specifications/cpu-gpu-contract.md), [field contract](docs/specifications/mathematical-fields.md), [distance-bound proof and limits](docs/specifications/distance-bounds.md), [CPU spatial queries](docs/specifications/spatial-queries.md), [release policy](docs/architecture/releases.md), [roadmap](docs/roadmap/roadmap.md), and [research ledger](docs/research/references.md) are the canonical technical documents. The [site](site/README.md) imports these files instead of maintaining copies.
+The [architecture](docs/architecture/overview.md), [renderer design](docs/architecture/renderer.md), [resource allocation](docs/specifications/resource-allocation.md), [contact specification](docs/specifications/kinematic-contact.md), [spatial acceleration](docs/architecture/spatial-acceleration.md), [CPU/GPU contract](docs/specifications/cpu-gpu-contract.md), [field contract](docs/specifications/mathematical-fields.md), [release policy](docs/architecture/releases.md), [roadmap](docs/roadmap/roadmap.md), and [research ledger](docs/research/references.md) are canonical technical documents. The [site](site/README.md) imports these files instead of maintaining copies.
 
-License: MIT OR Apache-2.0. No project brand, organization, domain, or release channel has been chosen.
+License: MIT OR Apache-2.0.

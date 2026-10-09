@@ -1,15 +1,19 @@
-use crate::{Camera, Ray, RenderError, Scene};
+use crate::{Bvh, Camera, Ray, RenderError, Scene, acceleration::FlatNode};
 use bytemuck::{Pod, Zeroable};
-use std::sync::mpsc;
+use std::{
+    sync::{Mutex, mpsc},
+    time::Instant,
+};
 use wgpu::util::DeviceExt;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct GpuCamera {
     rows: [[f32; 4]; 6],
+    scene: [u32; 4], // primitive count, node count, unused, traversal mode
 }
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct GpuPrimitive {
     center_kind: [f32; 4],
     dimensions: [f32; 4],
@@ -57,6 +61,26 @@ pub struct DrawOptions<'a> {
     pub surface: Option<&'a wgpu::TextureView>,
     /// Optional timestamp sampler; the device must support it.
     pub timer: Option<&'a GpuTimer>,
+}
+
+/// Direct analytic traversal, GPU BVH traversal, or the measured-size policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuTraversal {
+    /// Test every primitive; reference and fallback path.
+    Direct,
+    /// Traverse the flattened BVH, returning an error if preparation fails.
+    Bvh,
+    /// Use direct traversal for at most four primitives; otherwise try BVH and fall back to direct.
+    Auto,
+}
+impl GpuTraversal {
+    fn code(self) -> u32 {
+        match self {
+            Self::Direct => 0,
+            Self::Bvh => 1,
+            Self::Auto => 2,
+        }
+    }
 }
 impl GpuTimer {
     /// Returns `None` when the device was created without timestamp support.
@@ -138,6 +162,7 @@ fn camera_data(
     height: u32,
     normal_debug: bool,
     object_count: usize,
+    traversal: GpuTraversal,
 ) -> GpuCamera {
     let aspect = f64::from(width) / f64::from(height);
     let scale_x = camera.tan_half_fov * aspect;
@@ -164,13 +189,9 @@ fn camera_data(
                 camera.near as f32,
                 camera.far as f32,
             ],
-            [
-                if normal_debug { 1.0 } else { 0.0 },
-                object_count as f32,
-                0.0,
-                0.0,
-            ],
+            [if normal_debug { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
         ],
+        scene: [object_count as u32, 0, 0, traversal.code()],
     }
 }
 
@@ -181,13 +202,69 @@ pub struct GpuRenderer {
     query_pipeline: wgpu::ComputePipeline,
     present_layout: wgpu::BindGroupLayout,
     present_pipeline: wgpu::RenderPipeline,
+    primitive_budget_bytes: u64,
+    dummy_bvh: wgpu::Buffer,
+    primitives: Mutex<Option<PrimitiveBuffer>>,
+}
+struct PrimitiveBuffer {
+    buffer: wgpu::Buffer,
+    capacity_bytes: u64,
+    data: Vec<GpuPrimitive>,
+    bvh: Option<BvhBuffer>,
+    bvh_dirty: bool,
+    bvh_rebuilds: u64,
+    last_prepare: GpuUploadStats,
+}
+struct BvhBuffer {
+    buffer: wgpu::Buffer,
+    capacity_bytes: u64,
+    node_count: u32,
+    depth: usize,
+}
+/// Current resident GPU acceleration buffer, if one has been prepared.
+#[derive(Clone, Copy, Debug)]
+pub struct GpuAccelerationStats {
+    /// Flattened node count.
+    pub node_count: u32,
+    /// CPU builder depth.
+    pub depth: usize,
+    /// Allocated BVH buffer bytes, including spare capacity.
+    pub allocated_bytes: u64,
+    /// Number of BVH rebuilds since this renderer allocated its current primitive buffer.
+    pub rebuilds: u64,
+}
+/// CPU-side cost of queuing the most recent scene upload; not GPU transfer time.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GpuUploadStats {
+    /// Primitive record bytes queued for transfer.
+    pub primitive_bytes: u64,
+    /// BVH node bytes queued for transfer.
+    pub bvh_bytes: u64,
+    /// CPU time spent in `queue.write_buffer` calls, in milliseconds.
+    pub enqueue_ms: f64,
+    /// CPU BVH build and flatten time, in milliseconds.
+    pub bvh_build_ms: f64,
 }
 impl GpuRenderer {
-    /// Compiles and validates both WGSL pipelines. The surface format is used only for presentation.
+    /// Uses a 16 MiB primitive-storage budget. This excludes render targets and query buffers.
     pub async fn new(
         device: &wgpu::Device,
         surface_format: wgpu::TextureFormat,
     ) -> Result<Self, RenderError> {
+        Self::with_primitive_budget(device, surface_format, 16 * 1024 * 1024).await
+    }
+    /// Compiles and validates both WGSL pipelines. The surface format is used only for presentation.
+    /// `primitive_budget_bytes` limits the resident primitive buffer, including spare capacity.
+    pub async fn with_primitive_budget(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        primitive_budget_bytes: u64,
+    ) -> Result<Self, RenderError> {
+        if primitive_budget_bytes < std::mem::size_of::<GpuPrimitive>() as u64 {
+            return Err(RenderError::InvalidInput(
+                "primitive budget below one GPU record",
+            ));
+        }
         let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("analytic intersections"),
@@ -241,6 +318,16 @@ impl GpuRenderer {
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -320,12 +407,20 @@ impl GpuRenderer {
         if let Some(error) = error_scope.pop().await {
             return Err(RenderError::Gpu(error.to_string()));
         }
+        let dummy_bvh = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("empty analytic BVH"),
+            contents: bytemuck::bytes_of(&FlatNode::zeroed()),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
         Ok(Self {
             compute_layout,
             render_pipeline,
             query_pipeline,
             present_layout,
             present_pipeline,
+            primitive_budget_bytes,
+            dummy_bvh,
+            primitives: Mutex::new(None),
         })
     }
 
@@ -347,32 +442,194 @@ impl GpuRenderer {
             view_formats: &[],
         })
     }
+    /// Returns current GPU BVH allocation information; `None` before acceleration is prepared.
+    pub fn acceleration_stats(&self) -> Option<GpuAccelerationStats> {
+        let cached = self.primitives.lock().ok()?;
+        let scene = cached.as_ref()?;
+        let bvh = scene.bvh.as_ref()?;
+        Some(GpuAccelerationStats {
+            node_count: bvh.node_count,
+            depth: bvh.depth,
+            allocated_bytes: bvh.capacity_bytes,
+            rebuilds: scene.bvh_rebuilds,
+        })
+    }
+    /// Returns the latest CPU enqueue measurements; GPU copy execution is not timed.
+    pub fn last_upload_stats(&self) -> Option<GpuUploadStats> {
+        Some(self.primitives.lock().ok()?.as_ref()?.last_prepare)
+    }
+    fn prepare_bvh(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: &Scene,
+        cached: &mut PrimitiveBuffer,
+    ) -> Result<GpuUploadStats, RenderError> {
+        let build_started = Instant::now();
+        let bvh = Bvh::build(scene)?;
+        let nodes = bvh.flat_nodes()?;
+        let build_ms = build_started.elapsed().as_secs_f64() * 1000.0;
+        let requested_bytes = u64::try_from(nodes.len().max(1))
+            .ok()
+            .and_then(|count| count.checked_mul(std::mem::size_of::<FlatNode>() as u64))
+            .ok_or(RenderError::TooManyObjects)?;
+        let allowed_bytes = self
+            .primitive_budget_bytes
+            .min(device.limits().max_storage_buffer_binding_size)
+            .min(device.limits().max_buffer_size);
+        if requested_bytes > allowed_bytes {
+            return Err(RenderError::AccelerationCapacity {
+                requested_bytes,
+                allowed_bytes,
+            });
+        }
+        if cached
+            .bvh
+            .as_ref()
+            .is_none_or(|old| requested_bytes > old.capacity_bytes)
+        {
+            let capacity_bytes = requested_bytes.next_power_of_two().min(allowed_bytes);
+            let error_scope = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("analytic BVH nodes"),
+                size: capacity_bytes,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            if let Some(error) = pollster::block_on(error_scope.pop()) {
+                return Err(RenderError::Gpu(format!("BVH allocation failed: {error}")));
+            }
+            cached.bvh = Some(BvhBuffer {
+                buffer,
+                capacity_bytes,
+                node_count: 0,
+                depth: 0,
+            });
+        }
+        let storage = cached.bvh.as_mut().expect("created above");
+        let upload_started = Instant::now();
+        queue.write_buffer(&storage.buffer, 0, bytemuck::cast_slice(&nodes));
+        let enqueue_ms = upload_started.elapsed().as_secs_f64() * 1000.0;
+        storage.node_count = u32::try_from(nodes.len()).map_err(|_| RenderError::TooManyObjects)?;
+        storage.depth = bvh.depth();
+        cached.bvh_dirty = false;
+        cached.bvh_rebuilds = cached.bvh_rebuilds.saturating_add(1);
+        Ok(GpuUploadStats {
+            primitive_bytes: 0,
+            bvh_bytes: requested_bytes,
+            enqueue_ms,
+            bvh_build_ms: build_ms,
+        })
+    }
     fn binding(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         scene: &Scene,
-        camera: GpuCamera,
+        mut camera: GpuCamera,
         image: &wgpu::TextureView,
         rays: &[GpuRay],
-        result_count: usize,
-    ) -> (wgpu::BindGroup, wgpu::Buffer) {
+    ) -> Result<(wgpu::BindGroup, wgpu::Buffer), RenderError> {
+        let record_bytes = std::mem::size_of::<GpuPrimitive>() as u64;
+        let requested_bytes = u64::try_from(scene.primitives().len().max(1))
+            .ok()
+            .and_then(|count| count.checked_mul(record_bytes))
+            .ok_or(RenderError::TooManyObjects)?;
+        let allowed_bytes = self
+            .primitive_budget_bytes
+            .min(device.limits().max_storage_buffer_binding_size)
+            .min(device.limits().max_buffer_size);
+        if requested_bytes > allowed_bytes {
+            return Err(RenderError::PrimitiveCapacity {
+                requested_bytes,
+                allowed_bytes,
+            });
+        }
+        let objects = scene_data(scene);
+        let mut cached = self
+            .primitives
+            .lock()
+            .map_err(|_| RenderError::Gpu("primitive buffer lock poisoned".into()))?;
+        let replace = cached
+            .as_ref()
+            .is_none_or(|old| requested_bytes > old.capacity_bytes);
+        if replace {
+            let capacity_bytes = requested_bytes.next_power_of_two().min(allowed_bytes);
+            let error_scope = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("analytic primitives"),
+                size: capacity_bytes,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            if let Some(error) = pollster::block_on(error_scope.pop()) {
+                return Err(RenderError::Gpu(format!(
+                    "primitive allocation failed: {error}"
+                )));
+            }
+            *cached = Some(PrimitiveBuffer {
+                buffer,
+                capacity_bytes,
+                data: Vec::new(),
+                bvh: None,
+                bvh_dirty: true,
+                bvh_rebuilds: 0,
+                last_prepare: GpuUploadStats::default(),
+            });
+        }
+        let primitive_buffer = cached.as_mut().expect("created above");
+        let mut upload = GpuUploadStats::default();
+        if replace || primitive_buffer.data != objects {
+            let upload_started = Instant::now();
+            if objects.is_empty() {
+                queue.write_buffer(
+                    &primitive_buffer.buffer,
+                    0,
+                    bytemuck::bytes_of(&GpuPrimitive::zeroed()),
+                );
+            } else {
+                queue.write_buffer(&primitive_buffer.buffer, 0, bytemuck::cast_slice(&objects));
+            }
+            upload.primitive_bytes = requested_bytes;
+            upload.enqueue_ms = upload_started.elapsed().as_secs_f64() * 1000.0;
+            primitive_buffer.data = objects;
+            primitive_buffer.bvh_dirty = true;
+        }
+        let requested_mode = camera.scene[3];
+        let want_bvh = requested_mode == 1 || (requested_mode == 2 && scene.primitives().len() > 4);
+        camera.scene[3] = 0;
+        if want_bvh && !scene.primitives().is_empty() {
+            if primitive_buffer.bvh_dirty || primitive_buffer.bvh.is_none() {
+                match self.prepare_bvh(device, queue, scene, primitive_buffer) {
+                    Ok(bvh_upload) => {
+                        upload.bvh_bytes = bvh_upload.bvh_bytes;
+                        upload.enqueue_ms += bvh_upload.enqueue_ms;
+                        upload.bvh_build_ms = bvh_upload.bvh_build_ms;
+                    }
+                    Err(
+                        RenderError::AccelerationCapacity { .. }
+                        | RenderError::TooManyObjects
+                        | RenderError::Gpu(_),
+                    ) if requested_mode == 2 => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            if !primitive_buffer.bvh_dirty {
+                camera.scene[1] = primitive_buffer
+                    .bvh
+                    .as_ref()
+                    .expect("prepared above")
+                    .node_count;
+                camera.scene[3] = 1;
+            }
+        }
+        primitive_buffer.last_prepare = upload;
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera uniform"),
             contents: bytemuck::bytes_of(&camera),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-        let objects = scene_data(scene);
-        let empty_object = GpuPrimitive::zeroed();
         let empty_ray = GpuRay::zeroed();
-        let objects_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("analytic primitives"),
-            contents: if objects.is_empty() {
-                bytemuck::bytes_of(&empty_object)
-            } else {
-                bytemuck::cast_slice(&objects)
-            },
-            usage: wgpu::BufferUsages::STORAGE,
-        });
         let ray_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("query rays"),
             contents: if rays.is_empty() {
@@ -384,7 +641,7 @@ impl GpuRenderer {
         });
         let result_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("query results"),
-            size: (result_count.max(1) * std::mem::size_of::<GpuHit>()) as u64,
+            size: (rays.len().max(1) * std::mem::size_of::<GpuHit>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
@@ -398,7 +655,7 @@ impl GpuRenderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: objects_buffer.as_entire_binding(),
+                    resource: primitive_buffer.buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -412,9 +669,17 @@ impl GpuRenderer {
                     binding: 4,
                     resource: result_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: primitive_buffer
+                        .bvh
+                        .as_ref()
+                        .map_or(&self.dummy_bvh, |bvh| &bvh.buffer)
+                        .as_entire_binding(),
+                },
             ],
         });
-        (group, result_buffer)
+        Ok((group, result_buffer))
     }
 
     /// Computes an offscreen RGBA8 image and optionally presents it to a surface view.
@@ -425,6 +690,18 @@ impl GpuRenderer {
         queue: &wgpu::Queue,
         scene: &Scene,
         camera: Camera,
+        options: DrawOptions<'_>,
+    ) -> Result<wgpu::Texture, RenderError> {
+        self.draw_with_traversal(device, queue, scene, camera, GpuTraversal::Auto, options)
+    }
+    /// Draws with an explicit direct, BVH, or automatic traversal policy.
+    pub fn draw_with_traversal(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: &Scene,
+        camera: Camera,
+        traversal: GpuTraversal,
         options: DrawOptions<'_>,
     ) -> Result<wgpu::Texture, RenderError> {
         let [width, height] = options.size;
@@ -439,6 +716,7 @@ impl GpuRenderer {
         let image_view = image.create_view(&wgpu::TextureViewDescriptor::default());
         let (group, _) = self.binding(
             device,
+            queue,
             scene,
             camera_data(
                 camera,
@@ -446,11 +724,11 @@ impl GpuRenderer {
                 height,
                 options.normal_debug,
                 scene.primitives().len(),
+                traversal,
             ),
             &image_view,
             &[],
-            0,
-        );
+        )?;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("analytic frame"),
         });
@@ -514,6 +792,17 @@ impl GpuRenderer {
         scene: &Scene,
         rays: &[Ray],
     ) -> Result<Vec<Option<GpuResult>>, RenderError> {
+        self.query_with_traversal(device, queue, scene, rays, GpuTraversal::Direct)
+    }
+    /// Queries explicit rays through the selected path; direct traversal remains the reference.
+    pub fn query_with_traversal(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: &Scene,
+        rays: &[Ray],
+        traversal: GpuTraversal,
+    ) -> Result<Vec<Option<GpuResult>>, RenderError> {
         if rays.is_empty() {
             return Ok(Vec::new());
         }
@@ -530,9 +819,10 @@ impl GpuRenderer {
         let image = Self::image(device, 1, 1);
         let image_view = image.create_view(&wgpu::TextureViewDescriptor::default());
         let mut query_camera = GpuCamera::zeroed();
-        query_camera.rows[5][1] = scene.primitives().len() as f32;
+        query_camera.scene[0] = scene.primitives().len() as u32;
+        query_camera.scene[3] = traversal.code();
         let (group, result_buffer) =
-            self.binding(device, scene, query_camera, &image_view, &input, rays.len());
+            self.binding(device, queue, scene, query_camera, &image_view, &input)?;
         let size = (rays.len() * std::mem::size_of::<GpuHit>()) as u64;
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("query readback"),
@@ -597,7 +887,8 @@ mod tests {
     use super::*;
     #[test]
     fn gpu_layout_and_shader_validation() {
-        assert_eq!(std::mem::size_of::<GpuCamera>(), 96);
+        assert_eq!(std::mem::size_of::<GpuCamera>(), 112);
+        assert_eq!(std::mem::offset_of!(GpuCamera, scene), 96);
         assert_eq!(std::mem::size_of::<GpuPrimitive>(), 64);
         assert_eq!(std::mem::offset_of!(GpuPrimitive, center_kind), 0);
         assert_eq!(std::mem::offset_of!(GpuPrimitive, dimensions), 16);
@@ -606,6 +897,11 @@ mod tests {
         assert_eq!(std::mem::size_of::<GpuRay>(), 32);
         assert_eq!(std::mem::size_of::<GpuHit>(), 32);
         assert_eq!(std::mem::offset_of!(GpuHit, meta), 16);
+        assert_eq!(std::mem::size_of::<FlatNode>(), 64);
+        assert_eq!(std::mem::offset_of!(FlatNode, min), 0);
+        assert_eq!(std::mem::offset_of!(FlatNode, max), 16);
+        assert_eq!(std::mem::offset_of!(FlatNode, meta), 32);
+        assert_eq!(std::mem::offset_of!(FlatNode, leaf), 48);
         for shader in [
             include_str!("../shaders/analytic.wgsl"),
             include_str!("../shaders/present.wgsl"),
