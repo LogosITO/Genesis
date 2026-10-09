@@ -60,10 +60,22 @@ with centre `c` and enclosing radius `r`, a unit-Lipschitz field obeys
 `Unknown`. It uses ordinary `f64` operations, without outward rounding or an error
 budget. Its named exclusions are **ideal-model estimates only** and must not prune
 authoritative geometry. Cancellation, underflow and overflow can invalidate the
-computed sign; evaluation failure returns `Unknown`. Interval propagation with
-outward-rounded endpoints was investigated but not implemented: the current supported
-grammar already provides a small Lipschitz evaluator, while certified interval
-arithmetic would need a separate CPU/GPU error analysis.
+computed sign; evaluation failure returns `Unknown`.
+
+Foundation 0.12.2 adds **outward-rounded graph AABBs**. Primitive sphere/box bounds
+start from their stored finite binary parameters. Each translation addition and
+positive-scale multiplication rounds the lower result one `f64` representable value
+down and the upper result one up; union takes componentwise extrema. Under IEEE-754
+round-to-nearest with gradual underflow and no fast-math reassociation, this encloses
+the ideal occupied geometry described by those stored parameters. Arithmetic
+overflow rejects the graph. The compiler allows a 24-ULP admission margin at the
+±10,000 world-bound ceiling so an exactly maximal scaled primitive remains loadable
+after outward rounding; this is an input-domain policy, not a field-value error
+bound. `exclude_region` returns `ConfirmedOutside` only if a
+closed query AABB is strictly separated from those enlarged bounds along an axis;
+otherwise it returns `Unknown`. This is a broad-phase exclusion, **not** an
+evaluation of the field over the region and not evidence of complete occupancy.
+No outward-rounded interval propagation through sphere/box field formulas exists.
 
 `trace_exterior_entry` accepts a finite ray with `near ≥ 0`, `far > near`, normalized
 direction, tolerance `[1e-5,0.1]`, safety `(0,1]`, 1–512 samples, and an explicit
@@ -72,8 +84,12 @@ A negative start returns `StartsInside`; a near-zero start returns `StartNearZer
 It advances by `safety × F(p)` and returns `ApproximateEntry` when a later positive
 sample is at most tolerance. Since an external ray meets an occupied union before it
 can reach any interior ghost zero, this is a restricted **first entry** query only.
-It returns `Exhausted`, `Indeterminate`, or a conditional `IdealModelMiss` instead of
-turning budget/numeric failure into a confirmed miss. A grazing tangent may exhaust.
+The ray's near/far endpoint coordinates are outward-rounded after multiplication and
+addition. Only strict separation of this entire segment AABB from graph bounds
+returns `BoundsMiss`. If an approximate field step passes `far` while those boxes
+overlap, the result is `Indeterminate(UncertifiedAdvance)` rather than a Miss.
+Work and sample caps return `Indeterminate(WorkBudget)` and `Exhausted`. A grazing
+tangent may exhaust.
 The result is not suitable for authoritative picking/contact without a certified
 floating-point policy. Existing `trace` and WGSL tracing are older zero-set preview
 queries and can classify an interior zero start differently.
@@ -84,9 +100,10 @@ For samples farther than 0.001 from zero, the local shared-face test compares si
 at near-zero points it compares values within 0.0001 world units without asserting
 topological classification. These thresholds describe a tested workload, not a global
 error bound. No general field-graph collision, interior-exit query, regularized CSG,
-or floating-point-certified spatial exclusion is provided.
+or certified field-value exclusion is provided. The narrow bounds exclusions above
+refer to the CPU `f64` model; they do not certify GPU `f32` outcomes.
 
-The coordinate system and world unit follow [coordinate-system.md](coordinate-system.md). Negative samples are inside the selected sign region, positive samples outside, and zero samples form a mathematical zero set. Union of the supported solids gives a signed union, but its sample can differ from Euclidean distance, especially inside overlaps. A pointwise minimum of 1-Lipschitz functions is 1-Lipschitz in ideal real arithmetic. Positive uniform scale with multiplied output preserves that bound. The finite AABB returned by the compiler conservatively contains the nonpositive region in ideal arithmetic. These are mathematical claims, not floating-point interval proofs.
+The coordinate system and world unit follow [coordinate-system.md](coordinate-system.md). Negative samples are inside the selected sign region, positive samples outside, and zero samples form a mathematical zero set. Union of the supported solids gives a signed union, but its sample can differ from Euclidean distance, especially inside overlaps. A pointwise minimum of 1-Lipschitz functions is 1-Lipschitz in ideal real arithmetic. Positive uniform scale with multiplied output preserves that bound. The finite AABB returned by the compiler is outward-rounded under the CPU assumptions above. This does not bound numerical errors in field samples.
 
 CPU samples use `f64` and the existing `Sphere` and `AxisAlignedBox` formulas. Gradients use their analytic implementations and propagate through transforms; a union chooses the lower sampled branch. A tie, sphere center, or box nonsmooth point reports an undefined gradient. Branch selection itself can change under rounding. Overflow returns `MathError`; no NaN is returned as a valid sample. One primitive under any supported transforms advertises ideal exact SDF; any union does not. Signedness, exact SDF, Lipschitz bound, finite bounds, and collision authority are separate properties.
 

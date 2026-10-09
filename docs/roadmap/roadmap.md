@@ -81,6 +81,12 @@ state why field graphs still have no collision authority. The next focused resea
 step is validated floating-point error bounds and exterior moving-body parity
 across more rays and adapters before a world-save migration is considered.
 
+Foundation 0.12.2 adds a narrow CPU broad-phase exclusion using outward-rounded
+graph and ray bounds, while uncertified field steps now return uncertainty. The
+[numerical record](../research/foundation-0122.md) documents assumptions and
+deterministic CPU/GPU differential cases. General field-value enclosures and
+authoritative field collisions remain open.
+
 
 Measure larger authored and field workloads on additional adapters. Define a numerically defensible occupied-solid and contact contract before considering authoritative field-graph instances. Verify native selection/contact and packaged builds on a second supported machine. Any rotation or living growth contract should follow tested CPU/GPU/contact semantics.
 

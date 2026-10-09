@@ -1,5 +1,9 @@
 # Foundation 0.12.1: field solids and spatial reliability
 
+Historical record. Foundation 0.12.2 supersedes the `IdealModelMiss` outcome with
+explicit uncertainty and adds a narrow outward-rounded bounds exclusion; see the
+current [field graph contract](../specifications/field-graph.md).
+
 ## Status, hypothesis, environment
 
 **Experimental finding on one machine, 2026-10-10.** A bounded union-only graph can

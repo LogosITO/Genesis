@@ -1,5 +1,5 @@
 //! Spatial research queries for the closed solid represented by the supported graph vocabulary.
-//! Every exclusion here is conditional on ideal arithmetic; `f64` is not outward rounded.
+//! Field samples remain approximate. The separate bounds exclusion uses outward-rounded `f64`.
 
 use super::{Graph, TraceOptions};
 use spatial_math::{MathError, Vec3};
@@ -64,6 +64,66 @@ impl RegionAabb {
     pub fn max(self) -> Vec3 {
         self.max
     }
+}
+
+/// Occupancy exclusion using only outward-rounded analytic graph bounds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegionExclusion {
+    /// The closed query region cannot intersect the ideal occupied set, under IEEE-754 `f64` rounding.
+    ConfirmedOutside,
+    /// Bounds overlap; occupancy and boundary status remain unknown.
+    Unknown,
+}
+
+/// Safely excludes a region when one world axis is strictly separated from graph bounds.
+/// It makes no claim about zeros or occupancy within overlapping bounds.
+pub fn exclude_region(graph: &Graph, region: RegionAabb) -> RegionExclusion {
+    let bounds = graph.bounds();
+    let min = region.min();
+    let max = region.max();
+    if [
+        (min.x(), max.x(), bounds.min.x(), bounds.max.x()),
+        (min.y(), max.y(), bounds.min.y(), bounds.max.y()),
+        (min.z(), max.z(), bounds.min.z(), bounds.max.z()),
+    ]
+    .into_iter()
+    .any(|(lo, hi, bound_lo, bound_hi)| hi < bound_lo || lo > bound_hi)
+    {
+        RegionExclusion::ConfirmedOutside
+    } else {
+        RegionExclusion::Unknown
+    }
+}
+
+fn rounded_ray_axis(origin: f64, direction: f64, parameter: f64) -> Option<(f64, f64)> {
+    let product = direction * parameter;
+    if !product.is_finite() {
+        return None;
+    }
+    let lower_sum = origin + product.next_down();
+    let upper_sum = origin + product.next_up();
+    if !lower_sum.is_finite() || !upper_sum.is_finite() {
+        return None;
+    }
+    let lo = lower_sum.next_down();
+    let hi = upper_sum.next_up();
+    (lo.is_finite() && hi.is_finite()).then_some((lo, hi))
+}
+
+fn ray_segment_excluded(graph: &Graph, origin: Vec3, direction: Vec3, near: f64, far: f64) -> bool {
+    let bounds = graph.bounds();
+    [
+        (origin.x(), direction.x(), bounds.min.x(), bounds.max.x()),
+        (origin.y(), direction.y(), bounds.min.y(), bounds.max.y()),
+        (origin.z(), direction.z(), bounds.min.z(), bounds.max.z()),
+    ]
+    .into_iter()
+    .any(|(o, d, bound_lo, bound_hi)| {
+        match (rounded_ray_axis(o, d, near), rounded_ray_axis(o, d, far)) {
+            (Some(a), Some(b)) => a.1.max(b.1) < bound_lo || a.0.min(b.0) > bound_hi,
+            _ => false,
+        }
+    })
 }
 
 /// Computed `F(center) ± radius` using the graph's ideal 1-Lipschitz model.
@@ -138,6 +198,8 @@ pub enum SolidQueryIssue {
     Numeric,
     /// Expanded graph-work budget was reached.
     WorkBudget,
+    /// An approximate Lipschitz step passed `far`, without a certified segment exclusion.
+    UncertifiedAdvance,
 }
 
 /// Restricted entry of a finite ray into the supported closed union of primitives.
@@ -148,8 +210,8 @@ pub enum SolidEntryOutcome {
         /// Approximate ray parameter in world units.
         distance: f64,
     },
-    /// The computed step passed `far`; absence of entry is conditional on ideal arithmetic.
-    IdealModelMiss,
+    /// Outward-rounded ray segment bounds do not overlap outward-rounded occupied bounds.
+    BoundsMiss,
     /// Unsupported start or numerical/work uncertainty.
     Indeterminate(SolidQueryIssue),
     /// Sample iteration cap was reached; never a miss.
@@ -215,6 +277,9 @@ pub fn trace_exterior_entry(
                     SolidQueryIssue::StartNearZero,
                 ));
             }
+            if ray_segment_excluded(graph, origin, direction, o.near, o.far) {
+                return Ok(SolidEntryOutcome::BoundsMiss);
+            }
         } else {
             if value < 0.0 {
                 return Ok(SolidEntryOutcome::Indeterminate(SolidQueryIssue::Numeric));
@@ -228,7 +293,9 @@ pub fn trace_exterior_entry(
             return Ok(SolidEntryOutcome::Indeterminate(SolidQueryIssue::Numeric));
         }
         if next > o.far {
-            return Ok(SolidEntryOutcome::IdealModelMiss);
+            return Ok(SolidEntryOutcome::Indeterminate(
+                SolidQueryIssue::UncertifiedAdvance,
+            ));
         }
         distance = next;
     }

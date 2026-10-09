@@ -10,8 +10,9 @@ use std::collections::BTreeMap;
 
 mod spatial;
 pub use spatial::{
-    IdealRegionEstimate, RegionAabb, SampleSign, SolidEntryOutcome, SolidQueryIssue,
-    SolidRayOptions, classify_sample, estimate_region, trace_exterior_entry,
+    IdealRegionEstimate, RegionAabb, RegionExclusion, SampleSign, SolidEntryOutcome,
+    SolidQueryIssue, SolidRayOptions, classify_sample, estimate_region, exclude_region,
+    trace_exterior_entry,
 };
 
 /// Maximum accepted source size for the research preview.
@@ -102,7 +103,7 @@ pub enum Node {
     },
 }
 
-/// Conservative world-axis bounds of all points with nonpositive samples.
+/// Outward-rounded world-axis bounds of the ideal occupied set under IEEE-754 `f64` arithmetic.
 #[derive(Clone, Copy, Debug)]
 pub struct Bounds {
     /// Componentwise lower corner.
@@ -257,6 +258,23 @@ fn vec_max(a: Vec3, b: Vec3) -> Result<Vec3, AuthoringError> {
     Vec3::new(a.x().max(b.x()), a.y().max(b.y()), a.z().max(b.z()))
         .map_err(|_| AuthoringError::Geometry("field bounds"))
 }
+fn outward_vec(a: Vec3, b: Vec3, multiply: bool, upper: bool) -> Result<Vec3, AuthoringError> {
+    let values = [(a.x(), b.x()), (a.y(), b.y()), (a.z(), b.z())];
+    let mut rounded = [0.0; 3];
+    for (index, (left, right)) in values.into_iter().enumerate() {
+        let value = if multiply { left * right } else { left + right };
+        if !value.is_finite() {
+            return Err(AuthoringError::Geometry("field bounds"));
+        }
+        rounded[index] = if upper {
+            value.next_up()
+        } else {
+            value.next_down()
+        };
+    }
+    Vec3::new(rounded[0], rounded[1], rounded[2])
+        .map_err(|_| AuthoringError::Geometry("field bounds"))
+}
 
 /// Parse and validate a version-one graph. Rejection returns no partially compiled graph.
 pub fn compile_json(bytes: &[u8]) -> Result<Graph, AuthoringError> {
@@ -377,30 +395,19 @@ pub fn compile_json(bytes: &[u8]) -> Result<Graph, AuthoringError> {
                 let (b, exact) = properties(nodes, child as usize)?;
                 (
                     Bounds {
-                        min: b
-                            .min
-                            .checked_add(offset)
-                            .map_err(|_| AuthoringError::Geometry("field bounds"))?,
-                        max: b
-                            .max
-                            .checked_add(offset)
-                            .map_err(|_| AuthoringError::Geometry("field bounds"))?,
+                        min: outward_vec(b.min, offset, false, false)?,
+                        max: outward_vec(b.max, offset, false, true)?,
                     },
                     exact,
                 )
             }
             Node::Scale { child, factor } => {
                 let (b, exact) = properties(nodes, child as usize)?;
+                let factor = Vec3::new(factor, factor, factor).unwrap();
                 (
                     Bounds {
-                        min: b
-                            .min
-                            .checked_scale(factor)
-                            .map_err(|_| AuthoringError::Geometry("field bounds"))?,
-                        max: b
-                            .max
-                            .checked_scale(factor)
-                            .map_err(|_| AuthoringError::Geometry("field bounds"))?,
+                        min: outward_vec(b.min, factor, true, false)?,
+                        max: outward_vec(b.max, factor, true, true)?,
                     },
                     exact,
                 )
@@ -419,6 +426,11 @@ pub fn compile_json(bytes: &[u8]) -> Result<Graph, AuthoringError> {
         })
     }
     let (bounds, exact_sdf) = properties(&nodes, root as usize)?;
+    // Keep the old geometric ceiling usable when outward rounding adds a few ulps.
+    let mut admission_limit = 10_000.0_f64;
+    for _ in 0..(2 * MAX_DEPTH) {
+        admission_limit = admission_limit.next_up();
+    }
     if [
         bounds.min.x(),
         bounds.min.y(),
@@ -428,7 +440,7 @@ pub fn compile_json(bytes: &[u8]) -> Result<Graph, AuthoringError> {
         bounds.max.z(),
     ]
     .iter()
-    .any(|x| x.abs() > 10000.0)
+    .any(|x| x.abs() > admission_limit)
     {
         return Err(AuthoringError::Budget("field world bounds"));
     }
@@ -554,7 +566,9 @@ mod tests {
         assert_eq!(g.ideal_lipschitz_bound(), 1.0);
         assert_eq!(g.sample(v(-0.5, 0.0, 0.0)).unwrap(), -1.0);
         assert_eq!(g.sample(v(2.0, 0.0, 0.0)).unwrap(), 1.5);
-        assert_eq!(g.bounds().min, v(-1.5, -1.0, -1.0));
+        assert!(g.bounds().min.x() <= -1.5);
+        assert!(g.bounds().min.y() <= -1.0);
+        assert!(g.bounds().min.z() <= -1.0);
         assert_eq!(
             g.gradient(v(-0.5, 0.0, 0.0)).unwrap(),
             Gradient::Undefined(GradientIssue::SphereCenter)
@@ -616,7 +630,9 @@ mod tests {
         let g = compile_json(source.as_bytes()).unwrap();
         assert_eq!(g.distance_semantics(), DistanceSemantics::ExactSdf);
         assert_eq!(g.sample(v(4.0, 0.0, 0.0)).unwrap(), 0.0);
-        assert_eq!(g.bounds().max, v(4.0, 2.0, 2.0));
+        assert!(g.bounds().max.x() >= 4.0);
+        assert!(g.bounds().max.y() >= 2.0);
+        assert!(g.bounds().max.z() >= 2.0);
     }
     #[test]
     fn bounded_depth_visits_and_ambiguous_zero_sets() {

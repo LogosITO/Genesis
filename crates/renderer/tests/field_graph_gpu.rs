@@ -347,6 +347,64 @@ fn generated_scene(leaves: usize) -> String {
         nodes.join(",")
     )
 }
+
+#[test]
+#[ignore = "requires native GPU; deterministic 512-sample f64/f32 diagnostic"]
+fn field_graph_gpu_seeded_sample_differential() {
+    let instance = wgpu::Instance::default();
+    let adapter =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+            .unwrap();
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let renderer = pollster::block_on(GraphGpuRenderer::new(&device)).unwrap();
+    let mut state = 0x1222_5eed_u64;
+    let mut near_zero = 0usize;
+    let mut checked = 0usize;
+    for leaves in [1, 4, 8, 16] {
+        let source = generated_scene(leaves);
+        let graph = compile_json(source.as_bytes()).unwrap();
+        let mut points = vec![v(-((leaves as f64 - 1.0) * 0.25) - 0.45, 0.0, 0.0)];
+        points.extend((0..127).map(|_| {
+            let mut component = || {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                ((state >> 32) % 1001) as f64 * 0.01 - 5.0
+            };
+            v(component(), component(), component())
+        }));
+        let observed = renderer
+            .sample_points(&device, &queue, &graph, camera(), &points)
+            .unwrap();
+        for (&p, gpu) in points.iter().zip(observed) {
+            let cpu = graph.sample(p).unwrap();
+            let gpu = gpu.expect("bounded scene sample should be finite");
+            assert!(
+                (cpu - f64::from(gpu)).abs() < 0.002,
+                "leaves={leaves} p={p:?} cpu={cpu} gpu={gpu}"
+            );
+            if cpu.abs() > 0.002 {
+                assert_eq!(
+                    cpu.is_sign_negative(),
+                    gpu.is_sign_negative(),
+                    "leaves={leaves} p={p:?}"
+                );
+            } else {
+                near_zero += 1;
+            }
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 512);
+    assert!(near_zero >= 4);
+    println!(
+        "adapter={} checked={} near_zero={} sign_mismatches_away_from_threshold=0",
+        adapter.get_info().name,
+        checked,
+        near_zero
+    );
+}
 fn stats(mut values: Vec<f64>) -> (f64, f64) {
     values.sort_by(f64::total_cmp);
     let p95 = ((values.len() * 95).div_ceil(100)).saturating_sub(1);
