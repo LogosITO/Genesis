@@ -71,15 +71,13 @@ Bounded exact-byte definitions and world-owned occurrences, stable segment prove
 
 A bounded version-one JSON graph now compiles into typed operations, evaluates on CPU with explicit mathematical properties, and executes directly in a separate WGSL interpreter. Two definitions render as real GPU readback; invalid file reload leaves the last valid preview. The [graph contract](../specifications/field-graph.md) and [local measurement record](../research/foundation-012.md) describe limits. These are isolated previews, not world-owned geometry or collision surfaces.
 
-## Next candidate
+## Foundation 0.12.1–0.12.4 — bounded spatial research, partial
 
 Foundation 0.12.1 locally distinguishes occupied solids from zero sets, adds an
 ideal-model region estimate and restricted exterior CPU entry query, and records
 GPU sample/timestamp evidence. The [solid contract](../specifications/field-graph.md),
 [research record](../research/foundation-0121.md), and [world integration proposal](../architecture/field-world-integration.md)
-state why field graphs still have no collision authority. The next focused research
-step is validated floating-point error bounds and exterior moving-body parity
-across more rays and adapters before a world-save migration is considered.
+state why field graphs still have no collision authority.
 
 Foundation 0.12.2 adds a narrow CPU broad-phase exclusion using outward-rounded
 graph and ray bounds, while uncertified field steps now return uncertainty. The
@@ -87,8 +85,42 @@ graph and ray bounds, while uncertified field steps now return uncertainty. The
 deterministic CPU/GPU differential cases. General field-value enclosures and
 authoritative field collisions remain open.
 
+The [bounded spatial-query record](../research/foundation-0123.md) describes
+work diagnostics and explicit uncertainty. The [moving-sphere experiment](../research/foundation-0124.md)
+adds read-only `F-r` exterior sweeps and differential checks against analytic
+contacts, without making them authoritative.
 
-Measure larger authored and field workloads on additional adapters. Define a numerically defensible occupied-solid and contact contract before considering authoritative field-graph instances. Verify native selection/contact and packaged builds on a second supported machine. Any rotation or living growth contract should follow tested CPU/GPU/contact semantics.
+## Foundation 0.13.0–0.13.1 — world fields and authoring, partial
+
+`WorldState` owns bounded visual field definitions and stable occurrences in
+version-7 saves. A real GPU readback displays two world-owned instances, while
+the `--inspect` command validates graph files without a GPU. Checked fixtures
+cover internal zero faces and the 32-node ceiling. The [world integration](../research/foundation-0130.md)
+and [authoring](../research/foundation-0131.md) records describe the results.
+The native Passage viewport does not display these instances yet.
+
+## Foundation 0.14.0 — GPU scaling research, partial
+
+The [resolution matrix](../research/foundation-0140.md) measures the current
+interpreter at 720p, 1080p and 1440p on one adapter. No optimization has shown
+a stable improvement across simple and complex graphs. The 32-node graph is
+too slow for interactive 1440p rendering in the measured scene.
+
+## Foundation 0.14.1–0.16.0 — remaining work
+
+The Windows package built locally, passed ZIP/hash verification and ran its
+headless Passage measurement from the extracted archive. Native device loss,
+Linux and cross-vendor GPU behavior, hosted CI for these commits, integrated
+field rendering and an interactive analytic-world scenario remain unverified
+or unimplemented. These milestones are not complete.
+
+## Next engineering priorities
+
+Integrate visual field instances into a depth-correct viewport without making
+their GPU output authoritative. Instrument field sample counts and evaluate
+conservative sparse-scene culling with paired before/after GPU captures. Improve
+the CPU solid-query proof before considering field-graph collisions. Verify
+the packaged native experience and numerical results on a second machine.
 
 ## Later research
 Living or stochastic grammars, resource transport and recycling, destruction and recovery rules, broader physical interaction, embedding/FFI, standalone UI, and a richer authored language. Sequence and scope will follow experiments, not promises.
