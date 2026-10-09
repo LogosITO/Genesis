@@ -22,3 +22,5 @@ The [Foundation 0.10 authoring experiment](../reference/research/foundation-010/
 The [Foundation 0.10.1 provenance evaluation](../reference/research/foundation-0101/) measures exact-byte revisions, derivation identities, snapshot integrity and reload behavior. [ADR 0008](../reference/adr/0008-content-addressed-authoring/) records the decision.
 
 The [First Ecology experiment](../reference/research/first-ecology-experiment/) records six finite-resource scenarios, local CPU timings, replay, contact integration, and open measurement gaps.
+
+The [Foundation 0.12 field-graph experiment](../reference/research/foundation-012/) records direct WGSL graph evaluation, CPU/GPU readback, two real captures, numerical edge cases, and bounded scaling measurements.

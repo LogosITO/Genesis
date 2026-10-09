@@ -9,6 +9,9 @@ use sha2::{Digest, Sha256};
 use spatial_math::Vec3;
 use std::{collections::BTreeMap, fmt, io::Read, path::Path};
 
+/// Bounded, externally authored implicit fields, separate from structural grammars.
+pub mod field_graph;
+
 /// Maximum accepted JSON document size in bytes.
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
 /// Hard ceiling for expanded symbols in one definition.

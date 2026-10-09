@@ -70,6 +70,16 @@ cargo run -p first-light --locked -- --authored-world examples/authoring/world-s
 
 The headless command prints deterministic JSON after creating two occurrences from one definition, picking and contacting a capsule, applying typed tick events, saving, loading, and replaying. In the native window, click to select, press **E** to toggle the instance, or **M** to move it one unit along +X. See the [authored instance contract](docs/specifications/authored-world-instances.md) and [local evaluation](docs/research/foundation-011.md).
 
+Render an external implicit field graph directly on the GPU, independently of `WorldState`:
+
+```sh
+cargo run -p field-graph-preview --locked -- examples/field-graph/definitions/twin.json
+cargo run -p field-graph-preview --locked -- examples/field-graph/definitions/plinth.json
+cargo run -p field-graph-preview --locked -- examples/field-graph/definitions/twin.json --watch
+```
+
+The headless preview writes GPU-readback PPM captures under `target/field-graph-captures/` and prints CPU/GPU ray results as JSON. Editing the file in `--watch` mode reloads valid changes while preserving the previous preview on validation failure. See the [example guide](examples/field-graph/README.md) and [bounded graph contract](docs/specifications/field-graph.md).
+
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
@@ -81,6 +91,7 @@ On a machine with a compatible GPU, run the additional offscreen parity and reso
 
 ```sh
 cargo test -p analytic-renderer --test gpu --locked -- --ignored --nocapture --test-threads=1
+cargo test -p analytic-renderer --test field_graph_gpu --locked -- --ignored --nocapture --test-threads=1
 ```
 
 The [architecture](docs/architecture/overview.md), [renderer design](docs/architecture/renderer.md), [resource allocation](docs/specifications/resource-allocation.md), [contact specification](docs/specifications/kinematic-contact.md), [spatial acceleration](docs/architecture/spatial-acceleration.md), [CPU/GPU contract](docs/specifications/cpu-gpu-contract.md), [field contract](docs/specifications/mathematical-fields.md), [release policy](docs/architecture/releases.md), [roadmap](docs/roadmap/roadmap.md), and [research ledger](docs/research/references.md) are canonical technical documents. The [site](site/README.md) imports these files instead of maintaining copies.

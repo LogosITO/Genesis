@@ -2,6 +2,7 @@
 //! this crate converts a snapshot to bounded `f32` GPU data and never stores a mesh.
 
 mod acceleration;
+pub mod field_graph_gpu;
 mod gpu;
 pub use acceleration::{Bvh, PrimitiveBounds};
 pub use gpu::{

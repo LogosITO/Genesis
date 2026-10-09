@@ -38,8 +38,10 @@ dependencies = [
  "bytemuck",
  "naga",
  "pollster",
+ "serde_json",
  "spatial-math",
  "wgpu",
+ "world-authoring",
  "world-simulation",
  "world-state",
 ]
@@ -425,6 +427,18 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "field-graph-preview"
+version = "0.1.0"
+dependencies = [
+ "analytic-renderer",
+ "pollster",
+ "serde_json",
+ "spatial-math",
+ "wgpu",
+ "world-authoring",
 ]
 
 [[package]]
@@ -2467,6 +2481,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 name = "world-authoring"
 version = "0.1.0"
 dependencies = [
+ "analytic-field",
  "serde",
  "serde_json",
  "sha2",

@@ -63,17 +63,17 @@ Versioned external JSON definitions, bounded deterministic rewriting, typed anal
 
 Exact-byte SHA-256 revisions, bounded derivation paths, versioned self-contained authoring snapshots, and generation-aware preview selection/reload are implemented for static structures. No mutable authored world instance or world-save schema is introduced. See [ADR 0008](../adr/0008-content-addressed-authoring.md) and the [local evaluation](../research/foundation-0101.md).
 
-## Next candidate
-
-Complete the remaining manual native QA checklist and verify the extracted Windows ZIP on a second supported machine. Check hosted Windows/Linux CI after these local commits are integrated. Investigate measured BVH build growth if larger authored structures become a real workload.
-
 ## Foundation 0.11 — authored world instances, local experimental slice
 
 Bounded exact-byte definitions and world-owned occurrences, stable segment provenance, translation and uniform scaling, typed tick events, analytic picking and static capsule contact, version-6 save/load and a headless replay scenario are implemented. Native presentation and GPU parity require adapter testing. See the [instance contract](../specifications/authored-world-instances.md), [ADR 0009](../adr/0009-authored-world-instances.md), and [local record](../research/foundation-011.md).
 
-## Foundation 0.12 candidate
+## Foundation 0.12 — first implicit field graph, local research slice
 
-Measure larger authored workloads on supported adapters, verify native selection/contact manually, then decide whether transform-only updates need a dedicated world-space geometry cache. Any rotation or living growth contract should follow tested CPU/GPU/contact semantics rather than be assumed from static previews.
+A bounded version-one JSON graph now compiles into typed operations, evaluates on CPU with explicit mathematical properties, and executes directly in a separate WGSL interpreter. Two definitions render as real GPU readback; invalid file reload leaves the last valid preview. The [graph contract](../specifications/field-graph.md) and [local measurement record](../research/foundation-012.md) describe limits. These are isolated previews, not world-owned geometry or collision surfaces.
+
+## Next candidate
+
+Measure larger authored and field workloads on additional adapters. Define a numerically defensible occupied-solid and contact contract before considering authoritative field-graph instances. Verify native selection/contact and packaged builds on a second supported machine. Any rotation or living growth contract should follow tested CPU/GPU/contact semantics.
 
 ## Later research
 Living or stochastic grammars, resource transport and recycling, destruction and recovery rules, broader physical interaction, embedding/FFI, standalone UI, and a richer authored language. Sequence and scope will follow experiments, not promises.

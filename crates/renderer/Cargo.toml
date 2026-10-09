@@ -9,6 +9,7 @@ rust-version.workspace = true
 analytic-field = { path = "../field" }
 spatial-math = { path = "../math" }
 world-state = { path = "../world" }
+world-authoring = { path = "../authoring" }
 wgpu = { version = "=30.0.1", default-features = false, features = ["std", "wgsl", "dx12", "vulkan"] }
 bytemuck = { version = "=1.25.2", features = ["derive"] }
 pollster = "=1.0.1"
@@ -16,6 +17,7 @@ pollster = "=1.0.1"
 [dev-dependencies]
 naga = { version = "=30.0.1", features = ["wgsl-in"] }
 world-simulation = { path = "../simulation" }
+serde_json = { version = "=1.0.151", features = ["float_roundtrip"] }
 
 [lints]
 workspace = true
