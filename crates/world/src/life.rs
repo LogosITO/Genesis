@@ -8,6 +8,8 @@ use spatial_math::{MathError, Vec3};
 pub const MAX_ORGANISMS: usize = 4;
 /// Maximum nodes in one organism.
 pub const MAX_NODES: usize = 48;
+/// Maximum lifetime node allocations per organism; pruned IDs are not reused.
+pub const MAX_NODE_IDS: u32 = 1024;
 /// Maximum resource sources in one world.
 pub const MAX_SOURCES: usize = 4;
 /// Authoritative ordinary sphere capacity, independent of GPU snapshot capacity.
@@ -31,7 +33,7 @@ pub struct GrowthNode {
     energy: f64,
 }
 impl GrowthNode {
-    /// Stable local ID, equal to its allocation index.
+    /// Stable local allocation ID; pruning can leave gaps.
     pub fn id(&self) -> u32 {
         self.id
     }
@@ -129,6 +131,8 @@ pub struct Organism {
     nodes: Vec<GrowthNode>,
     #[serde(default)]
     budget: f64,
+    #[serde(default)]
+    next_node_id: u32,
 }
 impl Organism {
     pub(crate) fn new(
@@ -157,6 +161,7 @@ impl Organism {
                 energy: 0.0,
             }],
             budget: 0.0,
+            next_node_id: 1,
         })
     }
     /// Stable world identity.
@@ -175,6 +180,56 @@ impl Organism {
     pub fn nodes(&self) -> &[GrowthNode] {
         &self.nodes
     }
+    /// The next local ID, including allocations whose nodes were later pruned.
+    pub fn next_node_id(&self) -> u32 {
+        self.next_node_id
+    }
+    /// Finds an active node by stable local ID.
+    pub fn node(&self, id: u32) -> Option<&GrowthNode> {
+        self.nodes.iter().find(|node| node.id == id)
+    }
+    fn node_index(&self, id: u32) -> Option<usize> {
+        self.nodes.iter().position(|node| node.id == id)
+    }
+    /// Returns whether `ancestor` is the node itself or an ancestor of `descendant`.
+    pub fn contains_branch(&self, ancestor: u32, mut descendant: u32) -> bool {
+        while let Some(node) = self.node(descendant) {
+            if node.id == ancestor {
+                return true;
+            }
+            match node.parent {
+                Some(parent) => descendant = parent,
+                None => break,
+            }
+        }
+        false
+    }
+    /// Removes a non-root node and all its descendants. Unspent energy in removed nodes is lost;
+    /// the shared budget is retained. Surviving IDs and the lifetime allocator are unchanged.
+    pub fn prune_branch(&mut self, child: u32) -> Result<usize, WorldError> {
+        self.validate()?;
+        if child == 0 {
+            return Err(WorldError::RootPrune);
+        }
+        if self.node(child).is_none() {
+            return Err(WorldError::UnknownNode);
+        }
+        let mut proposed = self.clone();
+        let mut removed = vec![child];
+        for node in &proposed.nodes {
+            if node.parent.is_some_and(|parent| removed.contains(&parent)) {
+                removed.push(node.id);
+            }
+        }
+        proposed.nodes.retain(|node| !removed.contains(&node.id));
+        proposed.validate()?;
+        *self = proposed;
+        Ok(removed.len())
+    }
+    /// Migrates the dense ID allocator used by version-1 and version-2 saves.
+    pub fn migrate_legacy_node_ids(&mut self) {
+        self.next_node_id = self.nodes.len() as u32;
+    }
     /// Shared budget in model energy units.
     pub fn budget(&self) -> f64 {
         self.budget
@@ -183,7 +238,9 @@ impl Organism {
     pub fn branch_count(&self) -> usize {
         let mut children = vec![0u8; self.nodes.len()];
         for node in &self.nodes[1..] {
-            children[node.parent.unwrap() as usize] += 1;
+            children[self
+                .node_index(node.parent.unwrap())
+                .expect("validated parent")] += 1;
         }
         children.into_iter().filter(|count| *count == 2).count()
     }
@@ -191,7 +248,9 @@ impl Organism {
     pub fn active_count(&self) -> usize {
         let mut children = vec![0u8; self.nodes.len()];
         for node in &self.nodes[1..] {
-            children[node.parent.unwrap() as usize] += 1;
+            children[self
+                .node_index(node.parent.unwrap())
+                .expect("validated parent")] += 1;
         }
         children
             .into_iter()
@@ -215,7 +274,9 @@ impl Organism {
         }
         let mut children = vec![0u8; self.nodes.len()];
         for node in &self.nodes[1..] {
-            children[node.parent.ok_or(WorldError::InvalidStructure)? as usize] += 1;
+            children[self
+                .node_index(node.parent.ok_or(WorldError::InvalidStructure)?)
+                .ok_or(WorldError::InvalidStructure)?] += 1;
         }
         let mut directions = Vec::with_capacity(samples.len());
         let mut gained_total: f64 = 0.0;
@@ -255,6 +316,9 @@ impl Organism {
             {
                 continue;
             }
+            if self.next_node_id >= MAX_NODE_IDS {
+                return Err(WorldError::IdExhausted);
+            }
             let position = node
                 .position
                 .checked_add(directions[index].checked_scale(self.parameters.segment_length)?)?;
@@ -265,11 +329,12 @@ impl Organism {
             node.energy = 0.0;
             self.budget -= self.parameters.threshold;
             self.nodes.push(GrowthNode {
-                id: self.nodes.len() as u32,
+                id: self.next_node_id,
                 parent: Some(parent),
                 position,
                 energy: 0.0,
             });
+            self.next_node_id += 1;
             children[index] += 1;
         }
         Ok(self.nodes.len() - old_len)
@@ -285,11 +350,21 @@ impl Organism {
         if !bounded_position(self.root) || self.nodes.is_empty() || self.nodes.len() > MAX_NODES {
             return Err(WorldError::InvalidStructure);
         }
+        if self.nodes[0].id != 0 || self.next_node_id == 0 || self.next_node_id > MAX_NODE_IDS {
+            return Err(WorldError::InvalidStructure);
+        }
         let mut children = vec![0u8; self.nodes.len()];
         for (i, node) in self.nodes.iter().enumerate() {
-            if node.id != i as u32
+            if node.id >= self.next_node_id
+                || (i > 0 && node.id <= self.nodes[i - 1].id)
                 || (i == 0 && node.parent.is_some())
-                || (i > 0 && node.parent.is_none_or(|parent| parent as usize >= i))
+                || (i > 0
+                    && node.parent.is_none_or(|parent| {
+                        parent >= node.id
+                            || self
+                                .node_index(parent)
+                                .is_none_or(|parent_index| parent_index >= i)
+                    }))
                 || !bounded_position(node.position)
                 || !node.energy.is_finite()
                 || !(0.0..=self.parameters.threshold).contains(&node.energy)
@@ -297,13 +372,17 @@ impl Organism {
                 return Err(WorldError::InvalidStructure);
             }
             if let Some(parent) = node.parent {
-                children[parent as usize] += 1;
+                children[self
+                    .node_index(parent)
+                    .ok_or(WorldError::InvalidStructure)?] += 1;
             }
         }
         for node in &self.nodes[1..] {
-            let delta = node
-                .position
-                .checked_sub(self.nodes[node.parent.unwrap() as usize].position)?;
+            let delta = node.position.checked_sub(
+                self.node(node.parent.unwrap())
+                    .ok_or(WorldError::InvalidStructure)?
+                    .position,
+            )?;
             if delta.y() <= 0.0
                 || (delta.length()? - self.parameters.segment_length).abs()
                     > self.parameters.segment_length * 1e-12
@@ -448,6 +527,52 @@ mod tests {
                 .with_max_children(3),
             Err(WorldError::OutOfRange)
         );
+    }
+
+    #[test]
+    fn pruning_preserves_survivors_and_never_reuses_ids() {
+        let mut world = WorldState::new(DeterministicSeed(3));
+        let organism = world
+            .spawn_organism(
+                Vec3::ZERO,
+                GrowthParameters::new(0.1, 0.5, 1.0, 1.0).unwrap(),
+            )
+            .unwrap();
+        let up = Vec3::new(0.0, 1.0, 0.0).unwrap();
+        let tree = &mut world.organisms_mut()[0];
+        tree.grow(&[(1.0, up)]).unwrap();
+        tree.grow(&[(1.0, up), (0.0, up)]).unwrap();
+        tree.grow(&[(0.0, up), (1.0, up), (0.0, up)]).unwrap();
+        tree.grow(&[(0.0, up), (0.0, up), (0.0, up), (1.0, up)])
+            .unwrap();
+        assert_eq!(
+            tree.nodes().iter().map(GrowthNode::id).collect::<Vec<_>>(),
+            [0, 1, 2, 3, 4]
+        );
+        let before = tree.clone();
+        assert_eq!(tree.prune_branch(4), Ok(1));
+        assert_eq!(tree.next_node_id(), 5);
+        *tree = before;
+        let budget = tree.budget();
+        assert_eq!(tree.prune_branch(1), Ok(3));
+        assert_eq!(
+            tree.nodes().iter().map(GrowthNode::id).collect::<Vec<_>>(),
+            [0, 2]
+        );
+        assert_eq!(tree.budget(), budget);
+        assert_eq!(tree.next_node_id(), 5);
+        let pruned = tree.clone();
+        assert_eq!(tree.prune_branch(0), Err(WorldError::RootPrune));
+        assert_eq!(tree.prune_branch(1), Err(WorldError::UnknownNode));
+        assert_eq!(*tree, pruned);
+        tree.grow(&[(1.0, up), (0.0, up)]).unwrap();
+        assert_eq!(
+            tree.nodes().iter().map(GrowthNode::id).collect::<Vec<_>>(),
+            [0, 2, 5]
+        );
+        assert_eq!(tree.node(5).unwrap().parent(), Some(0));
+        world.validate().unwrap();
+        assert_eq!(world.prune_branch(organism, 2), Ok(1));
     }
 }
 

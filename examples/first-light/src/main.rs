@@ -1,7 +1,9 @@
 //! Native First Light viewport. World simulation advances in fixed steps; rendering samples it.
 
 use analytic_field::{AxisAlignedBox, Sphere};
-use analytic_renderer::{Camera, DrawOptions, GpuRenderer, GpuTimer, Primitive, Scene};
+use analytic_renderer::{
+    Camera, DrawOptions, GpuRenderer, GpuTimer, PickOutcome, Primitive, Scene, SemanticTarget,
+};
 use spatial_math::{Transform, Vec3};
 use std::{
     sync::{
@@ -12,7 +14,7 @@ use std::{
 };
 use winit::{
     application::ApplicationHandler,
-    event::{ElementState, WindowEvent},
+    event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
@@ -138,6 +140,10 @@ struct App {
     life: bool,
     source_id: Option<EntityId>,
     pending_move: bool,
+    pending_prune: Option<(EntityId, u32)>,
+    selected: Option<SemanticTarget>,
+    cursor: Option<winit::dpi::PhysicalPosition<f64>>,
+    last_camera: Option<Camera>,
 }
 impl App {
     fn new(life: bool) -> Result<Self, Box<dyn std::error::Error>> {
@@ -171,7 +177,117 @@ impl App {
             life,
             source_id,
             pending_move: false,
+            pending_prune: None,
+            selected: None,
+            cursor: None,
+            last_camera: None,
         })
+    }
+    fn pick_cursor(&mut self) {
+        let Some(graphics) = self.graphics.as_ref() else {
+            return;
+        };
+        let Some(cursor) = self.cursor else {
+            eprintln!("selection: cursor unavailable");
+            return;
+        };
+        let Some(camera) = self.last_camera else {
+            eprintln!("selection: camera changed; wait for redraw");
+            return;
+        };
+        let size = graphics.window.inner_size();
+        if !cursor.x.is_finite()
+            || !cursor.y.is_finite()
+            || cursor.x < 0.0
+            || cursor.y < 0.0
+            || cursor.x >= f64::from(size.width)
+            || cursor.y >= f64::from(size.height)
+        {
+            self.selected = None;
+            eprintln!("selection: click outside viewport");
+            return;
+        }
+        let scene = match Scene::from_world(&self.world) {
+            Ok(scene) => scene,
+            Err(error) => {
+                eprintln!("selection snapshot failed: {error}");
+                return;
+            }
+        };
+        match scene.pick_pixel(
+            camera,
+            cursor.x as u32,
+            cursor.y as u32,
+            size.width,
+            size.height,
+            100.0,
+        ) {
+            Ok(PickOutcome::Hit(hit)) => {
+                self.selected = Some(hit.target);
+                eprintln!(
+                    "selection tick={} target={:?} distance={:.5} position={:?}",
+                    self.time.ticks(),
+                    hit.target,
+                    hit.distance,
+                    hit.position
+                );
+            }
+            Ok(PickOutcome::Miss) => {
+                self.selected = None;
+                eprintln!("selection: miss");
+            }
+            Ok(PickOutcome::Ambiguous { first, second }) => {
+                self.selected = None;
+                eprintln!("selection: ambiguous {first:?} / {second:?}; no cut authorized");
+            }
+            Ok(PickOutcome::Indeterminate) => {
+                self.selected = None;
+                eprintln!("selection: indeterminate; no cut authorized");
+            }
+            Err(error) => {
+                self.selected = None;
+                eprintln!("selection failed: {error}");
+            }
+        }
+    }
+    fn queue_prune(&mut self) {
+        let target = match self.selected {
+            Some(SemanticTarget::Connection { organism, child })
+            | Some(SemanticTarget::GrowthNode {
+                organism,
+                node: child,
+            }) => (organism, child),
+            other => {
+                eprintln!(
+                    "prune rejected: select a non-root growth node or connection, got {other:?}"
+                );
+                return;
+            }
+        };
+        if target.1 == 0
+            || self
+                .world
+                .organisms()
+                .iter()
+                .find(|tree| tree.id() == target.0)
+                .and_then(|tree| tree.node(target.1))
+                .is_none()
+        {
+            eprintln!("prune rejected: root or stale node");
+            self.selected = None;
+            return;
+        }
+        if self.pending_prune.is_some() {
+            eprintln!("prune rejected: another cut is already queued");
+            return;
+        }
+        self.pending_prune = Some(target);
+        eprintln!(
+            "prune queued for tick={} organism={} child={}; resume if paused",
+            self.time.ticks() + 1,
+            target.0.value(),
+            target.1
+        );
     }
     fn scene(&self) -> Result<Scene, Box<dyn std::error::Error>> {
         let mut scene = Scene::from_world(&self.world)?;
@@ -198,7 +314,7 @@ impl App {
             self.accumulator += elapsed.min(Duration::from_millis(250));
             let mut steps = 0;
             while self.accumulator >= STEP && steps < 4 {
-                let events = if self.life && self.pending_move {
+                let mut events = if self.life && self.pending_move {
                     let source_id = self.source_id.expect("life source exists");
                     let source = self
                         .world
@@ -222,6 +338,13 @@ impl App {
                 } else {
                     Vec::new()
                 };
+                if let Some((organism, child)) = self.pending_prune {
+                    events.push(EnvironmentEvent {
+                        tick: self.time.ticks() + 1,
+                        order: events.len() as u64,
+                        kind: EnvironmentEventKind::PruneBranch { organism, child },
+                    });
+                }
                 let result = if self.life {
                     advance_life(&mut self.world, &mut self.time, self.step, &events)
                 } else {
@@ -233,6 +356,15 @@ impl App {
                     return;
                 }
                 self.pending_move = false;
+                if let Some((organism, child)) = self.pending_prune.take() {
+                    self.selected = None;
+                    eprintln!(
+                        "pruned tick={} organism={} child={}",
+                        self.time.ticks(),
+                        organism.value(),
+                        child
+                    );
+                }
                 self.accumulator -= STEP;
                 steps += 1;
             }
@@ -278,6 +410,18 @@ impl App {
                 return;
             }
         };
+        self.last_camera = None;
+        graphics.window.set_title(&format!(
+            "First {} — tick {} — selected {:?}{}",
+            if self.life { "Life" } else { "Light" },
+            self.time.ticks(),
+            self.selected,
+            if self.pending_prune.is_some() {
+                " — prune queued"
+            } else {
+                ""
+            }
+        ));
         let frame = match graphics.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -319,6 +463,7 @@ impl App {
             return;
         }
         graphics.queue.present(frame);
+        self.last_camera = Some(camera);
         self.cpu_total += started.elapsed();
         self.frames += 1;
         if report {
@@ -411,7 +556,7 @@ impl ApplicationHandler for App {
         }
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-        let Some(graphics) = self.graphics.as_mut() else {
+        let Some(graphics) = self.graphics.as_ref() else {
             return;
         };
         if graphics.window.id() != id {
@@ -419,8 +564,21 @@ impl ApplicationHandler for App {
         }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => graphics.resize(size.width, size.height),
+            WindowEvent::Resized(size) => {
+                self.last_camera = None;
+                self.selected = None;
+                if let Some(graphics) = self.graphics.as_mut() {
+                    graphics.resize(size.width, size.height);
+                }
+            }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
+            WindowEvent::CursorMoved { position, .. } => self.cursor = Some(position),
+            WindowEvent::CursorLeft { .. } => self.cursor = None,
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } if self.life => self.pick_cursor(),
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed && !event.repeat =>
             {
@@ -434,13 +592,26 @@ impl ApplicationHandler for App {
                         }
                         KeyCode::KeyN => self.normals = !self.normals,
                         KeyCode::KeyM if self.life => self.pending_move = true,
-                        KeyCode::KeyA | KeyCode::ArrowLeft => self.yaw -= 0.15,
-                        KeyCode::KeyD | KeyCode::ArrowRight => self.yaw += 0.15,
+                        KeyCode::KeyP if self.life => self.queue_prune(),
+                        KeyCode::KeyA | KeyCode::ArrowLeft => {
+                            self.yaw -= 0.15;
+                            self.last_camera = None;
+                            self.selected = None;
+                        }
+                        KeyCode::KeyD | KeyCode::ArrowRight => {
+                            self.yaw += 0.15;
+                            self.last_camera = None;
+                            self.selected = None;
+                        }
                         KeyCode::KeyW | KeyCode::ArrowUp => {
-                            self.elevation = (self.elevation + 0.1).min(1.3)
+                            self.elevation = (self.elevation + 0.1).min(1.3);
+                            self.last_camera = None;
+                            self.selected = None;
                         }
                         KeyCode::KeyS | KeyCode::ArrowDown => {
-                            self.elevation = (self.elevation - 0.1).max(-1.3)
+                            self.elevation = (self.elevation - 0.1).max(-1.3);
+                            self.last_camera = None;
+                            self.selected = None;
                         }
                         _ => {}
                     }
@@ -465,7 +636,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!(
         "{} controls: A/D or Left/Right orbit; W/S or Up/Down tilt; Space pause; N normals; {}Esc exit",
         if life { "First Life" } else { "First Light" },
-        if life { "M move resource source; " } else { "" },
+        if life {
+            "M move resource source; Left click select; P prune selected branch; "
+        } else {
+            ""
+        },
     );
     let event_loop = EventLoop::new()?;
     event_loop.run_app(&mut App::new(life)?)?;

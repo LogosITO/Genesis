@@ -22,6 +22,8 @@ pub enum ScheduleError {
     Capacity,
     /// Source identity or position is invalid.
     InvalidSource,
+    /// Growth target is absent, the root, or conflicts with an already queued cut.
+    InvalidTarget,
 }
 impl std::fmt::Display for ScheduleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -93,6 +95,28 @@ impl Runtime {
                     .source_mut(*id)
                     .map_err(|_| ScheduleError::InvalidSource)?;
             }
+            EnvironmentEventKind::PruneBranch { organism, child } => {
+                let tree = probe
+                    .organisms()
+                    .iter()
+                    .find(|tree| tree.id() == *organism)
+                    .ok_or(ScheduleError::InvalidTarget)?;
+                if self.events.iter().any(|event| match event.kind {
+                    EnvironmentEventKind::PruneBranch {
+                        organism: other,
+                        child: other_child,
+                    } if other == *organism => {
+                        tree.contains_branch(*child, other_child)
+                            || tree.contains_branch(other_child, *child)
+                    }
+                    _ => false,
+                }) {
+                    return Err(ScheduleError::InvalidTarget);
+                }
+                probe
+                    .prune_branch(*organism, *child)
+                    .map_err(|_| ScheduleError::InvalidTarget)?;
+            }
         }
         self.events.push(EnvironmentEvent {
             tick,
@@ -151,6 +175,31 @@ impl Runtime {
                     probe
                         .source_mut(id)
                         .map_err(|_| PersistenceError::InvalidState("event source"))?;
+                }
+                EnvironmentEventKind::PruneBranch { organism, child } => {
+                    let tree = probe
+                        .organisms()
+                        .iter()
+                        .find(|tree| tree.id() == organism)
+                        .ok_or(PersistenceError::InvalidState("event target"))?;
+                    if self.events.iter().any(|prior| {
+                        prior.order < event.order
+                            && match prior.kind {
+                                EnvironmentEventKind::PruneBranch {
+                                    organism: other,
+                                    child: other_child,
+                                } if other == organism => {
+                                    tree.contains_branch(child, other_child)
+                                        || tree.contains_branch(other_child, child)
+                                }
+                                _ => false,
+                            }
+                    }) {
+                        return Err(PersistenceError::InvalidState("event target"));
+                    }
+                    probe
+                        .prune_branch(organism, child)
+                        .map_err(|_| PersistenceError::InvalidState("event target"))?;
                 }
             }
             previous_order = Some(event.order);
@@ -256,16 +305,20 @@ mod tests {
         let good = runtime.save_bytes().unwrap();
         let original = runtime.clone();
         let mut value: serde_json::Value = serde_json::from_slice(&good).unwrap();
-        value["format_version"] = 3.into();
+        value["format_version"] = 4.into();
         assert!(matches!(
             runtime.load_into(&serde_json::to_vec(&value).unwrap()),
-            Err(PersistenceError::Version(3))
+            Err(PersistenceError::Version(4))
         ));
         value["format_version"] = 1.into();
         value["runtime"]["world"]["organisms"][0]
             .as_object_mut()
             .unwrap()
             .remove("budget");
+        value["runtime"]["world"]["organisms"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("next_node_id");
         value["runtime"]["world"]["organisms"][0]["parameters"]
             .as_object_mut()
             .unwrap()
@@ -340,6 +393,91 @@ mod tests {
                 Err(PersistenceError::InvalidState("world"))
             ));
         }
+    }
+
+    #[test]
+    fn prune_events_are_atomic_persistent_and_replayable() {
+        let (mut runtime, _) = fixture();
+        for _ in 0..5 {
+            runtime.tick().unwrap();
+        }
+        let organism = runtime.world().organisms()[0].id();
+        assert!(runtime.world().organisms()[0].node(1).is_some());
+        let kind = EnvironmentEventKind::PruneBranch { organism, child: 1 };
+        assert_eq!(
+            runtime.schedule(10, EnvironmentEventKind::PruneBranch { organism, child: 0 }),
+            Err(ScheduleError::InvalidTarget)
+        );
+        runtime.schedule(10, kind.clone()).unwrap();
+        assert_eq!(
+            runtime.schedule(11, kind.clone()),
+            Err(ScheduleError::InvalidTarget)
+        );
+        let bytes = runtime.save_bytes().unwrap();
+        let mut malformed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        malformed["runtime"]["events"][0]["kind"]["PruneBranch"]["child"] = 999.into();
+        assert!(matches!(
+            Runtime::load_bytes(&serde_json::to_vec(&malformed).unwrap()),
+            Err(PersistenceError::InvalidState("event target"))
+        ));
+        let mut loaded = Runtime::load_bytes(&bytes).unwrap();
+        assert_eq!(loaded.pending_events(), runtime.pending_events());
+        while runtime.time().ticks() < 12 {
+            runtime.tick().unwrap();
+            loaded.tick().unwrap();
+        }
+        assert_eq!(runtime, loaded);
+        assert!(runtime.world().organisms()[0].node(1).is_none());
+        assert!(runtime.pending_events().is_empty());
+        assert_eq!(
+            Runtime::load_bytes(&runtime.save_bytes().unwrap()).unwrap(),
+            runtime
+        );
+
+        let (mut another, _) = fixture();
+        for _ in 0..5 {
+            another.tick().unwrap();
+        }
+        let before = another.clone();
+        let events = [
+            EnvironmentEvent {
+                tick: 6,
+                order: 0,
+                kind: kind.clone(),
+            },
+            EnvironmentEvent {
+                tick: 6,
+                order: 1,
+                kind,
+            },
+        ];
+        assert!(
+            advance_life(&mut another.world, &mut another.time, another.step, &events).is_err()
+        );
+        assert_eq!(another, before);
+    }
+
+    #[test]
+    fn legacy_dense_allocators_migrate_but_v3_requires_allocator() {
+        let (mut runtime, _) = fixture();
+        for _ in 0..5 {
+            runtime.tick().unwrap();
+        }
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&runtime.save_bytes().unwrap()).unwrap();
+        value["runtime"]["world"]["organisms"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("next_node_id");
+        assert!(matches!(
+            Runtime::load_bytes(&serde_json::to_vec(&value).unwrap()),
+            Err(PersistenceError::InvalidState("world"))
+        ));
+        value["format_version"] = 2.into();
+        assert_eq!(
+            Runtime::load_bytes(&serde_json::to_vec(&value).unwrap()).unwrap(),
+            runtime
+        );
     }
 
     #[test]

@@ -7,8 +7,8 @@ use std::fmt;
 
 mod life;
 pub use life::{
-    GrowthNode, GrowthParameters, MAX_NODES, MAX_ORGANISMS, MAX_SOURCES, MAX_SPHERES, Organism,
-    ResourceSource,
+    GrowthNode, GrowthParameters, MAX_NODE_IDS, MAX_NODES, MAX_ORGANISMS, MAX_SOURCES, MAX_SPHERES,
+    Organism, ResourceSource,
 };
 
 /// A stable identifier for the lifetime of a world. IDs are never reused.
@@ -32,6 +32,10 @@ pub enum WorldError {
     Math(MathError),
     /// No entity with this ID exists.
     UnknownEntity,
+    /// No active growth node has this stable local ID.
+    UnknownNode,
+    /// The root cannot be pruned.
+    RootPrune,
     /// Entity ID space is exhausted.
     IdExhausted,
     /// Radius update length did not match the number of entities.
@@ -131,6 +135,20 @@ impl WorldState {
     /// Mutable organisms; mutation is limited to validated growth methods.
     pub fn organisms_mut(&mut self) -> &mut [Organism] {
         &mut self.organisms
+    }
+    /// Prunes an authoritative non-root branch of one organism.
+    pub fn prune_branch(&mut self, organism: EntityId, child: u32) -> Result<usize, WorldError> {
+        self.organisms
+            .iter_mut()
+            .find(|entry| entry.id() == organism)
+            .ok_or(WorldError::UnknownEntity)?
+            .prune_branch(child)
+    }
+    /// Migrates the dense node allocators in supported legacy save formats.
+    pub fn migrate_legacy_node_ids(&mut self) {
+        for organism in &mut self.organisms {
+            organism.migrate_legacy_node_ids();
+        }
     }
     /// Finds a source for a typed environmental event.
     pub fn source_mut(&mut self, id: EntityId) -> Result<&mut ResourceSource, WorldError> {

@@ -5,6 +5,7 @@ use analytic_field::{
 };
 use analytic_renderer::{
     Bvh, Camera, DrawOptions, GpuRenderer, GpuTimer, GpuTraversal, Primitive, Ray, Scene,
+    SemanticTarget,
 };
 use spatial_math::{Transform, Vec3};
 use std::{sync::mpsc, time::Instant};
@@ -381,6 +382,196 @@ fn gpu_bvh_rebuilds_after_growth_and_source_movement() {
     assert_eq!(
         renderer.acceleration_stats().unwrap().rebuilds,
         previous + 1
+    );
+    let camera =
+        Camera::look_at(v(0.0, 3.0, -10.0), v(0.0, 2.0, 0.0), v(0.0, 1.0, 0.0), 0.8).unwrap();
+    let render = |scene: &Scene, traversal| {
+        let image = renderer
+            .draw_with_traversal(
+                &device,
+                &queue,
+                scene,
+                camera,
+                traversal,
+                DrawOptions {
+                    size: [800, 450],
+                    normal_debug: false,
+                    surface: None,
+                    timer: None,
+                },
+            )
+            .unwrap();
+        read_rgb(&device, &queue, &image, 800, 450)
+    };
+    let before_pixels = render(&moved, GpuTraversal::Bvh);
+    let organism = world.organisms()[0].id();
+    let removed = world.prune_branch(organism, 1).unwrap();
+    assert!(removed > 1);
+    let pruned = Scene::from_world(&world).unwrap();
+    assert!(pruned.primitives().len() < moved.primitives().len());
+    assert!(
+        pruned
+            .primitives()
+            .iter()
+            .all(|p| p.target() != Some(SemanticTarget::Connection { organism, child: 1 }))
+    );
+    let before_prune_rebuilds = renderer.acceleration_stats().unwrap().rebuilds;
+    let cpu_bvh = Bvh::build(&pruned).unwrap();
+    let rays: Vec<_> = (-20..=20)
+        .flat_map(|x| {
+            (0..=24).map(move |y| r(v(x as f64 * 0.2, y as f64 * 0.2, -6.0), v(0.0, 0.0, 1.0)))
+        })
+        .collect();
+    let direct = renderer.query(&device, &queue, &pruned, &rays).unwrap();
+    let accelerated = renderer
+        .query_with_traversal(&device, &queue, &pruned, &rays, GpuTraversal::Bvh)
+        .unwrap();
+    for ((ray, direct), accelerated) in rays.iter().zip(direct).zip(accelerated) {
+        assert_eq!(
+            pruned.intersect(*ray).map(|hit| hit.id),
+            cpu_bvh.intersect(*ray).map(|hit| hit.id)
+        );
+        assert_eq!(direct.map(|hit| hit.id), accelerated.map(|hit| hit.id));
+    }
+    assert_eq!(
+        renderer.acceleration_stats().unwrap().rebuilds,
+        before_prune_rebuilds + 1
+    );
+    let after_direct = render(&pruned, GpuTraversal::Direct);
+    let after_bvh = render(&pruned, GpuTraversal::Bvh);
+    assert_eq!(after_direct, after_bvh);
+    let changed_pixels = before_pixels
+        .chunks_exact(3)
+        .zip(after_bvh.chunks_exact(3))
+        .filter(|(before, after)| before != after)
+        .count();
+    assert!(
+        changed_pixels > 0,
+        "pruning must visibly change the real GPU image"
+    );
+    if let Some(directory) = std::env::var_os("GENESIS_CAPTURE_DIR") {
+        std::fs::create_dir_all(&directory).unwrap();
+        for (name, pixels) in [
+            ("prune-before", &before_pixels),
+            ("prune-after-direct", &after_direct),
+            ("prune-after-bvh", &after_bvh),
+        ] {
+            let mut ppm = b"P6\n800 450\n255\n".to_vec();
+            ppm.extend_from_slice(pixels);
+            std::fs::write(
+                std::path::Path::new(&directory).join(format!("{name}.ppm")),
+                ppm,
+            )
+            .unwrap();
+        }
+    }
+    eprintln!(
+        "prune_gpu before={} after={} changed_pixels={changed_pixels} rebuilds={}",
+        moved.primitives().len(),
+        pruned.primitives().len(),
+        renderer.acceleration_stats().unwrap().rebuilds
+    );
+}
+
+#[test]
+#[ignore = "local GPU timing experiment; run serially in release"]
+fn gpu_pruning_update_benchmark() {
+    fn stats(mut values: Vec<f64>) -> (f64, f64) {
+        values.sort_by(f64::total_cmp);
+        (
+            values[values.len() / 2],
+            values[(values.len() * 95).div_ceil(100) - 1],
+        )
+    }
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        ..Default::default()
+    }))
+    .expect("GPU adapter required");
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+        ..Default::default()
+    }))
+    .unwrap();
+    let renderer =
+        pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+    let timer = GpuTimer::new(&device);
+    let mut world = four_organism_world();
+    let before = Scene::from_world(&world).unwrap();
+    let camera =
+        Camera::look_at(v(0.0, 3.0, -12.0), v(0.0, 2.0, 0.0), v(0.0, 1.0, 0.0), 0.8).unwrap();
+    let draw = |scene: &Scene| {
+        let started = Instant::now();
+        let _image = renderer
+            .draw_with_traversal(
+                &device,
+                &queue,
+                scene,
+                camera,
+                GpuTraversal::Bvh,
+                DrawOptions {
+                    size: [1280, 720],
+                    normal_debug: false,
+                    surface: None,
+                    timer: timer.as_ref(),
+                },
+            )
+            .unwrap();
+        let gpu_ms = if let Some(timer) = &timer {
+            Some(timer.read_ms(&device, &queue).unwrap())
+        } else {
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            None
+        };
+        (started.elapsed().as_secs_f64() * 1e3, gpu_ms)
+    };
+    for _ in 0..3 {
+        draw(&before);
+    }
+    let mut before_frame = Vec::new();
+    let mut before_gpu = Vec::new();
+    for _ in 0..10 {
+        let (frame, gpu) = draw(&before);
+        before_frame.push(frame);
+        if let Some(gpu) = gpu {
+            before_gpu.push(gpu);
+        }
+    }
+    let organism = world.organisms()[0].id();
+    let removed = world.prune_branch(organism, 1).unwrap();
+    let after = Scene::from_world(&world).unwrap();
+    let first_changed = draw(&after);
+    let upload = renderer.last_upload_stats().unwrap();
+    assert!(upload.bvh_bytes > 0);
+    let mut after_frame = Vec::new();
+    let mut after_gpu = Vec::new();
+    for _ in 0..10 {
+        let (frame, gpu) = draw(&after);
+        after_frame.push(frame);
+        if let Some(gpu) = gpu {
+            after_gpu.push(gpu);
+        }
+    }
+    assert_eq!(renderer.last_upload_stats().unwrap().bvh_bytes, 0);
+    eprintln!(
+        "prune_gpu_benchmark adapter={:?} before={} after={} removed_nodes={removed} resolution=1280x720 profile=release stable_before_frame_ms={:?} stable_before_gpu_ms={:?} first_changed={first_changed:?} first_upload={upload:?} stable_after_frame_ms={:?} stable_after_gpu_ms={:?}",
+        adapter.get_info(),
+        before.primitives().len(),
+        after.primitives().len(),
+        stats(before_frame),
+        if before_gpu.is_empty() {
+            None
+        } else {
+            Some(stats(before_gpu))
+        },
+        stats(after_frame),
+        if after_gpu.is_empty() {
+            None
+        } else {
+            Some(stats(after_gpu))
+        }
     );
 }
 

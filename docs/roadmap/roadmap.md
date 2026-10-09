@@ -27,9 +27,13 @@ Dynamic bounded GPU primitive storage removes the former 256-object cap. The rea
 
 The CPU-built hierarchy is flattened for bounded stackless WGSL traversal. A 16,861-ray four-way comparison and four pairs of real offscreen captures matched GPU direct and BVH on the reference adapter. Matched-scene timings support BVH for the tested larger scenes, while a single primitive is slower; automatic drawing retains direct traversal for up to four primitives. Floating-point bounds are not formally certified and other adapters remain untested. See the [design](../architecture/spatial-acceleration.md) and [local experiment](../research/gpu-bvh-acceleration.md).
 
-## Candidate 0.7
+## Foundation 0.7 — First Interaction, experimental local slice
 
-Investigate branch collision and shape continuity, and test GPU BVH precision and selection policy on additional adapters and adversarial coordinates. Measure rebuild/upload cost during sustained topology changes before considering refitting. Maintain direct traversal as a reference and fallback.
+CPU analytic picking maps snapshot primitives to stable world targets. A tick-indexed `PruneBranch` event removes an authoritative subtree and changes later growth. Version-3 saves retain sparse IDs and pending cuts; version-1/2 saves migrate on load. Headless pruning and save/replay scenarios, GPU before/after readback, and local latency measurements are recorded in the [interaction contract](../specifications/first-interaction.md) and [measurement record](../research/first-interaction-measurements.md). Native click and key controls are implemented; human interaction across operating systems still needs wider validation.
+
+## Candidate next research
+
+Investigate branch collision and shape continuity, and test GPU BVH precision and selection policy on additional adapters and adversarial coordinates. Measure repeated pruning/regrowth over longer sessions before considering incremental refitting. Maintain direct traversal as a reference and fallback.
 
 ## Later research
 Growth grammars and L-systems, finite resource budgets, destruction and recovery rules, physics queries, embedding/FFI, standalone UI, and authored language. Sequence and scope will follow experiments, not promises.

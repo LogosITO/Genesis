@@ -10,6 +10,8 @@ The native window starts at 1280×720 with one growing blue sphere from `WorldSt
 
 Controls: **A/D** or **Left/Right** orbit, **W/S** or **Up/Down** tilt, **Space** pause/resume, **N** normal debug, **Esc** exit. Resize the window to test other resolutions. Zero-sized windows skip drawing. The console prints adapter, backend, driver, frame rate, CPU submission time, optional GPU compute time, resolution, object count, upper bound on primitive tests, ticks, and current radius every two seconds.
 
+Run `cargo run -p first-light --locked -- --life` for the living organism. In this mode, **left-click** selects a node or parent-child connection through a bounded CPU analytic ray query. The window title and stderr identify the selected target and tick. **P** queues an authoritative `PruneBranch` event for the next tick; **M** moves the source. Pause with **Space** before a careful selection, then resume to apply the cut. Root, source, empty, ambiguous, and stale selections cannot prune. See the [First Interaction contract](../specifications/first-interaction.md).
+
 To run GPU parity and offscreen tests explicitly:
 
 ```sh

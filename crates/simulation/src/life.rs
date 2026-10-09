@@ -8,7 +8,7 @@ use world_state::{EntityId, WorldState};
 /// Maximum changes applied on one tick.
 pub const MAX_EVENTS_PER_TICK: usize = 16;
 
-/// A typed change to the continuous resource environment.
+/// A typed world change applied at a fixed tick.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum EnvironmentEventKind {
     /// Move the source before resource evaluation on the event tick.
@@ -25,6 +25,13 @@ pub enum EnvironmentEventKind {
         /// New active state.
         active: bool,
     },
+    /// Remove the child connection and its descendant subtree before resource sampling.
+    PruneBranch {
+        /// Stable organism identity.
+        organism: EntityId,
+        /// Stable non-root child node ID; the connection is identified by this child.
+        child: u32,
+    },
 }
 
 /// An event for a completed-tick index, ordered by its stable insertion sequence.
@@ -35,7 +42,7 @@ pub struct EnvironmentEvent {
     pub tick: u64,
     /// Monotonically allocated order among all queued events.
     pub order: u64,
-    /// Environmental mutation.
+    /// Authoritative world mutation.
     pub kind: EnvironmentEventKind,
 }
 
@@ -69,6 +76,11 @@ pub fn advance_life(
                 .source_mut(id)
                 .map_err(SimulationError::World)?
                 .set_active(active),
+            EnvironmentEventKind::PruneBranch { organism, child } => {
+                proposed
+                    .prune_branch(organism, child)
+                    .map_err(SimulationError::World)?;
+            }
         }
     }
     let sources = proposed.sources().to_vec();
@@ -76,7 +88,11 @@ pub fn advance_life(
         let nodes = organism.nodes();
         let mut children = vec![0u8; nodes.len()];
         for node in &nodes[1..] {
-            children[node.parent().expect("validated tree") as usize] += 1;
+            let parent = nodes
+                .iter()
+                .position(|candidate| candidate.id() == node.parent().expect("validated tree"))
+                .expect("validated parent");
+            children[parent] += 1;
         }
         let mut samples = Vec::with_capacity(nodes.len());
         for (index, node) in nodes.iter().enumerate() {
@@ -99,7 +115,13 @@ pub fn advance_life(
             }
             let parent_direction = if let Some(parent) = node.parent() {
                 node.position()
-                    .checked_sub(nodes[parent as usize].position())
+                    .checked_sub(
+                        nodes
+                            .iter()
+                            .find(|candidate| candidate.id() == parent)
+                            .expect("validated parent")
+                            .position(),
+                    )
                     .map_err(|error| SimulationError::World(error.into()))?
                     .normalized()
                     .map_err(|error| SimulationError::World(error.into()))?
