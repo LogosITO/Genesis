@@ -1,16 +1,20 @@
 //! Experimental analytic sphere, box, and capsule renderer. World state owns geometry;
-//! this crate converts a bounded snapshot to `f32` GPU data and never stores a mesh.
+//! this crate converts a snapshot to bounded `f32` GPU data and never stores a mesh.
 
+mod acceleration;
+pub mod field_graph_gpu;
 mod gpu;
-pub use gpu::{DrawOptions, GpuRenderer, GpuResult, GpuTimer};
+pub use acceleration::{Bvh, PrimitiveBounds};
+pub use gpu::{
+    DrawOptions, GpuAccelerationStats, GpuRenderer, GpuResult, GpuTimer, GpuTraversal,
+    GpuUploadStats,
+};
 
 use analytic_field::{AxisAlignedBox, Capsule, Sphere};
 use spatial_math::{Transform, Vec3};
 use std::fmt;
-use world_state::{MAX_NODES, WorldState};
+use world_state::{CONNECTION_RADIUS_RATIO, EntityId, WorldState};
 
-/// Hard cap used by both CPU snapshots and the WGSL loop.
-pub const MAX_OBJECTS: usize = 256;
 /// Supported world-coordinate magnitude for the first GPU prototype.
 pub const MAX_COORDINATE: f64 = 10_000.0;
 /// Supported positive primitive dimension.
@@ -23,8 +27,22 @@ pub enum RenderError {
     InvalidInput(&'static str),
     /// A primitive ID was already present in the snapshot.
     DuplicateId,
-    /// More than 256 objects were supplied.
+    /// A snapshot cannot fit in addressable host memory or GPU count representation.
     TooManyObjects,
+    /// Primitive buffer exceeds the configured budget or the device's binding/buffer limit.
+    PrimitiveCapacity {
+        /// Required storage bytes, including one dummy record for an empty scene.
+        requested_bytes: u64,
+        /// Smallest of the application budget and device limits.
+        allowed_bytes: u64,
+    },
+    /// BVH storage exceeds the configured acceleration budget or an adapter limit.
+    AccelerationCapacity {
+        /// Required bytes for the flattened hierarchy.
+        requested_bytes: u64,
+        /// Smallest of the application budget and device limits.
+        allowed_bytes: u64,
+    },
     /// GPU validation or execution failed.
     Gpu(String),
 }
@@ -194,6 +212,81 @@ pub enum PrimitiveKind {
     Capsule,
 }
 
+/// Authoritative identity represented by a renderer primitive. A connection belongs to its child.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticTarget {
+    /// A structurally identified segment of one authored world occurrence.
+    Authored(world_state::AuthoredSegmentRef),
+    /// Ordinary world sphere.
+    Sphere(EntityId),
+    /// Growth-node sphere.
+    GrowthNode {
+        /// Stable world organism ID.
+        organism: EntityId,
+        /// Stable local growth-node ID.
+        node: u32,
+    },
+    /// Parent-child capsule, identified by the stable child ID.
+    Connection {
+        /// Stable world organism ID.
+        organism: EntityId,
+        /// Stable child node ID defining the connection.
+        child: u32,
+    },
+    /// Resource-source marker.
+    Source(EntityId),
+    /// Authoritative kinematic sphere.
+    Body(EntityId),
+}
+
+/// A CPU analytic pick with a stable world target and an outward unit normal.
+#[derive(Clone, Copy, Debug)]
+pub struct PickHit {
+    /// Semantic target, independent of snapshot position.
+    pub target: SemanticTarget,
+    /// Distance from ray origin in world units.
+    pub distance: f64,
+    /// Boundary point in world coordinates.
+    pub position: Vec3,
+    /// Outward surface normal.
+    pub normal: Vec3,
+}
+
+/// Bounded picking result. Ambiguity never authorizes a mutation.
+#[derive(Clone, Copy, Debug)]
+pub enum PickOutcome {
+    /// No analytic surface was intersected in the ray interval.
+    Miss,
+    /// One unambiguous semantic target.
+    Hit(PickHit),
+    /// Two different targets have nearly equal boundary distances.
+    Ambiguous {
+        /// Nearest target in snapshot order.
+        first: SemanticTarget,
+        /// Another target within the numerical ambiguity window.
+        second: SemanticTarget,
+    },
+    /// The snapshot has no authoritative target or BVH/direct results disagree.
+    Indeterminate,
+}
+
+/// Whether a ray can select a particular live branch in this render snapshot.
+/// Occlusion describes visible surface order; it does not change gameplay contact or picking.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BranchVisibility {
+    /// The ray does not cross the branch's analytic node or connection.
+    OffRay,
+    /// The branch owns the nearest unambiguous visible surface.
+    Visible,
+    /// A different authoritative target is strictly nearer than the branch.
+    Occluded {
+        /// The authoritative target on the nearer surface.
+        front: SemanticTarget,
+    },
+    /// Near-coincident hits or CPU direct/BVH disagreement prevent a safe classification.
+    Indeterminate,
+}
+
 /// One snapshot primitive, in world coordinates, with a stable caller-supplied ID.
 #[derive(Clone, Copy, Debug)]
 pub struct Primitive {
@@ -205,6 +298,8 @@ pub struct Primitive {
     dimensions: Vec3,
     radius: f64,
     color: [f32; 3],
+    emphasis: bool,
+    target: Option<SemanticTarget>,
 }
 impl Primitive {
     fn new(
@@ -237,6 +332,8 @@ impl Primitive {
             dimensions,
             radius: 0.0,
             color,
+            emphasis: false,
+            target: None,
         })
     }
     /// Constructs a transformed sphere. The world radius is `local_radius * uniform_scale`.
@@ -288,6 +385,8 @@ impl Primitive {
             dimensions: b,
             radius,
             color,
+            emphasis: false,
+            target: None,
         })
     }
     /// Center in world coordinates.
@@ -306,70 +405,85 @@ impl Primitive {
     pub fn color(self) -> [f32; 3] {
         self.color
     }
+    /// Authoritative target when constructed from a world snapshot.
+    pub fn target(self) -> Option<SemanticTarget> {
+        self.target
+    }
 }
 
-/// A bounded, renderer-owned snapshot. `WorldState` remains the authority for its spheres.
+/// A renderer-owned snapshot. `WorldState` remains the authority for its geometry.
 #[derive(Clone, Debug, Default)]
 pub struct Scene {
     primitives: Vec<Primitive>,
 }
 impl Scene {
-    /// Copies world geometry into a bounded snapshot. IDs encode category, entity and node.
+    /// Copies all world geometry into a snapshot. Numeric primitive IDs are renderer data;
+    /// semantic targets carry authoritative identity.
     pub fn from_world(world: &WorldState) -> Result<Self, RenderError> {
         world
             .validate()
             .map_err(|_| RenderError::InvalidInput("invalid world state"))?;
         let mut scene = Self::default();
         for entity in world.entities() {
-            let id = u32::try_from(entity.id().value())
-                .map_err(|_| RenderError::InvalidInput("entity ID exceeds GPU u32 range"))?;
-            scene.push(Primitive::sphere(
-                id,
-                entity.sphere(),
-                entity.transform(),
-                [0.25, 0.67, 0.95],
-            )?)?;
+            let id =
+                u32::try_from(scene.primitives.len()).map_err(|_| RenderError::TooManyObjects)?;
+            let mut primitive =
+                Primitive::sphere(id, entity.sphere(), entity.transform(), [0.25, 0.67, 0.95])?;
+            primitive.target = Some(SemanticTarget::Sphere(entity.id()));
+            scene.push(primitive)?;
         }
-        for organism in world.organisms() {
+        for (organism_index, organism) in world.organisms().iter().enumerate() {
+            let (node_color, connection_color) = [
+                ([0.30, 0.85, 0.42], [0.22, 0.65, 0.34]),
+                ([0.30, 0.68, 0.98], [0.19, 0.49, 0.78]),
+                ([0.96, 0.57, 0.28], [0.75, 0.39, 0.19]),
+                ([0.78, 0.50, 0.95], [0.57, 0.34, 0.73]),
+            ][organism_index];
             for node in organism.nodes() {
-                let id = 1_000_000
-                    + u32::try_from(organism.id().value())
-                        .map_err(|_| RenderError::InvalidInput("organism ID exceeds u32"))?
-                        * MAX_NODES as u32
-                    + node.id();
-                scene.push(Primitive::sphere(
+                let id = u32::try_from(scene.primitives.len())
+                    .map_err(|_| RenderError::TooManyObjects)?;
+                let mut primitive = Primitive::sphere(
                     id,
                     Sphere::new(organism.parameters().node_radius())
                         .map_err(|_| RenderError::InvalidInput("invalid node radius"))?,
                     Transform::new(node.position(), 1.0)
                         .map_err(|_| RenderError::InvalidInput("invalid node position"))?,
-                    [0.30, 0.85, 0.42],
-                )?)?;
+                    node_color,
+                )?;
+                primitive.target = Some(SemanticTarget::GrowthNode {
+                    organism: organism.id(),
+                    node: node.id(),
+                });
+                scene.push(primitive)?;
                 if let Some(parent) = node.parent() {
-                    let a = organism.nodes()[parent as usize].position();
+                    let a = organism
+                        .node(parent)
+                        .ok_or(RenderError::InvalidInput("invalid growth parent"))?
+                        .position();
                     let capsule = Capsule::new(
                         a,
                         node.position(),
-                        organism.parameters().node_radius() * 0.55,
+                        organism.parameters().node_radius() * CONNECTION_RADIUS_RATIO,
                     )
                     .map_err(|_| RenderError::InvalidInput("invalid growth connection"))?;
-                    scene.push(Primitive::capsule(
-                        2_000_000
-                            + u32::try_from(organism.id().value()).map_err(|_| {
-                                RenderError::InvalidInput("organism ID exceeds u32")
-                            })? * MAX_NODES as u32
-                            + node.id(),
+                    let mut primitive = Primitive::capsule(
+                        u32::try_from(scene.primitives.len())
+                            .map_err(|_| RenderError::TooManyObjects)?,
                         capsule,
-                        [0.22, 0.65, 0.34],
-                    )?)?;
+                        connection_color,
+                    )?;
+                    primitive.target = Some(SemanticTarget::Connection {
+                        organism: organism.id(),
+                        child: node.id(),
+                    });
+                    scene.push(primitive)?;
                 }
             }
         }
         for source in world.sources() {
-            let id = 3_000_000
-                + u32::try_from(source.id().value())
-                    .map_err(|_| RenderError::InvalidInput("source ID exceeds u32"))?;
-            scene.push(Primitive::sphere(
+            let id =
+                u32::try_from(scene.primitives.len()).map_err(|_| RenderError::TooManyObjects)?;
+            let mut primitive = Primitive::sphere(
                 id,
                 Sphere::new((source.radius() * 0.06).clamp(0.05, 1.0))
                     .map_err(|_| RenderError::InvalidInput("invalid source radius"))?,
@@ -380,24 +494,80 @@ impl Scene {
                 } else {
                     [0.35, 0.35, 0.38]
                 },
-            )?)?;
+            )?;
+            primitive.target = Some(SemanticTarget::Source(source.id()));
+            scene.push(primitive)?;
+        }
+        if let Some(body) = world.body() {
+            let id =
+                u32::try_from(scene.primitives.len()).map_err(|_| RenderError::TooManyObjects)?;
+            let mut primitive = Primitive::sphere(
+                id,
+                Sphere::new(body.radius())
+                    .map_err(|_| RenderError::InvalidInput("invalid body radius"))?,
+                Transform::new(body.position(), 1.0)
+                    .map_err(|_| RenderError::InvalidInput("invalid body position"))?,
+                [0.98, 0.34, 0.18],
+            )?;
+            primitive.target = Some(SemanticTarget::Body(body.id()));
+            scene.push(primitive)?;
+        }
+        for (segment, _) in world
+            .authored_capsules()
+            .map_err(|_| RenderError::InvalidInput("invalid authored geometry"))?
+        {
+            let capsule = Capsule::new(segment.start, segment.end, segment.radius)
+                .map_err(|_| RenderError::InvalidInput("invalid authored capsule"))?;
+            let mut primitive = Primitive::capsule(
+                u32::try_from(scene.primitives.len()).map_err(|_| RenderError::TooManyObjects)?,
+                capsule,
+                [0.85, 0.72, 0.42],
+            )?;
+            primitive.target = Some(SemanticTarget::Authored(segment.reference));
+            scene.push(primitive)?;
         }
         Ok(scene)
     }
-    /// Adds a primitive, rejecting duplicate identity and excess workload.
+    /// Adds a primitive, rejecting duplicate identity and allocation failure.
     pub fn push(&mut self, primitive: Primitive) -> Result<(), RenderError> {
-        if self.primitives.len() == MAX_OBJECTS {
+        if self.primitives.len() >= u32::MAX as usize {
             return Err(RenderError::TooManyObjects);
         }
         if self.primitives.iter().any(|p| p.id == primitive.id) {
             return Err(RenderError::DuplicateId);
         }
+        self.primitives
+            .try_reserve(1)
+            .map_err(|_| RenderError::TooManyObjects)?;
         self.primitives.push(primitive);
         Ok(())
     }
     /// Visible primitives in stable insertion order.
     pub fn primitives(&self) -> &[Primitive] {
         &self.primitives
+    }
+    /// Colors the existing node and connection without diffuse dimming in this snapshot.
+    /// Returns false when the branch is absent; picking geometry and world state are unchanged.
+    pub fn highlight_branch(&mut self, organism: EntityId, child: u32, color: [f32; 3]) -> bool {
+        if color
+            .iter()
+            .any(|component| !component.is_finite() || !(0.0..=1.0).contains(component))
+        {
+            return false;
+        }
+        let mut found = false;
+        for primitive in &mut self.primitives {
+            if matches!(primitive.target,
+                Some(SemanticTarget::GrowthNode { organism: id, node }) if id == organism && node == child)
+                || matches!(primitive.target,
+                    Some(SemanticTarget::Connection { organism: id, child: node }) if id == organism && node == child)
+            {
+                primitive.color = color;
+                primitive.emphasis = true;
+                found = true;
+            }
+        }
+        found
     }
     /// Nearest analytic boundary intersection in the closed ray interval.
     pub fn intersect(&self, ray: Ray) -> Option<Hit> {
@@ -410,6 +580,119 @@ impl Scene {
             }
         }
         closest
+    }
+    /// Picks the current world snapshot with CPU analytic intersections and its derived BVH.
+    /// Different targets within `max(1e-8, distance × 1e-7)` are reported as ambiguous.
+    pub fn pick_ray(&self, ray: Ray) -> Result<PickOutcome, RenderError> {
+        let accelerated = Bvh::build(self)?.intersect(ray);
+        let direct = self.intersect(ray);
+        let nearest = match (accelerated, direct) {
+            (None, None) => return Ok(PickOutcome::Miss),
+            (Some(a), Some(b))
+                if a.id == b.id && a.distance == b.distance && a.normal == b.normal =>
+            {
+                a
+            }
+            _ => return Ok(PickOutcome::Indeterminate),
+        };
+        let Some(first) = self
+            .primitives
+            .iter()
+            .find(|primitive| primitive.id == nearest.id)
+            .and_then(|primitive| primitive.target)
+        else {
+            return Ok(PickOutcome::Indeterminate);
+        };
+        let tolerance = 1e-8_f64.max(nearest.distance * 1e-7);
+        for primitive in &self.primitives {
+            if primitive.id == nearest.id {
+                continue;
+            }
+            if let Some(other) = intersect_primitive(*primitive, ray) {
+                if other.distance < nearest.distance - tolerance {
+                    return Ok(PickOutcome::Indeterminate);
+                }
+                if (other.distance - nearest.distance).abs() <= tolerance {
+                    let Some(second) = primitive.target else {
+                        return Ok(PickOutcome::Indeterminate);
+                    };
+                    if second != first {
+                        return Ok(PickOutcome::Ambiguous { first, second });
+                    }
+                }
+            }
+        }
+        let position = ray
+            .origin
+            .checked_add(
+                ray.direction
+                    .checked_scale(nearest.distance)
+                    .map_err(|_| RenderError::InvalidInput("pick position overflow"))?,
+            )
+            .map_err(|_| RenderError::InvalidInput("pick position overflow"))?;
+        Ok(PickOutcome::Hit(PickHit {
+            target: first,
+            distance: nearest.distance,
+            position,
+            normal: nearest.normal,
+        }))
+    }
+    /// Classifies analytic occlusion without allowing selection through the front surface.
+    pub fn branch_visibility(
+        &self,
+        ray: Ray,
+        organism: EntityId,
+        child: u32,
+    ) -> Result<BranchVisibility, RenderError> {
+        let branch_distance = self
+            .primitives
+            .iter()
+            .filter(|primitive| {
+                matches!(primitive.target,
+                    Some(SemanticTarget::GrowthNode { organism: id, node }) if id == organism && node == child)
+                    || matches!(primitive.target,
+                        Some(SemanticTarget::Connection { organism: id, child: node }) if id == organism && node == child)
+            })
+            .filter_map(|primitive| intersect_primitive(*primitive, ray).map(|hit| hit.distance))
+            .min_by(f64::total_cmp);
+        let Some(distance) = branch_distance else {
+            return Ok(BranchVisibility::OffRay);
+        };
+        Ok(match self.pick_ray(ray)? {
+            PickOutcome::Hit(front) => {
+                let front_is_branch = matches!(front.target,
+                    SemanticTarget::GrowthNode { organism: id, node } if id == organism && node == child)
+                    || matches!(front.target,
+                        SemanticTarget::Connection { organism: id, child: node } if id == organism && node == child);
+                if front_is_branch {
+                    BranchVisibility::Visible
+                } else if distance > front.distance + 1e-8_f64.max(front.distance * 1e-7) {
+                    BranchVisibility::Occluded {
+                        front: front.target,
+                    }
+                } else {
+                    BranchVisibility::Indeterminate
+                }
+            }
+            PickOutcome::Miss | PickOutcome::Ambiguous { .. } | PickOutcome::Indeterminate => {
+                BranchVisibility::Indeterminate
+            }
+        })
+    }
+    /// Picks a pixel center with a finite maximum interaction distance.
+    pub fn pick_pixel(
+        &self,
+        camera: Camera,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        max_distance: f64,
+    ) -> Result<PickOutcome, RenderError> {
+        let ray = camera.ray(x, y, width, height)?;
+        let (near, far) = ray.interval();
+        let bounded = Ray::new(ray.origin(), ray.direction(), near, far.min(max_distance))?;
+        self.pick_ray(bounded)
     }
 }
 
@@ -735,7 +1018,7 @@ mod tests {
         );
     }
     #[test]
-    fn world_capacity_does_not_hide_snapshot_overflow() {
+    fn world_capacity_above_old_renderer_limit_is_complete() {
         use world_state::DeterministicSeed;
         let mut world = WorldState::new(DeterministicSeed(1));
         for _ in 0..256 {
@@ -745,10 +1028,9 @@ mod tests {
         }
         world.spawn_source(Vec3::ZERO, 1.0, 1.0).unwrap();
         world.validate().unwrap();
-        assert!(matches!(
-            Scene::from_world(&world),
-            Err(RenderError::TooManyObjects)
-        ));
+        let scene = Scene::from_world(&world).unwrap();
+        assert_eq!(scene.primitives().len(), 257);
+        assert_eq!(scene.primitives().last().unwrap().id, 256);
     }
     #[test]
     fn camera_and_validation() {
@@ -815,6 +1097,59 @@ mod tests {
                 .unwrap(),
             0.0
         );
+    }
+
+    #[test]
+    fn body_snapshot_uses_authoritative_position_and_stable_semantic_id() {
+        use world_state::DeterministicSeed;
+        let mut world = WorldState::new(DeterministicSeed(19));
+        let id = world.spawn_body(v(-1.0, 0.0, 0.0), 0.2).unwrap();
+        let before = Scene::from_world(&world).unwrap();
+        assert_eq!(
+            before.primitives()[0].target(),
+            Some(SemanticTarget::Body(id))
+        );
+        world
+            .body_mut(id)
+            .unwrap()
+            .apply_motion(v(1.0, 0.0, 0.0), None)
+            .unwrap();
+        let after = Scene::from_world(&world).unwrap();
+        assert_eq!(after.primitives()[0].center(), v(1.0, 0.0, 0.0));
+        assert_eq!(
+            after.primitives()[0].target(),
+            Some(SemanticTarget::Body(id))
+        );
+        assert!(
+            after
+                .intersect(ray(v(1.0, 0.0, -2.0), v(0.0, 0.0, 1.0)))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn distinct_organisms_keep_identity_and_visual_color() {
+        use world_state::{DeterministicSeed, GrowthParameters};
+        let mut world = WorldState::new(DeterministicSeed(21));
+        let parameters = GrowthParameters::new(0.1, 0.3, 0.2, 1.0).unwrap();
+        let first = world.spawn_organism(v(-1.0, 0.0, 0.0), parameters).unwrap();
+        let second = world.spawn_organism(v(1.0, 0.0, 0.0), parameters).unwrap();
+        let scene = Scene::from_world(&world).unwrap();
+        assert_eq!(
+            scene.primitives()[0].target(),
+            Some(SemanticTarget::GrowthNode {
+                organism: first,
+                node: 0
+            })
+        );
+        assert_eq!(
+            scene.primitives()[1].target(),
+            Some(SemanticTarget::GrowthNode {
+                organism: second,
+                node: 0
+            })
+        );
+        assert_ne!(scene.primitives()[0].color(), scene.primitives()[1].color());
     }
 
     #[test]
@@ -1005,5 +1340,208 @@ mod tests {
                 .id,
             3
         );
+    }
+
+    #[test]
+    fn authoritative_picking_maps_nodes_connections_and_camera_rays() {
+        use world_state::{DeterministicSeed, GrowthParameters};
+        let mut world = WorldState::new(DeterministicSeed(4));
+        let organism = world
+            .spawn_organism(
+                Vec3::ZERO,
+                GrowthParameters::new(0.1, 1.0, 1.0, 1.0).unwrap(),
+            )
+            .unwrap();
+        world.organisms_mut()[0]
+            .grow(&[(1.0, v(0.0, 1.0, 0.0))])
+            .unwrap();
+        let scene = Scene::from_world(&world).unwrap();
+        let capsule_ray = ray(v(0.0, 0.5, -3.0), v(0.0, 0.0, 1.0));
+        let direct = scene.intersect(capsule_ray).unwrap();
+        assert_eq!(
+            Bvh::build(&scene)
+                .unwrap()
+                .intersect(capsule_ray)
+                .unwrap()
+                .id,
+            direct.id
+        );
+        let PickOutcome::Hit(capsule) = scene.pick_ray(capsule_ray).unwrap() else {
+            panic!("expected connection")
+        };
+        assert_eq!(
+            capsule.target,
+            SemanticTarget::Connection { organism, child: 1 }
+        );
+        assert!((capsule.position.z() + 0.055).abs() < 1e-10);
+        assert_eq!(capsule.normal, v(0.0, 0.0, -1.0));
+        let camera =
+            Camera::look_at(v(0.0, 1.0, -3.0), v(0.0, 1.0, 0.0), v(0.0, 1.0, 0.0), 0.8).unwrap();
+        let PickOutcome::Hit(node) = scene.pick_pixel(camera, 0, 0, 1, 1, 10.0).unwrap() else {
+            panic!("expected node")
+        };
+        assert_eq!(
+            node.target,
+            SemanticTarget::GrowthNode { organism, node: 1 }
+        );
+        assert!(matches!(
+            scene.pick_pixel(camera, 0, 0, 1, 1, 1.0).unwrap(),
+            PickOutcome::Miss
+        ));
+        assert!(scene.pick_pixel(camera, 1, 0, 1, 1, 10.0).is_err());
+        assert!(scene.pick_pixel(camera, 0, 0, 0, 1, 10.0).is_err());
+        assert!(matches!(
+            scene
+                .pick_ray(ray(v(3.0, 3.0, -3.0), v(0.0, 0.0, 1.0)))
+                .unwrap(),
+            PickOutcome::Miss
+        ));
+        world.prune_branch(organism, 1).unwrap();
+        let changed = Scene::from_world(&world).unwrap();
+        assert!(
+            changed
+                .primitives()
+                .iter()
+                .all(|primitive| primitive.target()
+                    != Some(SemanticTarget::Connection { organism, child: 1 }))
+        );
+        assert!(matches!(
+            changed.pick_ray(capsule_ray).unwrap(),
+            PickOutcome::Miss
+        ));
+        assert!(
+            Bvh::build(&changed)
+                .unwrap()
+                .intersect(capsule_ray)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn picking_rejects_overlaps_near_ties_and_unmapped_geometry() {
+        use world_state::DeterministicSeed;
+        let mut world = WorldState::new(DeterministicSeed(4));
+        world
+            .spawn_sphere(Sphere::new(1.0).unwrap(), Transform::identity(), 0.0)
+            .unwrap();
+        world
+            .spawn_sphere(
+                Sphere::new(1.0).unwrap(),
+                Transform::new(v(0.0, 0.0, 1e-9), 1.0).unwrap(),
+                0.0,
+            )
+            .unwrap();
+        let scene = Scene::from_world(&world).unwrap();
+        let approach = ray(v(0.0, 0.0, -3.0), v(0.0, 0.0, 1.0));
+        assert!(matches!(
+            scene.pick_ray(approach).unwrap(),
+            PickOutcome::Ambiguous { .. }
+        ));
+        let mut manual = Scene::default();
+        manual
+            .push(
+                Primitive::sphere(
+                    9,
+                    Sphere::new(1.0).unwrap(),
+                    Transform::identity(),
+                    [1.0; 3],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(matches!(
+            manual.pick_ray(approach).unwrap(),
+            PickOutcome::Indeterminate
+        ));
+        let inside = ray(Vec3::ZERO, v(0.0, 0.0, 1.0));
+        assert_eq!(manual.intersect(inside).unwrap().distance, 1.0);
+    }
+
+    #[test]
+    fn branch_visibility_separates_selection_from_occlusion() {
+        use world_state::{DeterministicSeed, GrowthParameters};
+        let mut world = WorldState::new(DeterministicSeed(19));
+        let organism = world
+            .spawn_organism(
+                Vec3::ZERO,
+                GrowthParameters::new(0.14, 0.32, 1.0, 1.0).unwrap(),
+            )
+            .unwrap();
+        world.organisms_mut()[0]
+            .grow(&[(1.0, v(0.0, 1.0, 0.0))])
+            .unwrap();
+        let node = world.organisms()[0].nodes()[1].position();
+        let aim = ray(v(node.x(), node.y(), -3.0), v(0.0, 0.0, 1.0));
+        let unobstructed = Scene::from_world(&world).unwrap();
+        assert_eq!(
+            unobstructed.branch_visibility(aim, organism, 1).unwrap(),
+            BranchVisibility::Visible
+        );
+        assert_eq!(
+            unobstructed
+                .branch_visibility(ray(v(3.0, node.y(), -3.0), v(0.0, 0.0, 1.0)), organism, 1)
+                .unwrap(),
+            BranchVisibility::OffRay
+        );
+        let mut coincident = world.clone();
+        let wall = world
+            .spawn_sphere(
+                Sphere::new(0.3).unwrap(),
+                Transform::new(v(0.0, node.y(), -1.0), 1.0).unwrap(),
+                0.0,
+            )
+            .unwrap();
+        let obstructed = Scene::from_world(&world).unwrap();
+        assert_eq!(
+            obstructed.branch_visibility(aim, organism, 1).unwrap(),
+            BranchVisibility::Occluded {
+                front: SemanticTarget::Sphere(wall)
+            }
+        );
+        assert!(matches!(obstructed.pick_ray(aim).unwrap(),
+            PickOutcome::Hit(hit) if hit.target == SemanticTarget::Sphere(wall)));
+        assert_eq!(obstructed.intersect(aim).unwrap().normal, v(0.0, 0.0, -1.0));
+        let same_node = coincident.organisms()[0].nodes()[1].position();
+        coincident
+            .spawn_sphere(
+                Sphere::new(0.14).unwrap(),
+                Transform::new(same_node, 1.0).unwrap(),
+                0.0,
+            )
+            .unwrap();
+        let tied = Scene::from_world(&coincident).unwrap();
+        assert_eq!(
+            tied.branch_visibility(aim, coincident.organisms()[0].id(), 1)
+                .unwrap(),
+            BranchVisibility::Indeterminate
+        );
+    }
+
+    #[test]
+    fn renderer_identity_survives_lifetime_ids_past_active_capacity() {
+        use world_state::{DeterministicSeed, GrowthParameters, MAX_NODES};
+        let mut world = WorldState::new(DeterministicSeed(8));
+        let organism = world
+            .spawn_organism(
+                Vec3::ZERO,
+                GrowthParameters::new(0.1, 0.5, 1.0, 1.0).unwrap(),
+            )
+            .unwrap();
+        for child in 1..=MAX_NODES as u32 + 2 {
+            world.organisms_mut()[0]
+                .grow(&[(1.0, v(0.0, 1.0, 0.0))])
+                .unwrap();
+            let scene = Scene::from_world(&world).unwrap();
+            assert!(
+                scene
+                    .primitives()
+                    .iter()
+                    .any(|p| p.target() == Some(SemanticTarget::Connection { organism, child }))
+            );
+            world.prune_branch(organism, child).unwrap();
+        }
+        assert_eq!(world.organisms()[0].next_node_id(), MAX_NODES as u32 + 3);
+        assert_eq!(world.organisms()[0].nodes().len(), 1);
+        world.validate().unwrap();
     }
 }

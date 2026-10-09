@@ -1,12 +1,14 @@
 # Release governance
 
-**Status: configured locally; no hosted release has been tested.** The six library crates have independent SemVer releases. All three examples remain Cargo workspace members with internal versions, but `publish = false`; they do not get their own tags or GitHub Releases. The private site is not a release component. A GitHub Release is a source-code milestone; this workflow does not publish to crates.io, npm, Pages, or a binary download channel.
+**Status: configured locally; no hosted release has been tested.** The seven library crates, including the experimental `world-authoring`, have independent SemVer source releases. All three examples remain Cargo workspace members with internal versions, but `publish = false`; they do not get their own tags or GitHub Releases. The private site is not a release component. A GitHub Release is a source-code milestone; this workflow does not publish to crates.io, npm, Pages, or a binary download channel. `world-authoring` itself remains `publish = false` for crates.io while its new core dependency and source contract are tracked by Release Please.
 
 ## Version rules
 
 Each Cargo package starts at the existing `0.1.0` manifest value. That value is an **unreleased baseline**, not evidence that a `0.1.0` tag or GitHub Release exists. The first Release Please scan starts after commit `901fd1d0ea2f602fe96e520f806a560d191bda09`; the `bootstrap-sha` can be removed after the first release PR is merged.
 
 Independent library versions let a renderer fix avoid a math release. The cost is more component tags and patch bumps of transitive dependents, including examples, when a lower-level crate changes. A linked version would simplify the release number but bump unrelated crates together. The current dependency graph and distinct crate contracts support independent versions; reassess only if release review becomes unmanageable. The `cargo-workspace` plugin follows normal, development, and build dependencies by package name. Path-only dependencies have no version requirement to rewrite; a future crates.io process must add and test those requirements.
+
+Foundation 0.11 makes `world-state` depend on `world-authoring`, so the authoring library is registered at its existing Cargo version `0.1.0`. A later authoring-only change must be reviewed for effects on `world-state`, simulation, runtime and renderer; path-only dependency propagation and resulting Release Please PR contents still require a hosted integration check. No example or site package was added as an independent release component.
 
 Use Conventional Commit subjects for squash commits on `main`. The PR title check enforces the shape `type(scope)!: summary`, with optional scope and `!`. Prefer the affected package as scope, but Release Please assigns commits by changed paths, not by scope text. If a change spans packages, inspect every proposed version. A change only to root documentation or the site does not produce a Cargo release.
 

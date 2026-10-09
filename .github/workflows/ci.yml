@@ -12,10 +12,10 @@ concurrency:
 jobs:
   commit-title:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Conventional Commit title
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
@@ -26,11 +26,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-24.04, windows-2022]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Linux window-system build dependencies
         if: runner.os == 'Linux'
         run: |
@@ -49,3 +49,20 @@ jobs:
         run: cargo test --workspace --locked
       - name: Rustdoc
         run: cargo doc --workspace --no-deps --locked
+      - name: Verify portable Windows package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & ./tools/package-passage.ps1
+          $commit = (& git rev-parse --short=12 HEAD).Trim()
+          $archivePath = Join-Path target/dist "the-passage-$commit-windows-x86_64.zip"
+          if (-not (Test-Path -LiteralPath $archivePath)) { throw "Windows package ZIP missing for $commit" }
+          $archive = Get-Item -LiteralPath $archivePath
+          $checksum = (Get-Content -LiteralPath "$($archive.FullName).sha256" -Raw).Split(' ')[0]
+          if ($checksum -ne (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash) { throw 'Windows package checksum mismatch' }
+          $check = Join-Path $env:RUNNER_TEMP 'Genesis package smoke test'
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $check
+          $exe = Get-ChildItem -LiteralPath $check -Recurse -Filter ThePassage.exe | Select-Object -First 1
+          if (-not $exe) { throw 'Extracted executable missing' }
+          & $exe.FullName --passage-measure
+          if ($LASTEXITCODE -ne 0) { throw 'Extracted headless Passage check failed' }

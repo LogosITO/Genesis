@@ -1,0 +1,21 @@
+{
+  "format_version": 1,
+  "id": "branch-a",
+  "revision": 1,
+  "axiom": "X",
+  "rules": [
+    { "symbol": "X", "replacement": "F[+X]F[-X][&X]" }
+  ],
+  "iterations": 3,
+  "step_length": 0.45,
+  "yaw_degrees": 32.0,
+  "pitch_degrees": 27.0,
+  "branch_radius": 0.045,
+  "budgets": {
+    "max_symbols": 4096,
+    "max_stack_depth": 12,
+    "max_segments": 128,
+    "max_work": 8192
+  },
+  "instance": { "origin": [0.0, 0.0, 0.0] }
+}

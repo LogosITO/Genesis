@@ -1,0 +1,11 @@
+{
+  "format_version": 1,
+  "id": "plinth",
+  "root": "shape",
+  "nodes": [
+    { "op": "box", "id": "block", "half_extent": [0.7, 0.45, 0.7] },
+    { "op": "sphere", "id": "ball", "radius": 0.55 },
+    { "op": "translate", "id": "top", "child": "ball", "offset": [0, 0.65, 0] },
+    { "op": "union", "id": "shape", "left": "block", "right": "top" }
+  ]
+}

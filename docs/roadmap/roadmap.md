@@ -17,10 +17,63 @@ Conventional Commit PR titles, independent Rust crate version rules, and a revie
 A bounded rooted growth graph, continuous resource concentration, tick-indexed source events, version-1 JSON saves, exact local replay tests, three headless scenarios, and a state-driven native viewport. Cross-platform replay and visual quality remain unverified. This is an inspectable procedural model, not validated biology. See the [growth](../specifications/growth-model.md), [environment](../specifications/environment-fields.md), [persistence](../specifications/world-persistence.md), and [replay](../specifications/replay-determinism.md) specifications.
 
 ## Foundation 0.5 — First Structure, experimental local slice
-Bounded two-child branching with shared resource allocation, analytic capsule connections, version-2 saves with version-1 read compatibility, CPU/GPU selected-ray parity, and controlled 1–48-node measurements. Four fully populated organisms overflow the current GPU snapshot explicitly. Visual legibility, cross-adapter numerical behavior, and large-world rendering remain unverified; see the [growth model](../specifications/growth-model.md), [capsule contract](../specifications/capsule.md), and [measurement record](../research/first-structure-measurements.md).
+Bounded two-child branching with shared resource allocation, analytic capsule connections, version-2 saves with version-1 read compatibility, CPU/GPU selected-ray parity, and controlled 1–48-node measurements. At this stage four fully populated organisms exceeded the then-current GPU snapshot cap. See the historical [measurement record](../research/first-structure-measurements.md).
 
-## Candidate 0.6
-Address measured snapshot and intersection scaling without weakening world-state authority: test a bounded visibility or acceleration strategy on a defined scene class, then investigate branch collision and shape continuity separately. Do not infer a watertight CSG union from overlapping spheres and capsules.
+## Foundation 0.6 — First Scale, experimental local slice
+
+Dynamic bounded GPU primitive storage removes the former 256-object cap. The real 381-primitive four-organism world renders on the reference adapter; sampled CPU/GPU direct hits agree within defined tolerances. A deterministic CPU BVH and primitive bounds are validated against CPU direct rays. This stage used direct GPU traversal; see the historical [First Scale measurements](../research/first-scale-benchmark.md).
+
+## Foundation 0.6.1 — GPU BVH, experimental local slice
+
+The CPU-built hierarchy is flattened for bounded stackless WGSL traversal. A 16,861-ray four-way comparison and four pairs of real offscreen captures matched GPU direct and BVH on the reference adapter. Matched-scene timings support BVH for the tested larger scenes, while a single primitive is slower; automatic drawing retains direct traversal for up to four primitives. Floating-point bounds are not formally certified and other adapters remain untested. See the [design](../architecture/spatial-acceleration.md) and [local experiment](../research/gpu-bvh-acceleration.md).
+
+## Foundation 0.7 — First Interaction, experimental local slice
+
+CPU analytic picking maps snapshot primitives to stable world targets. A tick-indexed `PruneBranch` event removes an authoritative subtree and changes later growth. Version-3 saves retain sparse IDs and pending cuts; version-1/2 saves migrate on load. Headless pruning and save/replay scenarios, GPU before/after readback, and local latency measurements are recorded in the [interaction contract](../specifications/first-interaction.md) and [measurement record](../research/first-interaction-measurements.md). Native click and key controls are implemented; human interaction across operating systems still needs wider validation.
+
+## Foundation 0.7.1 — First Contact, experimental local slice
+
+One persisted kinematic sphere, tick-indexed velocity, analytic swept contact against spheres and capsules, CPU-only collision BVH, pruning-aware movement, version-4 saves, GPU body readback, and repeated prune/regrowth tests. See the [contact contract](../specifications/kinematic-contact.md) and [local measurements](../research/first-contact-measurements.md). AABB sweep, exact union contact, sliding, and cross-platform bitwise replay remain open.
+
+## Foundation 0.8 — First Ecology, experimental local slice
+
+Finite reservoirs behind analytic source fields, proportional competition among up to four authoritative organisms, per-source replenishment and withdrawal ledgers, version-5 saves, six headless scenarios, two-organism viewport, contact/pruning integration, and an offscreen GPU readback. See the [allocation contract](../specifications/resource-allocation.md), [ecosystem state](../specifications/ecosystem-state.md), and [local experiment](../research/first-ecology-experiment.md). This is a bounded toy ecosystem, not validated biology. Manual native interaction, cross-platform replay, production-scale phase timings, and full-frame ecology performance remain open.
+
+## Foundation 0.8.1 — World reliability, experimental local slice
+
+Unchanged analytic contact geometry reuses a disposable CPU BVH; changed geometry rebuilds it. The local test and measurement record is [world reliability](../research/world-reliability-experiment.md). Cross-platform numerical behavior remains open.
+
+## Foundation 0.9 — The Passage, local playable prototype
+
+A small lane, one controllable body, two finite-resource organisms, tick-indexed source movement and pruning, an authoritative goal, a native HUD, and a deterministic headless playthrough are implemented. See the [player guide](../guides/the-passage.md) and [first-playable research record](../research/first-playable.md). This is experimental; hosted platform checks and an external manual playtest are separate gates.
+
+## Foundation 0.9.2 — autonomous quality, local evidence
+
+Application-level transition tests, seven opt-in Passage GPU image states, release-profile offscreen resolution measurements, and a package checksum are in place. The user reported a manual 7/7 playthrough; native input automation and a second-machine check remain separate. See the [0.9.2 research record](../research/foundation-092.md).
+
+## Foundation 0.9.6 — native runtime reliability, local evidence
+
+Surface outcome handling, bounded reconfiguration, physical-size validation, scripted native frame measurements, GPU readback across viewport sizes, and an opt-in test audit are recorded in the [runtime contract](../specifications/native-runtime.md) and [local verification](../research/foundation-096.md). Real device-loss recovery remains partial.
+
+## Foundation 0.10 — static mathematical authoring, local experiment
+
+Versioned external JSON definitions, bounded deterministic rewriting, typed analytic capsule segments, a CPU inspector, and a native GPU preview with atomic file reload are implemented. These structures are static research previews, not living organisms or world saves. See the [format](../specifications/mathematical-authoring.md), [architecture RFC](../architecture/authoring-rfc.md), and [local experiment](../research/foundation-010.md).
+
+## Foundation 0.10.1 — definition provenance, local experiment
+
+Exact-byte SHA-256 revisions, bounded derivation paths, versioned self-contained authoring snapshots, and generation-aware preview selection/reload are implemented for static structures. No mutable authored world instance or world-save schema is introduced. See [ADR 0008](../adr/0008-content-addressed-authoring.md) and the [local evaluation](../research/foundation-0101.md).
+
+## Foundation 0.11 — authored world instances, local experimental slice
+
+Bounded exact-byte definitions and world-owned occurrences, stable segment provenance, translation and uniform scaling, typed tick events, analytic picking and static capsule contact, version-6 save/load and a headless replay scenario are implemented. Native presentation and GPU parity require adapter testing. See the [instance contract](../specifications/authored-world-instances.md), [ADR 0009](../adr/0009-authored-world-instances.md), and [local record](../research/foundation-011.md).
+
+## Foundation 0.12 — first implicit field graph, local research slice
+
+A bounded version-one JSON graph now compiles into typed operations, evaluates on CPU with explicit mathematical properties, and executes directly in a separate WGSL interpreter. Two definitions render as real GPU readback; invalid file reload leaves the last valid preview. The [graph contract](../specifications/field-graph.md) and [local measurement record](../research/foundation-012.md) describe limits. These are isolated previews, not world-owned geometry or collision surfaces.
+
+## Next candidate
+
+Measure larger authored and field workloads on additional adapters. Define a numerically defensible occupied-solid and contact contract before considering authoritative field-graph instances. Verify native selection/contact and packaged builds on a second supported machine. Any rotation or living growth contract should follow tested CPU/GPU/contact semantics.
 
 ## Later research
-Growth grammars and L-systems, finite resource budgets, destruction and recovery rules, physics queries, embedding/FFI, standalone UI, and authored language. Sequence and scope will follow experiments, not promises.
+Living or stochastic grammars, resource transport and recycling, destruction and recovery rules, broader physical interaction, embedding/FFI, standalone UI, and a richer authored language. Sequence and scope will follow experiments, not promises.

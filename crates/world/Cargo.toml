@@ -9,6 +9,7 @@ rust-version.workspace = true
 serde = { version = "1", features = ["derive"] }
 spatial-math = { path = "../math" }
 analytic-field = { path = "../field" }
+world-authoring = { path = "../authoring" }
 
 [lints]
 workspace = true
