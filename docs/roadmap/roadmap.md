@@ -39,9 +39,17 @@ One persisted kinematic sphere, tick-indexed velocity, analytic swept contact ag
 
 Finite reservoirs behind analytic source fields, proportional competition among up to four authoritative organisms, per-source replenishment and withdrawal ledgers, version-5 saves, six headless scenarios, two-organism viewport, contact/pruning integration, and an offscreen GPU readback. See the [allocation contract](../specifications/resource-allocation.md), [ecosystem state](../specifications/ecosystem-state.md), and [local experiment](../research/first-ecology-experiment.md). This is a bounded toy ecosystem, not validated biology. Manual native interaction, cross-platform replay, production-scale phase timings, and full-frame ecology performance remain open.
 
+## Foundation 0.8.1 — World reliability, experimental local slice
+
+Unchanged analytic contact geometry reuses a disposable CPU BVH; changed geometry rebuilds it. The local test and measurement record is [world reliability](../research/world-reliability-experiment.md). Cross-platform numerical behavior remains open.
+
+## Foundation 0.9 — The Passage, local playable prototype
+
+A small lane, one controllable body, two finite-resource organisms, tick-indexed source movement and pruning, an authoritative goal, a native HUD, and a deterministic headless playthrough are implemented. See the [player guide](../guides/the-passage.md) and [first-playable research record](../research/first-playable.md). This is experimental; hosted platform checks and an external manual playtest are separate gates.
+
 ## Next candidate
 
-Investigate a cached contact BVH keyed to actual geometry changes, then independently check contact normals and penetration bounds near overlapping-primitive seams on Windows and Linux. Compare cache cost and correctness against full rebuild before adopting it.
+Validate the portable build and complete a short external playtest on Windows, then investigate camera/picking usability and GPU frame pacing with a measured full-frame workload.
 
 ## Later research
 Growth grammars and L-systems, resource transport and recycling, destruction and recovery rules, broader physical interaction, embedding/FFI, standalone UI, and authored language. Sequence and scope will follow experiments, not promises.

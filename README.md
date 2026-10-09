@@ -43,6 +43,15 @@ cargo run -p first-light --locked -- --life
 
 The original headless scenarios print JSON after 120 fixed ticks. `contact` stops at a branch, `contact-pruned` passes through its cleared path, and `contact-replay` verifies save/load. The six `ecology` scenarios print JSON after 40 ticks with organism IDs, topology, source balances, allocation, and a state fingerprint. `ecology measure` reports local release-profile CPU timings for one, two, and four organisms. In native First Life mode, two differently colored organisms share one finite source; the title shows their node counts, remaining stock, allocation, and tick. **Left-click** selects a node or connection, **P** queues its cut, **M** moves the source, **I/J/K/L** move the body, and **Space** pauses or resumes. Ambiguous picks cannot authorize a cut. See the [allocation contract](docs/specifications/resource-allocation.md), [ecosystem state](docs/specifications/ecosystem-state.md), [local experiment](docs/research/first-ecology-experiment.md), [contact contract](docs/specifications/kinematic-contact.md), and [save contract](docs/specifications/world-persistence.md).
 
+Play the local **The Passage** prototype:
+
+```sh
+cargo run --release -p first-light --locked -- --passage
+cargo test -p first-light passage_playthrough --locked -- --nocapture
+```
+
+The orange body must cross a growing analytic branch after moving a finite resource source and pruning the stem. An in-window HUD shows controls and feedback; the headless playthrough prints a JSON success record. See the [player guide](docs/guides/the-passage.md) and [research record](docs/research/first-playable.md). On Windows, `powershell -ExecutionPolicy Bypass -File tools/package-passage.ps1` creates a local portable folder under `target/dist/`; it is not published.
+
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings

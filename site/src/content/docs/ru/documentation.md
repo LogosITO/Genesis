@@ -13,6 +13,8 @@ cargo run -p hello-world --locked
 
 GPU-окно запускается через `cargo run -p first-light --locked`; подробности — в [руководстве First Light](../reference/architecture/first-light/) и [контракте CPU/GPU](../reference/specifications/cpu-gpu-contract/). GPU-тесты запускаются отдельно и требуют совместимого адаптера.
 
+Локальная игровая демоверсия запускается командой `cargo run --release -p first-light --locked -- --passage`. Управление показано прямо в окне; [руководство игрока](../reference/guides/the-passage/) и [запись проверки](../reference/research/first-playable/) доступны на английском. Это экспериментальный прототип, а не публичный релиз.
+
 Для прототипа роста используйте `cargo run -p first-life --locked -- baseline`, `pruning` или `pruning-replay`. Каждая команда выводит машиночитаемое состояние. Команда `cargo run -p first-light --locked -- --life` открывает окно: щёлкните по ветви, нажмите **P** для обрезки на следующем тике, **Space** для паузы или продолжения. См. [контракт взаимодействия](../reference/specifications/first-interaction/), [модель роста](../reference/specifications/growth-model/) и [спецификацию сохранения](../reference/specifications/world-persistence/).
 
 Для проверки контакта запустите `cargo run -p first-life --locked -- contact`, `contact-pruned` или `contact-replay`. В окне First Life клавиши **I/J/K/L** двигают оранжевое тело. [Контракт контакта](../reference/specifications/kinematic-contact/) описывает поддерживаемую геометрию и численные ограничения; технический текст пока на английском.
