@@ -177,11 +177,37 @@ fn preview_world_fixture() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn inspect(path: &Path) -> Result<(), Box<dyn Error>> {
+    let source = read_graph_source(path)?;
+    let graph = compile_json(&source)?;
+    let bounds = graph.bounds();
+    println!(
+        "{}",
+        serde_json::json!({
+            "id": graph.id(),
+            "sha256": graph.revision().hex(),
+            "nodes": graph.nodes().len(),
+            "visits_per_sample": graph.visits(),
+            "distance_semantics": format!("{:?}", graph.distance_semantics()),
+            "bounds": {"min": [bounds.min.x(), bounds.min.y(), bounds.min.z()],
+                       "max": [bounds.max.x(), bounds.max.y(), bounds.max.z()]}
+        })
+    );
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args().skip(1);
     let first = args
         .next()
-        .ok_or("usage: field-graph-preview <definition.json> [--watch] | --world-fixture")?;
+        .ok_or("usage: field-graph-preview <definition.json> [--watch] | --inspect <definition.json> | --world-fixture")?;
+    if first == "--inspect" {
+        let path = args.next().ok_or("--inspect requires a definition path")?;
+        if args.next().is_some() {
+            return Err("--inspect accepts one path".into());
+        }
+        return inspect(Path::new(&path));
+    }
     if first == "--world-fixture" {
         if args.next().is_some() {
             return Err("--world-fixture accepts no other arguments".into());

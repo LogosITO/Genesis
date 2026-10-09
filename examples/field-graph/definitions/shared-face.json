@@ -1,0 +1,11 @@
+{
+  "format_version": 1,
+  "id": "shared_face_internal_zero",
+  "root": "solid",
+  "nodes": [
+    { "op": "box", "id": "block", "half_extent": [1, 1, 1] },
+    { "op": "translate", "id": "left", "child": "block", "offset": [-1, 0, 0] },
+    { "op": "translate", "id": "right", "child": "block", "offset": [1, 0, 0] },
+    { "op": "union", "id": "solid", "left": "left", "right": "right" }
+  ]
+}

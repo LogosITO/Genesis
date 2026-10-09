@@ -77,6 +77,7 @@ cargo run -p field-graph-preview --locked -- examples/field-graph/definitions/tw
 cargo run -p field-graph-preview --locked -- examples/field-graph/definitions/plinth.json
 cargo run -p field-graph-preview --locked -- examples/field-graph/definitions/twin.json --watch
 cargo run -p field-graph-preview --locked -- --world-fixture
+cargo run -p field-graph-preview --locked -- --inspect examples/field-graph/definitions/balanced-16.json
 ```
 
 The headless preview writes GPU-readback PPM captures under `target/field-graph-captures/` and prints CPU/GPU ray results as JSON. Editing the file in `--watch` mode reloads valid changes while preserving the previous preview on validation failure. See the [example guide](examples/field-graph/README.md) and [bounded graph contract](docs/specifications/field-graph.md).
