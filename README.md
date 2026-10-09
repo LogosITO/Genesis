@@ -1,6 +1,6 @@
 # Genesis
 
-**Experimental / Research Stage.** Genesis stores analytic parameters, transforms, growth rules, finite resource reservoirs, and one kinematic body as authoritative world state; no mesh or voxel geometry is stored. Foundation 0.8 lets bounded organisms compete for shared finite sources and persists the result in version-5 saves. CPU math, simulation, and contact remain testable without a GPU. This is neither validated biology nor a general physics engine.
+**Experimental / Research Stage.** Genesis stores analytic parameters, transforms, growth rules, finite resource reservoirs, authored definitions and occurrences, and one kinematic body as authoritative world state; no mesh or voxel geometry is stored. Foundation 0.11 adds bounded authored instances and version-6 saves. CPU math, simulation, and contact remain testable without a GPU. This is neither validated biology nor a general physics engine.
 
 ## Run
 
@@ -60,6 +60,15 @@ cargo run --release -p first-light --locked -- --authoring examples/authoring/br
 ```
 
 Edit the JSON and press **R** in the preview to reload without recompiling. The static structure is separate from living `WorldState` organisms. A second definition, controls, and limits are in the [authoring example](examples/authoring/README.md) and [format contract](docs/specifications/mathematical-authoring.md).
+
+Run the first world-owned authored occurrence scenario, then optionally view it with the GPU:
+
+```sh
+cargo run -p authoring-inspect --locked -- examples/authoring/world-single.json --world
+cargo run -p first-light --locked -- --authored-world examples/authoring/world-single.json
+```
+
+The headless command prints deterministic JSON after creating two occurrences from one definition, picking and contacting a capsule, applying typed tick events, saving, loading, and replaying. In the native window, click to select, press **E** to toggle the instance, or **M** to move it one unit along +X. See the [authored instance contract](docs/specifications/authored-world-instances.md) and [local evaluation](docs/research/foundation-011.md).
 
 ```sh
 cargo fmt --all -- --check

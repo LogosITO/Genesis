@@ -26,7 +26,7 @@ use winit::{
 };
 use world_authoring::{SegmentReference, Structure, compile_json, read_source_file};
 use world_simulation::{
-    EnvironmentEvent, EnvironmentEventKind, SimulationStep, SimulationTime, advance,
+    EnvironmentEvent, EnvironmentEventKind, SimulationStep, SimulationTime, advance, advance_life,
     advance_life_cached, contact::ContactScene,
 };
 use world_state::{DeterministicSeed, EntityId, GrowthParameters, WorldState};
@@ -477,6 +477,60 @@ impl App {
         app.authored = Some(preview);
         Ok(app)
     }
+    fn authored_world(path: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
+        let source = std::fs::read(path)?;
+        let mut app = Self::new(false, false)?;
+        app.world = WorldState::new(DeterministicSeed(7));
+        app.world
+            .spawn_authored(&source, spatial_math::Transform::identity(), true)?;
+        app.paused = true;
+        Ok(app)
+    }
+    fn authored_action(&mut self, move_instance: bool) {
+        let Some(instance) = self.world.authored_instances().first() else {
+            return;
+        };
+        let kind = if move_instance {
+            let position = instance
+                .transform()
+                .translation()
+                .checked_add(v(1.0, 0.0, 0.0));
+            position
+                .and_then(|position| Transform::new(position, instance.transform().scale()))
+                .map(|transform| EnvironmentEventKind::SetAuthoredTransform {
+                    id: instance.id(),
+                    transform,
+                })
+        } else {
+            Ok(EnvironmentEventKind::SetAuthoredEnabled {
+                id: instance.id(),
+                enabled: !instance.enabled(),
+            })
+        };
+        let result = kind
+            .map_err(Box::<dyn std::error::Error>::from)
+            .and_then(|kind| {
+                let tick = self.time.ticks().checked_add(1).ok_or("tick overflow")?;
+                advance_life(
+                    &mut self.world,
+                    &mut self.time,
+                    self.step,
+                    &[EnvironmentEvent {
+                        tick,
+                        order: 0,
+                        kind,
+                    }],
+                )?;
+                Ok(())
+            });
+        match result {
+            Ok(()) => {
+                self.selected = None;
+                self.status = format!("AUTHORED EVENT APPLIED AT TICK {}", self.time.ticks());
+            }
+            Err(error) => self.status = format!("AUTHORED EVENT REJECTED: {error}"),
+        }
+    }
     fn pick_cursor(&mut self) {
         let Some(graphics) = self.graphics.as_ref() else {
             return;
@@ -706,7 +760,7 @@ impl App {
         if self.passage {
             passage::decorate(&mut scene)?;
         }
-        if !self.life {
+        if !self.life && self.world.authored_instances().is_empty() {
             scene.push(Primitive::axis_aligned_box(
                 1,
                 AxisAlignedBox::new(v(0.9, 0.9, 0.9))?,
@@ -943,6 +997,7 @@ impl App {
                 Some(SemanticTarget::Source(_)) => "RESOURCE SOURCE".into(),
                 Some(SemanticTarget::Body(_)) => "PLAYER".into(),
                 Some(SemanticTarget::Sphere(_)) => "WALL".into(),
+                Some(SemanticTarget::Authored(_)) => "AUTHORED STRUCTURE".into(),
                 None => "NONE".into(),
             };
             Some([
@@ -1220,6 +1275,12 @@ impl App {
                         .map(|organism| organism.branch_count())
                         .sum::<usize>()
                 )
+            } else if let Some(instance) = self.world.authored_instances().first() {
+                format!(
+                    "authored={} enabled={}",
+                    instance.id().value(),
+                    instance.enabled()
+                )
             } else {
                 format!("radius={:.4}", self.world.entities()[0].sphere().radius())
             };
@@ -1388,7 +1449,13 @@ impl ApplicationHandler for App {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } if (self.life || self.authored.is_some()) && self.focused => self.pick_cursor(),
+            } if (self.life
+                || self.authored.is_some()
+                || !self.world.authored_instances().is_empty())
+                && self.focused =>
+            {
+                self.pick_cursor()
+            }
             WindowEvent::KeyboardInput { event, .. }
                 if self.life
                     && self.focused
@@ -1431,6 +1498,12 @@ impl ApplicationHandler for App {
                         KeyCode::Escape => event_loop.exit(),
                         KeyCode::Space if self.authored.is_none() => self.toggle_pause(),
                         KeyCode::KeyN => self.normals = !self.normals,
+                        KeyCode::KeyE if !self.world.authored_instances().is_empty() => {
+                            self.authored_action(false)
+                        }
+                        KeyCode::KeyM if !self.world.authored_instances().is_empty() => {
+                            self.authored_action(true)
+                        }
                         KeyCode::KeyM if self.life => {
                             self.pending_move = true;
                             self.status = "RESOURCE MOVE QUEUED".into();
@@ -1532,7 +1605,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [flag] if flag == "--passage" => App::new(true, true)?,
         [flag] if flag == "--life" => App::new(true, false)?,
         [flag, path] if flag == "--authoring" => App::authoring(PathBuf::from(path))?,
-        _ => return Err("usage: first-light [--life|--passage|--authoring FILE]".into()),
+        [flag, path] if flag == "--authored-world" => App::authored_world(PathBuf::from(path))?,
+        _ => {
+            return Err(
+                "usage: first-light [--life|--passage|--authoring FILE|--authored-world FILE]"
+                    .into(),
+            );
+        }
     };
     let (life, passage) = (app.life, app.passage);
     eprintln!(
@@ -1541,6 +1620,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "The Passage"
         } else if life {
             "First Life"
+        } else if !app.world.authored_instances().is_empty() {
+            "Genesis Authored World"
         } else if app.authored.is_some() {
             "Genesis Authoring Preview"
         } else {
@@ -1558,6 +1639,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         if app.authored.is_some() {
             "R reload definition; "
+        } else if !app.world.authored_instances().is_empty() {
+            "Left click select; E enable/disable; M move +X; "
         } else if life && !passage {
             "M move resource source; Left click select; P prune selected branch; I/J/K/L move body; "
         } else if passage {
@@ -2264,6 +2347,159 @@ mod app_tests {
             "different rules rendered identically"
         );
         assert_eq!(rebuilds[1], rebuilds[0] + 1);
+    }
+
+    #[test]
+    #[ignore = "requires a native GPU; optional GENESIS_AUTHORED_WORLD_CAPTURE_DIR writes real BMPs"]
+    fn authored_world_gpu_matches_cpu_and_direct_bvh() {
+        let instance = wgpu::Instance::default();
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            ..Default::default()
+        }))
+        .expect("native GPU required");
+        eprintln!("authored world GPU adapter: {:?}", adapter.get_info());
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+            ..Default::default()
+        }))
+        .unwrap();
+        let renderer =
+            pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+        let timer = GpuTimer::new(&device);
+        let source = include_bytes!("../../authoring/world-single.json");
+        let mut world = WorldState::new(DeterministicSeed(42));
+        let first = world
+            .spawn_authored(source, Transform::identity(), true)
+            .unwrap();
+        let second = world
+            .spawn_authored(source, Transform::new(v(3.0, 0.0, 0.0), 1.0).unwrap(), true)
+            .unwrap();
+        let camera =
+            Camera::look_at(v(1.5, 1.2, -5.0), v(1.5, 0.5, 0.0), v(0.0, 1.0, 0.0), 0.9).unwrap();
+        let rays = [0.0, 3.0, 4.0]
+            .map(|x| Ray::new(v(x, 0.5, -2.0), v(0.0, 0.0, 1.0), 0.0, 10.0).unwrap());
+        for (name, change) in ["initial", "moved", "disabled"].into_iter().enumerate() {
+            match change {
+                "moved" => world
+                    .set_authored_transform(second, Transform::new(v(4.0, 0.0, 0.0), 1.0).unwrap())
+                    .unwrap(),
+                "disabled" => world.set_authored_enabled(first, false).unwrap(),
+                _ => {}
+            }
+            let scene = Scene::from_world(&world).unwrap();
+            if change == "initial" {
+                let limited = pollster::block_on(GpuRenderer::with_primitive_budget(
+                    &device,
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    64,
+                ))
+                .unwrap();
+                assert!(limited.query(&device, &queue, &scene, &rays).is_err());
+                assert_eq!(world.authored_instances().len(), 2);
+            }
+            let direct = renderer
+                .query_with_traversal(&device, &queue, &scene, &rays, GpuTraversal::Direct)
+                .unwrap();
+            let primitive_upload = renderer.last_upload_stats();
+            let bvh = renderer
+                .query_with_traversal(&device, &queue, &scene, &rays, GpuTraversal::Bvh)
+                .unwrap();
+            let upload = renderer.last_upload_stats();
+            for (index, ray) in rays.iter().enumerate() {
+                let cpu = scene.pick_ray(*ray).unwrap();
+                match (cpu, direct[index], bvh[index]) {
+                    (PickOutcome::Miss, None, None) => {}
+                    (PickOutcome::Hit(hit), Some(gpu_direct), Some(gpu_bvh)) => {
+                        assert_eq!(gpu_direct.id, gpu_bvh.id);
+                        assert_eq!(
+                            scene.primitives()[gpu_direct.id as usize].target(),
+                            Some(hit.target)
+                        );
+                        assert!((gpu_direct.distance as f64 - hit.distance).abs() < 0.002);
+                        for (gpu, cpu) in gpu_direct.normal.into_iter().zip([
+                            hit.normal.x(),
+                            hit.normal.y(),
+                            hit.normal.z(),
+                        ]) {
+                            assert!((f64::from(gpu) - cpu).abs() < 0.005);
+                        }
+                    }
+                    other => panic!("CPU/GPU authored mismatch in {change}: {other:?}"),
+                }
+            }
+            let draw = |traversal| {
+                let image = renderer
+                    .draw_with_traversal(
+                        &device,
+                        &queue,
+                        &scene,
+                        camera,
+                        traversal,
+                        DrawOptions {
+                            size: [640, 480],
+                            normal_debug: false,
+                            surface: None,
+                            timer: None,
+                        },
+                    )
+                    .unwrap();
+                read_rgb(&device, &queue, &image, [640, 480])
+            };
+            let image = draw(GpuTraversal::Direct);
+            assert_eq!(image, draw(GpuTraversal::Bvh), "{change} image mismatch");
+            assert!(image.chunks_exact(3).any(|pixel| pixel != &image[..3]));
+            let measure = |traversal| {
+                let mut values = Vec::new();
+                for _ in 0..20 {
+                    let _image = renderer
+                        .draw_with_traversal(
+                            &device,
+                            &queue,
+                            &scene,
+                            camera,
+                            traversal,
+                            DrawOptions {
+                                size: [640, 480],
+                                normal_debug: false,
+                                surface: None,
+                                timer: timer.as_ref(),
+                            },
+                        )
+                        .unwrap();
+                    if let Some(timer) = &timer {
+                        values.push(timer.read_ms(&device, &queue).unwrap());
+                    }
+                }
+                (!values.is_empty()).then(|| median_p95(&values))
+            };
+            let direct_ms = measure(GpuTraversal::Direct);
+            let bvh_ms = measure(GpuTraversal::Bvh);
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "kind": "authored-world-gpu-measurement", "state": change,
+                    "primitives": scene.primitives().len(), "resolution": [640, 480],
+                    "samples": 20, "direct_gpu_ms_p50_p95": direct_ms,
+                    "bvh_gpu_ms_p50_p95": bvh_ms,
+                "bvh_build_ms": upload.map(|value| value.bvh_build_ms),
+                "primitive_upload_enqueue_ms": primitive_upload.map(|value| value.enqueue_ms),
+                "bvh_upload_enqueue_ms": upload.map(|value| value.enqueue_ms),
+                "primitive_bytes": primitive_upload.map(|value| value.primitive_bytes),
+                    "bvh_bytes": upload.map(|value| value.bvh_bytes),
+                })
+            );
+            if let Some(path) = std::env::var_os("GENESIS_AUTHORED_WORLD_CAPTURE_DIR") {
+                let path = PathBuf::from(path);
+                std::fs::create_dir_all(&path).unwrap();
+                write_bmp(
+                    &path.join(format!("authored-world-{name}-{change}.bmp")),
+                    &image,
+                    [640, 480],
+                );
+            }
+        }
     }
 
     #[test]

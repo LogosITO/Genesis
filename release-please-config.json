@@ -12,6 +12,7 @@
     "crates/simulation": { "component": "world-simulation" },
     "crates/runtime": { "component": "world-runtime" },
     "crates/renderer": { "component": "analytic-renderer" },
+    "crates/authoring": { "component": "world-authoring" },
     "examples/hello-world": {
       "component": "hello-world",
       "exclude-paths": ["examples/hello-world"],

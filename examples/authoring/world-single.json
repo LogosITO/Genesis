@@ -1,0 +1,18 @@
+{
+  "format_version": 1,
+  "id": "world-single",
+  "revision": 1,
+  "axiom": "F",
+  "rules": [],
+  "iterations": 0,
+  "step_length": 1.0,
+  "yaw_degrees": 0.0,
+  "pitch_degrees": 0.0,
+  "branch_radius": 0.1,
+  "budgets": {
+    "max_symbols": 8,
+    "max_stack_depth": 1,
+    "max_segments": 1,
+    "max_work": 8
+  }
+}

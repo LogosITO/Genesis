@@ -28,6 +28,8 @@ pub enum ScheduleError {
     InvalidTarget,
     /// Body identity or requested velocity is invalid.
     InvalidBody,
+    /// Authored occurrence ID or proposed transform is invalid.
+    InvalidAuthored,
 }
 impl std::fmt::Display for ScheduleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -144,6 +146,12 @@ impl Runtime {
                 .body_mut(*id)
                 .and_then(|body| body.set_desired_velocity(*velocity))
                 .map_err(|_| ScheduleError::InvalidBody)?,
+            EnvironmentEventKind::SetAuthoredEnabled { id, enabled } => probe
+                .set_authored_enabled(*id, *enabled)
+                .map_err(|_| ScheduleError::InvalidAuthored)?,
+            EnvironmentEventKind::SetAuthoredTransform { id, transform } => probe
+                .set_authored_transform(*id, *transform)
+                .map_err(|_| ScheduleError::InvalidAuthored)?,
         }
         self.events.push(EnvironmentEvent {
             tick,
@@ -232,6 +240,12 @@ impl Runtime {
                     .body_mut(id)
                     .and_then(|body| body.set_desired_velocity(velocity))
                     .map_err(|_| PersistenceError::InvalidState("event body"))?,
+                EnvironmentEventKind::SetAuthoredEnabled { id, enabled } => probe
+                    .set_authored_enabled(id, enabled)
+                    .map_err(|_| PersistenceError::InvalidState("event authored"))?,
+                EnvironmentEventKind::SetAuthoredTransform { id, transform } => probe
+                    .set_authored_transform(id, transform)
+                    .map_err(|_| PersistenceError::InvalidState("event authored"))?,
             }
             previous_order = Some(event.order);
         }
@@ -336,10 +350,10 @@ mod tests {
         let good = runtime.save_bytes().unwrap();
         let original = runtime.clone();
         let mut value: serde_json::Value = serde_json::from_slice(&good).unwrap();
-        value["format_version"] = 6.into();
+        value["format_version"] = 7.into();
         assert!(matches!(
             runtime.load_into(&serde_json::to_vec(&value).unwrap()),
-            Err(PersistenceError::Version(6))
+            Err(PersistenceError::Version(7))
         ));
         value["format_version"] = 1.into();
         value["runtime"]["world"]["organisms"][0]

@@ -2,7 +2,7 @@
 
 ## Scope
 
-This is a **static structural grammar**. It is neither a scalar field nor an ecological growth rule. The source JSON is authoritative for generation; the generated `Structure` contains analytic capsule endpoints, radii and parent relationships. A renderer `Scene` is a disposable snapshot. `WorldState` remains authoritative for mutable simulation, and authored preview structures are not inserted into its organism collection or save format.
+This is a **static structural grammar**. It is neither a scalar field nor an ecological growth rule. The source JSON is authoritative for generation; the generated `Structure` contains analytic capsule endpoints, radii and parent relationships. A renderer `Scene` is a disposable snapshot. Foundation 0.11 can pin exact source bytes in `WorldState` as separate authored occurrences; these are not organisms. See the [instance contract](authored-world-instances.md).
 
 Two runnable definitions and commands are in `examples/authoring/README.md`. The format is independent of the GPU API. `world-authoring` has no renderer dependency.
 
@@ -53,4 +53,4 @@ Generation uses finite `f64` vectors and trigonometric rotations. Results are re
 
 `Structure::source()` retains the **exact original JSON bytes**. `snapshot_json()` creates a self-contained JSON object with `snapshot_version: 1`, `source_format_version: 1`, `compiler_semantics_version: 1`, lowercase `content_sha256` and the source bytes as a bounded JSON byte array. `load_snapshot_json()` rejects unknown versions, malformed or oversized data, digest mismatch and invalid source before returning a structure. `compile_json_expected()` rejects a newer or otherwise mismatched external file instead of silently substituting it. The snapshot digest checks integrity relative to its stored digest, not authenticity; an attacker who can rewrite both fields can forge it. An independently trusted expected digest is required when authenticity matters.
 
-The current `WorldState` save schema does not contain authored structures. A future world save should embed the validated snapshot or require an immutable retrievable definition with strict expected-digest verification. Recording only `id` and author-declared `revision` would permit silent replay drift. Generation uses finite `f64` and is repeatable within the documented computational model; cross-platform bitwise geometry is not promised.
+World-save version 6 embeds exact authored bytes once per revision and validates them on load. Recording only `id` and author-declared `revision` would permit silent replay drift. Generation uses finite `f64` and is repeatable within the documented computational model; cross-platform bitwise geometry is not promised.

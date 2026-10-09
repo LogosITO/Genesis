@@ -1,6 +1,6 @@
 //! One bounded kinematic sphere, stored with the authoritative world.
 
-use crate::{EntityId, WorldError};
+use crate::{AuthoredSegmentRef, EntityId, WorldError};
 use serde::{Deserialize, Serialize};
 use spatial_math::{MathError, Vec3};
 
@@ -10,6 +10,8 @@ pub const MAX_BODY_SPEED: f64 = 100.0;
 /// Stable identity of an analytic solid contacted by the body.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ColliderId {
+    /// A segment of a particular authored world occurrence.
+    Authored(AuthoredSegmentRef),
     /// Ordinary world sphere.
     Sphere(EntityId),
     /// Growth-node sphere.
@@ -55,6 +57,9 @@ pub struct KinematicBody {
 }
 
 impl KinematicBody {
+    pub(crate) fn clear_contact(&mut self) {
+        self.contact = None;
+    }
     pub(crate) fn new(id: EntityId, position: Vec3, radius: f64) -> Result<Self, WorldError> {
         if !radius.is_finite() {
             return Err(MathError::NonFinite.into());

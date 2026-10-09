@@ -8,6 +8,11 @@ rust-version.workspace = true
 
 [dependencies]
 world-authoring = { path = "../../crates/authoring" }
+world-state = { path = "../../crates/world" }
+world-runtime = { path = "../../crates/runtime" }
+world-simulation = { path = "../../crates/simulation" }
+analytic-renderer = { path = "../../crates/renderer" }
+spatial-math = { path = "../../crates/math" }
 serde_json = { version = "=1.0.151", features = ["float_roundtrip"] }
 
 [lints]

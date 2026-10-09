@@ -23,3 +23,30 @@ fn default_summary_is_repeatable_and_definitions_differ() {
     assert_ne!(a, b);
     assert!(a.get("load_compile_ms").is_none());
 }
+
+#[test]
+fn authored_world_scenario_is_repeatable() {
+    let executable = env!("CARGO_BIN_EXE_authoring-inspect");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("world-single.json");
+    let run = || {
+        let output = Command::new(executable)
+            .arg(&path)
+            .arg("--world")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+    let first = run();
+    assert_eq!(first, run());
+    let value: serde_json::Value = serde_json::from_slice(&first).unwrap();
+    assert_eq!(value["shared_definitions"], 1);
+    assert_eq!(value["initial_primitives"], 2);
+    assert_eq!(value["remaining_primitives"], 1);
+    assert_eq!(value["replay_equal"], true);
+    assert_eq!(value["disabled_contact"], true);
+}

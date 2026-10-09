@@ -5,14 +5,21 @@ use serde::{Deserialize, Serialize};
 use spatial_math::{MathError, Transform, Vec3};
 use std::fmt;
 
+mod authored;
 mod body;
 mod life;
+pub use authored::{
+    AuthoredCapsule, AuthoredDefinition, AuthoredInstance, AuthoredSegmentRef,
+    MAX_AUTHORED_DEFINITIONS, MAX_AUTHORED_INSTANCES, MAX_AUTHORED_SEGMENTS,
+};
+use authored::{new_instance, transformed};
 pub use body::{BodyContact, ColliderId, KinematicBody, MAX_BODY_SPEED};
 pub use life::{
     CONNECTION_RADIUS_RATIO, FiniteReservoir, GrowthNode, GrowthParameters, MAX_NODE_IDS,
     MAX_NODES, MAX_ORGANISMS, MAX_SOURCES, MAX_SPHERES, Organism, OrganismLifecycle,
     ResourceSource,
 };
+use world_authoring::DefinitionRevision;
 
 /// A stable identifier for the lifetime of a world. IDs are never reused.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -104,6 +111,10 @@ pub struct WorldState {
     sources: Vec<ResourceSource>,
     #[serde(default)]
     body: Option<KinematicBody>,
+    #[serde(default)]
+    authored_definitions: Vec<AuthoredDefinition>,
+    #[serde(default)]
+    authored_instances: Vec<AuthoredInstance>,
     next_id: u64,
 }
 impl WorldState {
@@ -115,6 +126,8 @@ impl WorldState {
             organisms: Vec::new(),
             sources: Vec::new(),
             body: None,
+            authored_definitions: Vec::new(),
+            authored_instances: Vec::new(),
             next_id: 0,
         }
     }
@@ -145,6 +158,237 @@ impl WorldState {
     /// The sole kinematic body, if present.
     pub fn body(&self) -> Option<&KinematicBody> {
         self.body.as_ref()
+    }
+    /// Unique source revisions retained by this world.
+    pub fn authored_definitions(&self) -> &[AuthoredDefinition] {
+        &self.authored_definitions
+    }
+    /// Authored occurrences in allocation order.
+    pub fn authored_instances(&self) -> &[AuthoredInstance] {
+        &self.authored_instances
+    }
+    /// Finds an authored occurrence by stable ID.
+    pub fn authored_instance(&self, id: EntityId) -> Option<&AuthoredInstance> {
+        self.authored_instances
+            .iter()
+            .find(|instance| instance.id() == id)
+    }
+    /// Loads exact source bytes and atomically inserts a validated authored occurrence.
+    pub fn spawn_authored(
+        &mut self,
+        source: &[u8],
+        transform: Transform,
+        solid: bool,
+    ) -> Result<EntityId, WorldError> {
+        let revision = DefinitionRevision::of(source);
+        let definition = if let Some(existing) = self
+            .authored_definitions
+            .iter()
+            .find(|item| item.revision() == revision)
+        {
+            if existing.source() != source {
+                return Err(WorldError::InvalidStructure);
+            }
+            existing.clone()
+        } else {
+            if self.authored_definitions.len() == MAX_AUTHORED_DEFINITIONS {
+                return Err(WorldError::Capacity);
+            }
+            AuthoredDefinition::from_source(source)?
+        };
+        if self.authored_instances.len() == MAX_AUTHORED_INSTANCES {
+            return Err(WorldError::Capacity);
+        }
+        let next = self.next_id.checked_add(1).ok_or(WorldError::IdExhausted)?;
+        let structure = definition.structure().ok_or(WorldError::InvalidStructure)?;
+        let total = self.authored_instances.iter().try_fold(
+            structure.segments().len(),
+            |sum, instance| {
+                let existing = self
+                    .authored_definitions
+                    .iter()
+                    .find(|item| item.revision() == instance.revision())
+                    .and_then(AuthoredDefinition::structure)
+                    .ok_or(WorldError::InvalidStructure)?;
+                sum.checked_add(existing.segments().len())
+                    .ok_or(WorldError::Capacity)
+            },
+        )?;
+        if total > MAX_AUTHORED_SEGMENTS {
+            return Err(WorldError::Capacity);
+        }
+        let id = EntityId(self.next_id);
+        let instance = new_instance(id, revision, transform, solid);
+        transformed(&instance, structure)?;
+        if !self
+            .authored_definitions
+            .iter()
+            .any(|item| item.revision() == revision)
+        {
+            self.authored_definitions.push(definition);
+        }
+        self.authored_instances.push(instance);
+        self.next_id = next;
+        Ok(id)
+    }
+    /// Removes an occurrence; its ID is never reused.
+    pub fn remove_authored(&mut self, id: EntityId) -> Result<(), WorldError> {
+        let index = self
+            .authored_instances
+            .iter()
+            .position(|item| item.id() == id)
+            .ok_or(WorldError::UnknownEntity)?;
+        self.authored_instances.remove(index);
+        self.clear_authored_contact(id);
+        Ok(())
+    }
+    /// Atomically pins an occurrence to a validated source revision. Segment references from the old revision expire.
+    pub fn replace_authored(&mut self, id: EntityId, source: &[u8]) -> Result<(), WorldError> {
+        let index = self
+            .authored_instances
+            .iter()
+            .position(|item| item.id() == id)
+            .ok_or(WorldError::UnknownEntity)?;
+        let revision = DefinitionRevision::of(source);
+        let exists = self
+            .authored_definitions
+            .iter()
+            .find(|item| item.revision() == revision);
+        let definition = if let Some(existing) = exists {
+            if existing.source() != source {
+                return Err(WorldError::InvalidStructure);
+            }
+            existing.clone()
+        } else {
+            if self.authored_definitions.len() == MAX_AUTHORED_DEFINITIONS {
+                return Err(WorldError::Capacity);
+            }
+            AuthoredDefinition::from_source(source)?
+        };
+        if self.authored_instances[index].revision() == revision {
+            return Ok(());
+        }
+        let mut proposed = self.authored_instances[index].clone();
+        proposed.set_revision(revision)?;
+        let structure = definition.structure().ok_or(WorldError::InvalidStructure)?;
+        transformed(&proposed, structure)?;
+        let total =
+            self.authored_instances
+                .iter()
+                .enumerate()
+                .try_fold(0usize, |sum, (i, instance)| {
+                    let count = if i == index {
+                        structure.segments().len()
+                    } else {
+                        self.authored_definitions
+                            .iter()
+                            .find(|item| item.revision() == instance.revision())
+                            .and_then(AuthoredDefinition::structure)
+                            .ok_or(WorldError::InvalidStructure)?
+                            .segments()
+                            .len()
+                    };
+                    sum.checked_add(count).ok_or(WorldError::Capacity)
+                })?;
+        if total > MAX_AUTHORED_SEGMENTS {
+            return Err(WorldError::Capacity);
+        }
+        if exists.is_none() {
+            self.authored_definitions.push(definition);
+        }
+        self.authored_instances[index] = proposed;
+        self.clear_authored_contact(id);
+        Ok(())
+    }
+    fn clear_authored_contact(&mut self, id: EntityId) {
+        if self.body.as_ref().and_then(KinematicBody::contact).is_some_and(|contact| matches!(contact.collider, ColliderId::Authored(reference) if reference.instance == id))
+            && let Some(body) = &mut self.body {
+            body.clear_contact();
+        }
+    }
+    /// Applies a validated transform without changing identity or source revision.
+    pub fn set_authored_transform(
+        &mut self,
+        id: EntityId,
+        transform: Transform,
+    ) -> Result<(), WorldError> {
+        let index = self
+            .authored_instances
+            .iter()
+            .position(|item| item.id() == id)
+            .ok_or(WorldError::UnknownEntity)?;
+        let mut proposed = self.authored_instances[index].clone();
+        proposed.set_transform(Transform::new(transform.translation(), transform.scale())?)?;
+        if proposed == self.authored_instances[index] {
+            return Ok(());
+        }
+        let structure = self
+            .authored_definitions
+            .iter()
+            .find(|item| item.revision() == proposed.revision())
+            .and_then(AuthoredDefinition::structure)
+            .ok_or(WorldError::InvalidStructure)?;
+        transformed(&proposed, structure)?;
+        self.authored_instances[index] = proposed;
+        self.clear_authored_contact(id);
+        Ok(())
+    }
+    /// Enables or disables rendering, picking and contact for an occurrence.
+    pub fn set_authored_enabled(&mut self, id: EntityId, enabled: bool) -> Result<(), WorldError> {
+        let instance = self
+            .authored_instances
+            .iter_mut()
+            .find(|item| item.id() == id)
+            .ok_or(WorldError::UnknownEntity)?;
+        instance.set_enabled(enabled)?;
+        if !enabled {
+            self.clear_authored_contact(id);
+        }
+        Ok(())
+    }
+    /// Resolves a current segment reference; disabled, removed and replaced references are stale.
+    pub fn authored_segment(&self, reference: AuthoredSegmentRef) -> Option<AuthoredCapsule> {
+        let instance = self.authored_instance(reference.instance).filter(|item| {
+            item.enabled()
+                && item.generation() == reference.generation
+                && item.revision() == reference.segment.revision
+                && item.compiler_semantics_version() == reference.segment.compiler_semantics_version
+        })?;
+        let structure = self
+            .authored_definitions
+            .iter()
+            .find(|item| item.revision() == instance.revision())?
+            .structure()?;
+        let segment = structure.segment(reference.segment)?;
+        transformed(instance, structure)
+            .ok()?
+            .into_iter()
+            .find(|item| item.reference.segment.identity == segment.identity)
+    }
+    /// Derives world-space capsules from cached definitions for all enabled occurrences.
+    pub fn authored_capsules(&self) -> Result<Vec<(AuthoredCapsule, bool)>, WorldError> {
+        let mut capsules = Vec::new();
+        for instance in self.authored_instances.iter().filter(|item| item.enabled()) {
+            let structure = self
+                .authored_definitions
+                .iter()
+                .find(|item| item.revision() == instance.revision())
+                .and_then(AuthoredDefinition::structure)
+                .ok_or(WorldError::InvalidStructure)?;
+            capsules.extend(
+                transformed(instance, structure)?
+                    .into_iter()
+                    .map(|capsule| (capsule, instance.solid())),
+            );
+        }
+        Ok(capsules)
+    }
+    /// Rebuilds disposable compiled definitions after parsing a save, before validation.
+    pub fn rebuild_authored(&mut self) -> Result<(), WorldError> {
+        for definition in &mut self.authored_definitions {
+            definition.rebuild()?;
+        }
+        Ok(())
     }
     /// Creates one kinematic body with a world-stable ID.
     pub fn spawn_body(&mut self, position: Vec3, radius: f64) -> Result<EntityId, WorldError> {
@@ -307,17 +551,20 @@ impl WorldState {
         if self.entities.len() > MAX_SPHERES
             || self.organisms.len() > MAX_ORGANISMS
             || self.sources.len() > MAX_SOURCES
+            || self.authored_definitions.len() > MAX_AUTHORED_DEFINITIONS
+            || self.authored_instances.len() > MAX_AUTHORED_INSTANCES
         {
             return Err(WorldError::Capacity);
         }
         let count = self.entities.len()
             + self.organisms.len()
             + self.sources.len()
-            + usize::from(self.body.is_some());
-        if self.next_id != count as u64 {
+            + usize::from(self.body.is_some())
+            + self.authored_instances.len();
+        if self.next_id < count as u64 {
             return Err(WorldError::InvalidStructure);
         }
-        let mut seen = vec![false; count];
+        let mut seen = std::collections::BTreeSet::new();
         for id in self
             .entities
             .iter()
@@ -325,12 +572,44 @@ impl WorldState {
             .chain(self.organisms.iter().map(Organism::id))
             .chain(self.sources.iter().map(ResourceSource::id))
             .chain(self.body.iter().map(KinematicBody::id))
+            .chain(self.authored_instances.iter().map(AuthoredInstance::id))
         {
-            let index = usize::try_from(id.value()).map_err(|_| WorldError::InvalidStructure)?;
-            if index >= count || seen[index] {
+            if id.value() >= self.next_id || !seen.insert(id.value()) {
                 return Err(WorldError::InvalidStructure);
             }
-            seen[index] = true;
+        }
+        let mut revisions = std::collections::HashSet::new();
+        for definition in &self.authored_definitions {
+            if !revisions.insert(definition.revision())
+                || definition.structure().is_none()
+                || DefinitionRevision::of(definition.source()) != definition.revision()
+            {
+                return Err(WorldError::InvalidStructure);
+            }
+        }
+        let mut segment_count = 0usize;
+        for instance in &self.authored_instances {
+            if instance.compiler_semantics_version() != world_authoring::COMPILER_SEMANTICS_VERSION
+            {
+                return Err(WorldError::InvalidStructure);
+            }
+            let definition = self
+                .authored_definitions
+                .iter()
+                .find(|item| item.revision() == instance.revision())
+                .ok_or(WorldError::InvalidStructure)?;
+            let structure = definition.structure().ok_or(WorldError::InvalidStructure)?;
+            Transform::new(
+                instance.transform().translation(),
+                instance.transform().scale(),
+            )?;
+            transformed(instance, structure)?;
+            segment_count = segment_count
+                .checked_add(structure.segments().len())
+                .ok_or(WorldError::Capacity)?;
+        }
+        if segment_count > MAX_AUTHORED_SEGMENTS {
+            return Err(WorldError::Capacity);
         }
         for entity in &self.entities {
             Sphere::new(entity.sphere.radius())?;
@@ -364,6 +643,12 @@ impl WorldState {
             if let Some(contact) = body.contact() {
                 let valid = match contact.collider {
                     ColliderId::Sphere(id) => self.entity(id).is_some(),
+                    ColliderId::Authored(reference) => {
+                        self.authored_segment(reference).is_some()
+                            && self
+                                .authored_instance(reference.instance)
+                                .is_some_and(AuthoredInstance::solid)
+                    }
                     ColliderId::Node { organism, node }
                     | ColliderId::Connection {
                         organism,

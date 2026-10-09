@@ -5,6 +5,7 @@
   "crates/simulation": "0.2.0",
   "crates/runtime": "0.2.0",
   "crates/renderer": "0.2.0",
+  "crates/authoring": "0.1.0",
   "examples/hello-world": "0.1.1",
   "examples/first-light": "0.1.1",
   "examples/first-life": "0.1.1"

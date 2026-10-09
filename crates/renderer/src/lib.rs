@@ -214,6 +214,8 @@ pub enum PrimitiveKind {
 /// Authoritative identity represented by a renderer primitive. A connection belongs to its child.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SemanticTarget {
+    /// A structurally identified segment of one authored world occurrence.
+    Authored(world_state::AuthoredSegmentRef),
     /// Ordinary world sphere.
     Sphere(EntityId),
     /// Growth-node sphere.
@@ -507,6 +509,20 @@ impl Scene {
                 [0.98, 0.34, 0.18],
             )?;
             primitive.target = Some(SemanticTarget::Body(body.id()));
+            scene.push(primitive)?;
+        }
+        for (segment, _) in world
+            .authored_capsules()
+            .map_err(|_| RenderError::InvalidInput("invalid authored geometry"))?
+        {
+            let capsule = Capsule::new(segment.start, segment.end, segment.radius)
+                .map_err(|_| RenderError::InvalidInput("invalid authored capsule"))?;
+            let mut primitive = Primitive::capsule(
+                u32::try_from(scene.primitives.len()).map_err(|_| RenderError::TooManyObjects)?,
+                capsule,
+                [0.85, 0.72, 0.42],
+            )?;
+            primitive.target = Some(SemanticTarget::Authored(segment.reference));
             scene.push(primitive)?;
         }
         Ok(scene)

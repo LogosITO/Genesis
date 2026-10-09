@@ -152,6 +152,17 @@ impl ContactScene {
                 }
             }
         }
+        for (capsule, solid) in world.authored_capsules()? {
+            if solid {
+                solids.push(Solid {
+                    id: ColliderId::Authored(capsule.reference),
+                    a: capsule.start,
+                    b: capsule.end,
+                    radius: capsule.radius,
+                    bounds: Bounds::solid(capsule.start, capsule.end, capsule.radius),
+                });
+            }
+        }
         Ok(solids)
     }
     fn from_solids(solids: Vec<Solid>) -> Self {

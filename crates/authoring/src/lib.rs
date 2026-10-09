@@ -112,7 +112,7 @@ pub struct Definition {
 }
 
 /// SHA-256 of the exact source bytes, including whitespace and JSON key order.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct DefinitionRevision([u8; 32]);
 
 impl DefinitionRevision {
@@ -129,7 +129,7 @@ impl DefinitionRevision {
 
 /// The path of an emitted symbol through at most eight parallel rewrite passes.
 /// Its scope is one exact definition revision and compiler semantics version.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct SegmentIdentity {
     root: u16,
     depth: u8,
@@ -137,7 +137,7 @@ pub struct SegmentIdentity {
 }
 
 /// A revision- and semantics-scoped reference to one generated segment.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SegmentReference {
     /// Exact source-byte revision.
     pub revision: DefinitionRevision,

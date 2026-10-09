@@ -65,7 +65,15 @@ Exact-byte SHA-256 revisions, bounded derivation paths, versioned self-contained
 
 ## Next candidate
 
-Complete the remaining manual native QA checklist and verify the extracted Windows ZIP on a second supported machine. Check hosted Windows/Linux CI after these local commits are integrated. For authored structures, next prototype one bounded world-owned instance with explicit definition snapshot, transform, runtime state and revision-change policy. Investigate measured BVH build growth if larger authored structures become a real workload.
+Complete the remaining manual native QA checklist and verify the extracted Windows ZIP on a second supported machine. Check hosted Windows/Linux CI after these local commits are integrated. Investigate measured BVH build growth if larger authored structures become a real workload.
+
+## Foundation 0.11 — authored world instances, local experimental slice
+
+Bounded exact-byte definitions and world-owned occurrences, stable segment provenance, translation and uniform scaling, typed tick events, analytic picking and static capsule contact, version-6 save/load and a headless replay scenario are implemented. Native presentation and GPU parity require adapter testing. See the [instance contract](../specifications/authored-world-instances.md), [ADR 0009](../adr/0009-authored-world-instances.md), and [local record](../research/foundation-011.md).
+
+## Foundation 0.12 candidate
+
+Measure larger authored workloads on supported adapters, verify native selection/contact manually, then decide whether transform-only updates need a dedicated world-space geometry cache. Any rotation or living growth contract should follow tested CPU/GPU/contact semantics rather than be assumed from static previews.
 
 ## Later research
 Living or stochastic grammars, resource transport and recycling, destruction and recovery rules, broader physical interaction, embedding/FFI, standalone UI, and a richer authored language. Sequence and scope will follow experiments, not promises.

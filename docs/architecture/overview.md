@@ -1,5 +1,7 @@
 # Architecture overview
 
+Foundation 0.11 adds bounded authored definitions and world occurrences. Exact source bytes and stable occurrence IDs live in `WorldState`; compiled segments, rendering snapshots and contact BVHs are derived. See the [authored instance contract](../specifications/authored-world-instances.md) and [ADR 0009](../adr/0009-authored-world-instances.md).
+
 Foundation 0.8 adds finite source reservoirs and proportional allocation among existing organisms. Source ledgers, growth topology, kinematic contact, and pending events persist in version-5 saves. The renderer only reads the resulting analytic world. See the [allocation contract](../specifications/resource-allocation.md), [ecosystem state](../specifications/ecosystem-state.md), and [contact specification](../specifications/kinematic-contact.md).
 
 **Status: experimental / research stage.** Foundation 0.1 established analytic geometry, mutable state, fixed-step growth, and an embeddable coordinator. Foundation 0.2 added gradients, ideal Lipschitz zero-set bounds, and bounded CPU primitive ray queries. Foundation 0.3 added an optional native GPU prototype for two analytic primitives. Foundation 0.4 adds a bounded mathematical growth graph and continuous resource environment. It is not a complete engine.

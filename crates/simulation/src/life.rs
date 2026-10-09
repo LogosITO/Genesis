@@ -139,6 +139,20 @@ pub enum EnvironmentEventKind {
         /// World units per simulated second.
         velocity: Vec3,
     },
+    /// Enable or disable one stable authored occurrence.
+    SetAuthoredEnabled {
+        /// Occurrence ID.
+        id: EntityId,
+        /// New participation state.
+        enabled: bool,
+    },
+    /// Move and uniformly scale one authored occurrence.
+    SetAuthoredTransform {
+        /// Occurrence ID.
+        id: EntityId,
+        /// Validated world transform.
+        transform: spatial_math::Transform,
+    },
 }
 
 /// An event for a completed-tick index, ordered by its stable insertion sequence.
@@ -206,6 +220,12 @@ pub fn advance_life_cached(
                 .body_mut(id)
                 .map_err(SimulationError::World)?
                 .set_desired_velocity(velocity)
+                .map_err(SimulationError::World)?,
+            EnvironmentEventKind::SetAuthoredEnabled { id, enabled } => proposed
+                .set_authored_enabled(id, enabled)
+                .map_err(SimulationError::World)?,
+            EnvironmentEventKind::SetAuthoredTransform { id, transform } => proposed
+                .set_authored_transform(id, transform)
                 .map_err(SimulationError::World)?,
         }
     }
