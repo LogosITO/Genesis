@@ -15,4 +15,6 @@ The [First Interaction measurements](../reference/research/first-interaction-mea
 
 The [First Contact measurements](../reference/research/first-contact-measurements/) compare direct and BVH collision queries, narrow phase, rebuild and full tick costs, plus contact/pruning replay outcomes. The [contact contract](../reference/specifications/kinematic-contact/) states the numerical and geometry limits.
 
+The [Foundation 0.9.6 local verification](../reference/research/foundation-096/) records native window measurements, resize evidence, and the opt-in test audit. The [native runtime contract](../reference/specifications/native-runtime/) defines surface and device failure policy.
+
 The [First Ecology experiment](../reference/research/first-ecology-experiment/) records six finite-resource scenarios, local CPU timings, replay, contact integration, and open measurement gaps.

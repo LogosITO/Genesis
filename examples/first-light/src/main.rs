@@ -43,6 +43,15 @@ fn median_p95(samples: &[f64]) -> (f64, f64) {
     )
 }
 
+fn p99(samples: &[f64]) -> f64 {
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    sorted
+        .get((sorted.len() * 99 / 100).min(sorted.len().saturating_sub(1)))
+        .copied()
+        .unwrap_or(0.0)
+}
+
 fn v(x: f64, y: f64, z: f64) -> Vec3 {
     Vec3::new(x, y, z).expect("finite scene coordinate")
 }
@@ -57,7 +66,63 @@ struct Graphics {
     renderer: GpuRenderer,
     timer: Option<GpuTimer>,
     hud: Option<hud::Hud>,
+    surface_retries: u8,
 }
+
+enum SurfaceFrame {
+    Ready(wgpu::SurfaceTexture, bool),
+    Reconfigure,
+    Skip,
+    Fatal,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BenchmarkScenario {
+    Idle,
+    Growth,
+    Interaction,
+}
+
+impl BenchmarkScenario {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "idle" => Some(Self::Idle),
+            "growth" => Some(Self::Growth),
+            "interaction" => Some(Self::Interaction),
+            _ => None,
+        }
+    }
+}
+
+fn classify_surface(result: wgpu::CurrentSurfaceTexture) -> SurfaceFrame {
+    match result {
+        wgpu::CurrentSurfaceTexture::Success(frame) => SurfaceFrame::Ready(frame, false),
+        wgpu::CurrentSurfaceTexture::Suboptimal(frame) => SurfaceFrame::Ready(frame, true),
+        wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+            SurfaceFrame::Reconfigure
+        }
+        wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+            SurfaceFrame::Skip
+        }
+        wgpu::CurrentSurfaceTexture::Validation => SurfaceFrame::Fatal,
+    }
+}
+
+fn drawable_size(width: u32, height: u32, max_dimension: u32) -> bool {
+    width > 0 && height > 0 && width <= max_dimension && height <= max_dimension
+}
+
+fn requested_window_size(value: &str) -> Option<winit::dpi::PhysicalSize<u32>> {
+    let (width, height) = value.split_once('x')?;
+    let width: u32 = width.parse().ok()?;
+    let height: u32 = height.parse().ok()?;
+    drawable_size(width, height, 16_384).then_some(winit::dpi::PhysicalSize::new(width, height))
+}
+
+fn next_surface_retry(previous: u8) -> Option<u8> {
+    previous.checked_add(1).filter(|attempt| *attempt <= 3)
+}
+
 impl Graphics {
     async fn open(
         window: Arc<Window>,
@@ -109,6 +174,11 @@ impl Graphics {
             .or_else(|| capabilities.formats.first().copied())
             .ok_or("surface has no supported format")?;
         let size = window.inner_size();
+        if size.width > device.limits().max_texture_dimension_2d
+            || size.height > device.limits().max_texture_dimension_2d
+        {
+            return Err("initial window exceeds GPU texture limit".into());
+        }
         let config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .ok_or("surface configuration unavailable")?;
@@ -127,21 +197,23 @@ impl Graphics {
             renderer,
             timer,
             hud,
+            surface_retries: 0,
         })
     }
-    fn resize(&mut self, width: u32, height: u32) {
-        if width == 0 || height == 0 {
-            return;
+    fn configure_surface(&mut self, width: u32, height: u32, force: bool) -> bool {
+        if !drawable_size(width, height, self.device.limits().max_texture_dimension_2d) {
+            eprintln!("resize skipped: {width}x{height} outside drawable GPU limits");
+            return false;
         }
-        if width > self.device.limits().max_texture_dimension_2d
-            || height > self.device.limits().max_texture_dimension_2d
-        {
-            eprintln!("resize skipped: {width}x{height} exceeds GPU texture limit");
-            return;
+        if force || self.config.width != width || self.config.height != height {
+            if self.config.width != width || self.config.height != height {
+                self.surface_retries = 0;
+            }
+            self.config.width = width;
+            self.config.height = height;
+            self.surface.configure(&self.device, &self.config);
         }
-        self.config.width = width;
-        self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+        true
     }
 }
 
@@ -167,7 +239,14 @@ struct App {
     focused: bool,
     status: String,
     measure: bool,
+    benchmark_scenario: Option<BenchmarkScenario>,
     frame_samples: Vec<f64>,
+    interval_samples: Vec<f64>,
+    acquire_samples: Vec<f64>,
+    submit_samples: Vec<f64>,
+    present_samples: Vec<f64>,
+    upload_samples: Vec<f64>,
+    bvh_build_samples: Vec<f64>,
     step_samples: Vec<f64>,
     snapshot_samples: Vec<f64>,
     gpu_samples: Vec<f64>,
@@ -184,6 +263,15 @@ struct App {
 }
 impl App {
     fn new(life: bool, passage: bool) -> Result<Self, Box<dyn std::error::Error>> {
+        let benchmark_scenario = match std::env::var("GENESIS_MEASURE_SCENARIO") {
+            Ok(value) if passage => Some(
+                BenchmarkScenario::parse(&value)
+                    .ok_or("GENESIS_MEASURE_SCENARIO must be idle, growth, or interaction")?,
+            ),
+            Ok(_) => return Err("GENESIS_MEASURE_SCENARIO requires --passage".into()),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(error) => return Err(error.into()),
+        };
         let mut world = WorldState::new(DeterministicSeed(7));
         let mut time = SimulationTime::default();
         if passage {
@@ -220,7 +308,7 @@ impl App {
             time,
             step: SimulationStep::new(STEP.as_secs_f64())?,
             contact_cache: None,
-            paused: false,
+            paused: benchmark_scenario == Some(BenchmarkScenario::Idle),
             normals: false,
             yaw: 0.0,
             elevation: 0.25,
@@ -238,8 +326,15 @@ impl App {
             } else {
                 String::new()
             },
-            measure: std::env::var_os("GENESIS_MEASURE").is_some(),
+            measure: std::env::var_os("GENESIS_MEASURE").is_some() || benchmark_scenario.is_some(),
+            benchmark_scenario,
             frame_samples: Vec::new(),
+            interval_samples: Vec::new(),
+            acquire_samples: Vec::new(),
+            submit_samples: Vec::new(),
+            present_samples: Vec::new(),
+            upload_samples: Vec::new(),
+            bvh_build_samples: Vec::new(),
             step_samples: Vec::new(),
             snapshot_samples: Vec::new(),
             gpu_samples: Vec::new(),
@@ -470,6 +565,25 @@ impl App {
         if self.paused {
             return Ok(());
         }
+        if let Some(scenario) = self.benchmark_scenario {
+            let tick = self.time.ticks().saturating_sub(45);
+            match (scenario, tick) {
+                (BenchmarkScenario::Growth | BenchmarkScenario::Interaction, 0) => {
+                    self.pending_move = true;
+                }
+                (BenchmarkScenario::Interaction, 20 | 40) => self.pending_source_toggle = true,
+                (BenchmarkScenario::Interaction, 60) => {
+                    self.pending_prune = Some((self.world.organisms()[0].id(), 1));
+                }
+                (BenchmarkScenario::Interaction, 80) => self.set_body_key(0, true),
+                (BenchmarkScenario::Interaction, 120) => self.set_body_key(0, false),
+                (BenchmarkScenario::Interaction, 180) => {
+                    self.restart_passage()?;
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
         let mut events = if self.life && self.pending_move {
             let source_id = self.source_id.expect("life source exists");
             let source = self
@@ -626,6 +740,9 @@ impl App {
         let now = Instant::now();
         let elapsed = now.duration_since(self.previous);
         self.previous = now;
+        if self.measure && self.frames > 0 {
+            self.interval_samples.push(elapsed.as_secs_f64() * 1000.0);
+        }
         if !self.paused {
             self.accumulator += elapsed.min(Duration::from_millis(250));
             let mut steps = 0;
@@ -634,6 +751,9 @@ impl App {
                     eprintln!("simulation failed: {error}");
                     event_loop.exit();
                     return;
+                }
+                if self.accumulator < STEP {
+                    break;
                 }
                 self.accumulator -= STEP;
                 steps += 1;
@@ -714,6 +834,9 @@ impl App {
         if size.width == 0 || size.height == 0 {
             return;
         }
+        if !graphics.configure_surface(size.width, size.height, false) {
+            return;
+        }
         let height = if self.life {
             self.world
                 .organisms()
@@ -788,30 +911,42 @@ impl App {
                 ""
             }
         ));
-        let frame = match graphics.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame) => frame,
-            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
-            wgpu::CurrentSurfaceTexture::Outdated => {
-                graphics.resize(size.width, size.height);
-                return;
-            }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
-            wgpu::CurrentSurfaceTexture::Lost => {
-                graphics.resize(size.width, size.height);
-                return;
-            }
-            wgpu::CurrentSurfaceTexture::Validation => {
-                eprintln!("surface validation failed; exiting");
-                event_loop.exit();
-                return;
-            }
-        };
+        let acquire_started = Instant::now();
+        let (frame, reconfigure_after) =
+            match classify_surface(graphics.surface.get_current_texture()) {
+                SurfaceFrame::Ready(frame, reconfigure_after) => {
+                    graphics.surface_retries = 0;
+                    (frame, reconfigure_after)
+                }
+                SurfaceFrame::Reconfigure => {
+                    let Some(attempt) = next_surface_retry(graphics.surface_retries) else {
+                        eprintln!("surface recovery failed after three reconfigurations; exiting");
+                        event_loop.exit();
+                        return;
+                    };
+                    graphics.surface_retries = attempt;
+                    eprintln!("surface reconfiguration attempt {attempt}");
+                    graphics.configure_surface(size.width, size.height, true);
+                    return;
+                }
+                SurfaceFrame::Skip => return,
+                SurfaceFrame::Fatal => {
+                    eprintln!("surface validation failed; exiting");
+                    event_loop.exit();
+                    return;
+                }
+            };
+        if self.measure {
+            self.acquire_samples
+                .push(acquire_started.elapsed().as_secs_f64() * 1000.0);
+        }
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let started = Instant::now();
         let report = now.duration_since(self.stats_since) >= Duration::from_secs(2);
-        let sampled_timer = if report || self.measure {
+        // Sparse native timestamp readback limits measurement-induced frame stalls.
+        let sampled_timer = if report || (self.measure && self.frames.is_multiple_of(30)) {
             graphics.timer.as_ref()
         } else {
             None
@@ -832,11 +967,22 @@ impl App {
             event_loop.exit();
             return;
         }
+        if self.measure {
+            self.submit_samples
+                .push(started.elapsed().as_secs_f64() * 1000.0);
+            if let Some(upload) = graphics.renderer.last_upload_stats() {
+                self.upload_samples.push(upload.enqueue_ms);
+                self.bvh_build_samples.push(upload.bvh_build_ms);
+            }
+        }
         if let (Some(hud), Some(lines)) = (&graphics.hud, &hud_lines) {
             hud.draw(&graphics.device, &graphics.queue, &view, lines);
         }
+        let present_started = Instant::now();
         graphics.queue.present(frame);
         if self.measure {
+            self.present_samples
+                .push(present_started.elapsed().as_secs_f64() * 1000.0);
             self.frame_samples
                 .push(frame_started.elapsed().as_secs_f64() * 1000.0);
             if let Some(timer) = sampled_timer {
@@ -909,6 +1055,12 @@ impl App {
                 let (step_p50, step_p95) = median_p95(&self.step_samples);
                 let (snapshot_p50, snapshot_p95) = median_p95(&self.snapshot_samples);
                 let (gpu_p50, gpu_p95) = median_p95(&self.gpu_samples);
+                let (interval_p50, interval_p95) = median_p95(&self.interval_samples);
+                let (acquire_p50, acquire_p95) = median_p95(&self.acquire_samples);
+                let (submit_p50, submit_p95) = median_p95(&self.submit_samples);
+                let (present_p50, present_p95) = median_p95(&self.present_samples);
+                let (upload_p50, upload_p95) = median_p95(&self.upload_samples);
+                let (build_p50, build_p95) = median_p95(&self.bvh_build_samples);
                 let acceleration = graphics.renderer.acceleration_stats();
                 let upload = graphics.renderer.last_upload_stats();
                 eprintln!(
@@ -922,7 +1074,33 @@ impl App {
                     upload.map(|u| u.bvh_build_ms),
                     upload.map(|u| u.enqueue_ms)
                 );
+                eprintln!(
+                    "{{\"kind\":\"native-frame-window\",\"resolution\":[{},{}],\"samples\":{},\"tick\":{},\"paused\":{},\"step_samples\":{},\"interval_ms\":[{interval_p50:.4},{interval_p95:.4},{:.4}],\"loop_ms\":[{frame_p50:.4},{frame_p95:.4},{:.4}],\"acquire_ms\":[{acquire_p50:.4},{acquire_p95:.4}],\"encode_submit_ms\":[{submit_p50:.4},{submit_p95:.4}],\"present_call_ms\":[{present_p50:.4},{present_p95:.4}],\"step_ms\":[{step_p50:.4},{step_p95:.4}],\"snapshot_ms\":[{snapshot_p50:.4},{snapshot_p95:.4}],\"upload_enqueue_ms\":[{upload_p50:.4},{upload_p95:.4}],\"bvh_build_ms\":[{build_p50:.4},{build_p95:.4}],\"gpu_compute_ms\":[{gpu_p50:.4},{gpu_p95:.4}],\"gpu_samples\":{},\"present_mode\":\"{:?}\",\"backend\":\"{:?}\",\"os\":\"{}\",\"profile\":\"{}\"}}",
+                    size.width,
+                    size.height,
+                    self.frame_samples.len(),
+                    self.time.ticks(),
+                    self.paused,
+                    self.step_samples.len(),
+                    p99(&self.interval_samples),
+                    p99(&self.frame_samples),
+                    self.gpu_samples.len(),
+                    graphics.config.present_mode,
+                    graphics.adapter.get_info().backend,
+                    std::env::consts::OS,
+                    if cfg!(debug_assertions) {
+                        "debug"
+                    } else {
+                        "release"
+                    }
+                );
                 self.frame_samples.clear();
+                self.interval_samples.clear();
+                self.acquire_samples.clear();
+                self.submit_samples.clear();
+                self.present_samples.clear();
+                self.upload_samples.clear();
+                self.bvh_build_samples.clear();
                 self.step_samples.clear();
                 self.snapshot_samples.clear();
                 self.gpu_samples.clear();
@@ -930,6 +1108,9 @@ impl App {
             self.stats_since = now;
             self.frames = 0;
             self.cpu_total = Duration::ZERO;
+        }
+        if reconfigure_after {
+            graphics.configure_surface(size.width, size.height, true);
         }
     }
 }
@@ -947,7 +1128,22 @@ impl ApplicationHandler for App {
                 } else {
                     "First Light — Experimental / Research Stage"
                 })
-                .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0)),
+                .with_inner_size(match std::env::var("GENESIS_WINDOW_SIZE") {
+                    Ok(value) => match requested_window_size(&value) {
+                        Some(size) => size,
+                        None => {
+                            eprintln!("invalid GENESIS_WINDOW_SIZE; expected WIDTHxHEIGHT");
+                            event_loop.exit();
+                            return;
+                        }
+                    },
+                    Err(std::env::VarError::NotPresent) => winit::dpi::PhysicalSize::new(1280, 720),
+                    Err(error) => {
+                        eprintln!("invalid GENESIS_WINDOW_SIZE: {error}");
+                        event_loop.exit();
+                        return;
+                    }
+                }),
         ) {
             Ok(window) => Arc::new(window),
             Err(error) => {
@@ -974,13 +1170,26 @@ impl ApplicationHandler for App {
         if graphics.window.id() != id {
             return;
         }
+        if self.benchmark_scenario.is_some() {
+            if let WindowEvent::KeyboardInput { event, .. } = &event {
+                if event.state == ElementState::Pressed
+                    && event.physical_key == PhysicalKey::Code(KeyCode::Escape)
+                {
+                    event_loop.exit();
+                }
+                return;
+            }
+            if matches!(event, WindowEvent::MouseInput { .. }) {
+                return;
+            }
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 self.last_camera = None;
                 self.selected = None;
                 if let Some(graphics) = self.graphics.as_mut() {
-                    graphics.resize(size.width, size.height);
+                    graphics.configure_surface(size.width, size.height, false);
                 }
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
@@ -1146,6 +1355,72 @@ mod app_tests {
     use std::{path::Path, sync::mpsc};
     use world_simulation::advance_life;
 
+    #[test]
+    fn surface_fault_policy_and_drawable_limits() {
+        for outcome in [
+            wgpu::CurrentSurfaceTexture::Lost,
+            wgpu::CurrentSurfaceTexture::Outdated,
+        ] {
+            assert!(matches!(
+                classify_surface(outcome),
+                SurfaceFrame::Reconfigure
+            ));
+        }
+        for outcome in [
+            wgpu::CurrentSurfaceTexture::Timeout,
+            wgpu::CurrentSurfaceTexture::Occluded,
+        ] {
+            assert!(matches!(classify_surface(outcome), SurfaceFrame::Skip));
+        }
+        assert!(matches!(
+            classify_surface(wgpu::CurrentSurfaceTexture::Validation),
+            SurfaceFrame::Fatal
+        ));
+        assert_eq!(next_surface_retry(0), Some(1));
+        assert_eq!(next_surface_retry(2), Some(3));
+        assert_eq!(next_surface_retry(3), None);
+        for size in [(1280, 720), (1920, 1080), (2560, 1440), (1, 8192)] {
+            assert!(drawable_size(size.0, size.1, 8192));
+        }
+        for size in [(0, 720), (720, 0), (8193, 1), (1, 8193)] {
+            assert!(!drawable_size(size.0, size.1, 8192));
+        }
+        assert_eq!(
+            requested_window_size("1920x1080"),
+            Some(winit::dpi::PhysicalSize::new(1920, 1080))
+        );
+        for malformed in [
+            "0x720",
+            "2560x0",
+            "8192x16385",
+            "-1x720",
+            "720X1280",
+            "1x2x3",
+        ] {
+            assert_eq!(requested_window_size(malformed), None);
+        }
+    }
+
+    #[test]
+    fn benchmark_interaction_runs_and_restarts() {
+        let mut app = App::new(true, true).unwrap();
+        app.benchmark_scenario = Some(BenchmarkScenario::Interaction);
+        for index in 0..=180 {
+            app.simulation_tick().unwrap();
+            match index {
+                20 => assert!(!app.world.sources()[0].active()),
+                40 => assert!(app.world.sources()[0].active()),
+                60 => assert!(app.world.organisms()[0].node(1).is_none()),
+                80 => assert!(app.body_keys[0]),
+                120 => assert!(!app.body_keys[0]),
+                180 => assert_eq!(app.time.ticks(), 45),
+                _ => {}
+            }
+        }
+        app.simulation_tick().unwrap();
+        assert_eq!(app.time.ticks(), 46);
+    }
+
     fn selected_branch(app: &App, organism_index: usize) -> SemanticTarget {
         let organism = &app.world.organisms()[organism_index];
         let node = &organism.nodes()[1];
@@ -1304,6 +1579,86 @@ mod app_tests {
     }
 
     #[test]
+    fn passage_mixed_runtime_stress_replays_and_restores() {
+        let mut first = App::new(true, true).unwrap();
+        let mut replay = App::new(true, true).unwrap();
+        let initial = first.world.clone();
+        let stable_ids: Vec<_> = first
+            .world
+            .organisms()
+            .iter()
+            .map(|tree| tree.id())
+            .collect();
+        let mut paused_time = None;
+        for index in 0..300 {
+            for app in [&mut first, &mut replay] {
+                match index {
+                    0 => {
+                        app.pending_move = true;
+                        app.set_body_key(0, true);
+                    }
+                    50 | 80 => app.pending_source_toggle = true,
+                    100 => app.set_body_key(0, false),
+                    120 => {
+                        app.selected = Some(SemanticTarget::GrowthNode {
+                            organism: app.world.organisms()[0].id(),
+                            node: 1,
+                        });
+                        app.queue_prune();
+                    }
+                    150 | 154 => app.toggle_pause(),
+                    220 => app.restart_passage().unwrap(),
+                    _ => {}
+                }
+                app.simulation_tick().unwrap();
+            }
+            assert_eq!(
+                first.world, replay.world,
+                "world divergence at action {index}"
+            );
+            assert_eq!(first.time, replay.time, "time divergence at action {index}");
+            if index == 150 {
+                paused_time = Some(first.time);
+            }
+            if (151..154).contains(&index) {
+                assert_eq!(Some(first.time), paused_time);
+            }
+            if index < 220 {
+                assert_eq!(
+                    first
+                        .world
+                        .organisms()
+                        .iter()
+                        .map(|tree| tree.id())
+                        .collect::<Vec<_>>(),
+                    stable_ids
+                );
+            }
+            if index % 20 == 0 {
+                first.world.validate().unwrap();
+                let left = first.scene().unwrap();
+                let right = replay.scene().unwrap();
+                assert_eq!(left.primitives().len(), right.primitives().len());
+                assert!(
+                    left.primitives()
+                        .iter()
+                        .zip(right.primitives())
+                        .all(|(a, b)| a.id == b.id && a.target() == b.target())
+                );
+                let saved = world_runtime::Runtime::new(first.world.clone(), first.step)
+                    .save_bytes()
+                    .unwrap();
+                assert_eq!(
+                    world_runtime::Runtime::load_bytes(&saved).unwrap().world(),
+                    &first.world
+                );
+            }
+        }
+        assert_ne!(first.world, initial);
+        assert_eq!(first.world.organisms().len(), 2);
+    }
+
+    #[test]
     fn growing_topology_keeps_only_live_semantic_selection() {
         let mut app = App::new(true, true).unwrap();
         let selected = selected_branch(&app, 1);
@@ -1427,6 +1782,17 @@ mod app_tests {
         let mut scenes = vec![("initial", app.scene().unwrap())];
         app.selected = Some(selected_branch(&app, 0));
         scenes.push(("selected", app.scene().unwrap()));
+        app.pending_source_toggle = true;
+        app.simulation_tick().unwrap();
+        assert!(!app.world.sources()[0].active());
+        scenes.push(("source-off", app.scene().unwrap()));
+        app.pending_source_toggle = true;
+        app.simulation_tick().unwrap();
+        assert!(app.world.sources()[0].active());
+        scenes.push(("source-on", app.scene().unwrap()));
+        app.toggle_pause();
+        scenes.push(("paused", app.scene().unwrap()));
+        app.toggle_pause();
         app.pending_move = true;
         app.simulation_tick().unwrap();
         scenes.push(("source-moved", app.scene().unwrap()));
@@ -1544,31 +1910,53 @@ mod app_tests {
             );
             frames.push(direct);
         }
-        for (a, b) in [(0, 1), (0, 2), (0, 3), (0, 4)] {
+        for (a, b) in [(0, 1), (0, 2), (0, 5), (0, 6), (0, 7)] {
             assert_ne!(frames[a], frames[b]);
         }
-        assert_eq!(frames[0], frames[5], "restart differs from initial state");
-        for size in [[320, 180], [800, 600]] {
-            let image = renderer
-                .draw_with_traversal(
-                    &device,
-                    &queue,
-                    &scenes[0].1,
-                    camera,
-                    GpuTraversal::Bvh,
-                    DrawOptions {
-                        size,
-                        normal_debug: false,
-                        surface: None,
-                        timer: None,
-                    },
-                )
-                .unwrap();
-            assert_eq!(
-                read_rgb(&device, &queue, &image, size).len(),
-                (size[0] * size[1] * 3) as usize
-            );
+        assert_ne!(frames[2], frames[3], "source activity did not change image");
+        assert_eq!(frames[3], frames[4], "pause changed render snapshot");
+        assert_eq!(frames[0], frames[8], "restart differs from initial state");
+        for size in [
+            [1280, 720],
+            [1920, 1080],
+            [2560, 1440],
+            [720, 1280],
+            [1280, 720],
+        ] {
+            let draw = |traversal| {
+                let image = renderer
+                    .draw_with_traversal(
+                        &device,
+                        &queue,
+                        &scenes[0].1,
+                        camera,
+                        traversal,
+                        DrawOptions {
+                            size,
+                            normal_debug: false,
+                            surface: None,
+                            timer: None,
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(image.width(), size[0]);
+                assert_eq!(image.height(), size[1]);
+                read_rgb(&device, &queue, &image, size)
+            };
+            let direct = draw(GpuTraversal::Direct);
+            let bvh = draw(GpuTraversal::Bvh);
+            assert_eq!(direct, bvh, "resized direct/BVH image mismatch: {size:?}");
+            assert_eq!(direct.len(), (size[0] * size[1] * 3) as usize);
+            assert!(direct.chunks_exact(3).any(|pixel| pixel != &direct[..3]));
+            if let Some(dir) = &capture_dir
+                && size == [720, 1280]
+            {
+                write_bmp(&Path::new(dir).join("passage-portrait.bmp"), &direct, size);
+            }
         }
+        let wide = camera.ray(480, 540, 1920, 1080).unwrap().direction();
+        let tall = camera.ray(270, 960, 1080, 1920).unwrap().direction();
+        assert!(wide.x().abs() / wide.z().abs() > 2.0 * tall.x().abs() / tall.z().abs());
     }
 
     #[test]
