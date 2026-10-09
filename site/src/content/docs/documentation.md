@@ -1,5 +1,6 @@
 ---
 title: Documentation
+template: splash
 ---
 
 Run the vertical slice from the repository root:

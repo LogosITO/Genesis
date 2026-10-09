@@ -1,4 +1,4 @@
-# Project Name TBD
+# Genesis
 
 Foundation 0.5 adds a bounded branching organism and analytic capsule connections. **Experimental / Research Stage.** The default First Life rule has at most two children per node, a shared resource budget, deterministic node-ID allocation, and version-2 saves that load valid version-1 state. The renderer shows overlapping primitives as separate solids; it does not provide watertight CSG geometry.
 
