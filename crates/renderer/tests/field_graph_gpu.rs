@@ -85,6 +85,70 @@ fn world_field_occurrences_query_real_gpu_without_becoming_colliders() {
     );
 }
 
+#[test]
+#[ignore = "requires native GPU; f64 bounds versus f32 query boundary"]
+fn world_field_query_preserves_gpu_boundary_diagnostics() {
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        apply_limit_buckets: false,
+    }))
+    .unwrap();
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let renderer = pollster::block_on(GraphGpuRenderer::new(&device)).unwrap();
+    let source = br#"{"format_version":1,"id":"boundary","root":"s","nodes":[{"op":"sphere","id":"s","radius":1}]}"#;
+    let mut world = WorldState::new(DeterministicSeed(91));
+    world
+        .spawn_field(source, Transform::new(Vec3::ZERO, 1.0).unwrap())
+        .unwrap();
+    let graph = compile_json(source).unwrap();
+    let rays = [
+        Ray::new(v(0.0, 1.0 + 1e-8, -4.0), v(0.0, 0.0, 1.0), 0.001, 8.0).unwrap(),
+        Ray::new(v(0.0, 2.0, -4.0), v(0.0, 0.0, 1.0), 0.001, 8.0).unwrap(),
+    ];
+    let direct = renderer
+        .query(
+            &device,
+            &queue,
+            &graph,
+            camera(),
+            &rays,
+            GraphTracePolicy::default(),
+        )
+        .unwrap();
+    let world_outcomes = renderer
+        .query_world_fields(
+            &device,
+            &queue,
+            &world,
+            camera(),
+            &rays,
+            GraphTracePolicy::default(),
+        )
+        .unwrap();
+    assert_eq!(direct.len(), world_outcomes.len());
+    for (direct, world) in direct.iter().zip(world_outcomes) {
+        assert_eq!(
+            std::mem::discriminant(direct),
+            match world {
+                WorldFieldGpuOutcome::Miss => std::mem::discriminant(&GraphGpuOutcome::Miss),
+                WorldFieldGpuOutcome::Hit { .. } => std::mem::discriminant(&GraphGpuOutcome::Hit {
+                    distance: 0.0,
+                    normal: [0.0; 3]
+                }),
+                WorldFieldGpuOutcome::Uncertain { issue, .. } =>
+                    std::mem::discriminant(&GraphGpuOutcome::Uncertain(issue)),
+                WorldFieldGpuOutcome::Exhausted { .. } =>
+                    std::mem::discriminant(&GraphGpuOutcome::Exhausted),
+            },
+            "direct {direct:?} world {world:?}"
+        );
+    }
+}
+
 fn v(x: f64, y: f64, z: f64) -> Vec3 {
     Vec3::new(x, y, z).unwrap()
 }

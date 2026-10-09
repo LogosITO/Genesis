@@ -41,3 +41,17 @@ Unresolved work: real GPU-side depth/status composition, buffer reuse, shared
 definition upload, per-pass timings, resize, camera movement in a native mixed
 viewport, cross-adapter validation and rigorous floating-point ordering bounds.
 General implicit fields remain visual only; authoritative contacts are unchanged.
+
+## Rejected ray-bounds prefilter
+
+A CPU prefilter using outward-rounded `f64` world bounds was tested before GPU
+field queries. It is not valid as a transparent replacement for the current
+`f32` shader query. On the RTX 4070 SUPER/Vulkan, a sphere ray at
+`y = 1 + 1e-8` was strictly outside the ideal sphere bounds in `f64`, but
+rounded to `y = 1` on upload; the direct shader returned an approximate hit
+at distance `3.9557457`, while the prefilter returned `Miss`. The candidate
+was removed. An opt-in GPU regression compares direct and world-owned query
+statuses at this boundary. Any future culling needs a stated GPU numerical
+domain and a conservative margin for conversion, tracing tolerance and
+arithmetic, plus differential tests; an ideal occupied-set exclusion alone
+cannot preserve GPU diagnostic outcomes.
