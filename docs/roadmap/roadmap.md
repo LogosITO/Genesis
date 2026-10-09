@@ -47,9 +47,13 @@ Unchanged analytic contact geometry reuses a disposable CPU BVH; changed geometr
 
 A small lane, one controllable body, two finite-resource organisms, tick-indexed source movement and pruning, an authoritative goal, a native HUD, and a deterministic headless playthrough are implemented. See the [player guide](../guides/the-passage.md) and [first-playable research record](../research/first-playable.md). This is experimental; hosted platform checks and an external manual playtest are separate gates.
 
+## Foundation 0.9.2 — autonomous quality, local evidence
+
+Application-level transition tests, seven opt-in Passage GPU image states, release-profile offscreen resolution measurements, and a package checksum are in place. The user reported a manual 7/7 playthrough; native input automation and a second-machine check remain separate. See the [0.9.2 research record](../research/foundation-092.md).
+
 ## Next candidate
 
-Complete the manual native QA checklist and verify the extracted Windows ZIP on a second supported machine. Check hosted Windows/Linux CI after the local commits are integrated. Then run a small external playtest using the offline feedback template, and investigate any observed camera, picking, or frame-pacing failures.
+Complete the remaining manual native QA checklist and verify the extracted Windows ZIP on a second supported machine. Check hosted Windows/Linux CI after this branch is integrated. Then run a small external playtest using the offline feedback template, and investigate any observed camera, picking, or frame-pacing failures. For mathematical research, prioritize conservative visibility and contact semantics around overlapping analytic objects.
 
 ## Later research
 Growth grammars and L-systems, resource transport and recycling, destruction and recovery rules, broader physical interaction, embedding/FFI, standalone UI, and authored language. Sequence and scope will follow experiments, not promises.
