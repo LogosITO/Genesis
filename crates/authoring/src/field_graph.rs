@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 mod spatial;
 pub use spatial::{
     IdealRegionEstimate, RegionAabb, RegionExclusion, SampleSign, SolidEntryOutcome,
-    SolidQueryIssue, SolidRayOptions, classify_sample, estimate_region, exclude_region,
-    trace_exterior_entry,
+    SolidQueryIssue, SolidQueryReport, SolidRayOptions, classify_sample, estimate_region,
+    exclude_region, trace_exterior_entry, trace_exterior_entry_report,
 };
 
 /// Maximum accepted source size for the research preview.

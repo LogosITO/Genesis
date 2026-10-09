@@ -13,7 +13,10 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use world_authoring::field_graph::{Graph, MAX_SOURCE_BYTES, TraceOptions, compile_json, trace};
+use world_authoring::field_graph::{
+    Graph, MAX_SOURCE_BYTES, SolidRayOptions, TraceOptions, compile_json, trace,
+    trace_exterior_entry_report,
+};
 
 fn read_graph_source(path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut bytes = Vec::new();
@@ -63,18 +66,24 @@ fn preview(
     let capture = output.join(format!("{}-{}.ppm", graph.id(), &revision[..12]));
     save_ppm(&capture, &frame.rgba, size)?;
     let ray = Ray::new(v(0.0, 0.0, -6.0), v(0.0, 0.0, 1.0), 0.001, 12.0)?;
-    let cpu = trace(
+    let cpu_options = TraceOptions {
+        near: 0.001,
+        far: 12.0,
+        tolerance: f64::from(policy.tolerance),
+        iterations: policy.iterations,
+        safety: f64::from(policy.safety),
+    };
+    let cpu = trace(graph, ray.origin(), ray.direction(), cpu_options)?;
+    let solid = trace_exterior_entry_report(
         graph,
         ray.origin(),
         ray.direction(),
-        TraceOptions {
-            near: 0.001,
-            far: 12.0,
-            tolerance: f64::from(policy.tolerance),
-            iterations: policy.iterations,
-            safety: f64::from(policy.safety),
+        SolidRayOptions {
+            ray: cpu_options,
+            max_work: graph.visits() * policy.iterations as usize,
         },
     )?;
+    let bounds = graph.bounds();
     let gpu = renderer.query(device, queue, graph, camera, &[ray], policy)?;
     let gpu_summary = match gpu[0] {
         GraphGpuOutcome::Hit { distance, .. } => format!("hit:{distance:.6}"),
@@ -84,7 +93,7 @@ fn preview(
     };
     println!(
         "{}",
-        serde_json::json!({"id":graph.id(),"sha256":revision,"nodes":graph.nodes().len(),"visits_per_sample":graph.visits(),"distance_semantics":format!("{:?}",graph.distance_semantics()),"ideal_lipschitz":graph.ideal_lipschitz_bound(),"sample_origin":graph.sample(Vec3::ZERO)?,"cpu_center_ray":format!("{cpu:?}"),"gpu_center_ray":gpu_summary,"capture":capture,"full_frame_ms":frame.full_frame_ms,"rgba_bytes":frame.rgba.len()})
+        serde_json::json!({"id":graph.id(),"sha256":revision,"nodes":graph.nodes().len(),"visits_per_sample":graph.visits(),"distance_semantics":format!("{:?}",graph.distance_semantics()),"ideal_lipschitz":graph.ideal_lipschitz_bound(),"bounds":{"min":[bounds.min.x(),bounds.min.y(),bounds.min.z()],"max":[bounds.max.x(),bounds.max.y(),bounds.max.z()]},"sample_origin":graph.sample(Vec3::ZERO)?,"cpu_center_ray":format!("{cpu:?}"),"solid_center_ray":format!("{:?}",solid.outcome),"solid_samples":solid.samples,"solid_charged_visits":solid.charged_visits,"gpu_center_ray":gpu_summary,"capture":capture,"full_frame_ms":frame.full_frame_ms,"rgba_bytes":frame.rgba.len()})
     );
     Ok(())
 }

@@ -218,6 +218,25 @@ pub enum SolidEntryOutcome {
     Exhausted,
 }
 
+/// Query outcome with exact sample-call count and charged worst-case graph visits.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SolidQueryReport {
+    /// The same classification returned by `trace_exterior_entry`.
+    pub outcome: SolidEntryOutcome,
+    /// Number of calls to the graph's CPU sampler.
+    pub samples: u32,
+    /// Sum of validated worst-case visits charged for those samples.
+    pub charged_visits: usize,
+}
+
+fn report(outcome: SolidEntryOutcome, samples: u32, charged_visits: usize) -> SolidQueryReport {
+    SolidQueryReport {
+        outcome,
+        samples,
+        charged_visits,
+    }
+}
+
 /// Trace only the first entry from a sampled exterior start. The supported graph grammar
 /// makes a finite union of nondegenerate closed primitives; an interior shared-face zero
 /// cannot be encountered before the external boundary along an exterior ray in ideal arithmetic.
@@ -228,6 +247,16 @@ pub fn trace_exterior_entry(
     direction: Vec3,
     options: SolidRayOptions,
 ) -> Result<SolidEntryOutcome, MathError> {
+    Ok(trace_exterior_entry_report(graph, origin, direction, options)?.outcome)
+}
+
+/// The same bounded entry query with reproducible work diagnostics.
+pub fn trace_exterior_entry_report(
+    graph: &Graph,
+    origin: Vec3,
+    direction: Vec3,
+    options: SolidRayOptions,
+) -> Result<SolidQueryReport, MathError> {
     let o = options.ray;
     if !o.near.is_finite()
         || !o.far.is_finite()
@@ -250,54 +279,91 @@ pub fn trace_exterior_entry(
     }
     let direction = direction.normalized()?;
     let mut work = 0usize;
+    let mut samples = 0u32;
     let mut distance = o.near;
     for step in 0..o.iterations {
         if work.saturating_add(graph.visits()) > options.max_work {
-            return Ok(SolidEntryOutcome::Indeterminate(
-                SolidQueryIssue::WorkBudget,
+            return Ok(report(
+                SolidEntryOutcome::Indeterminate(SolidQueryIssue::WorkBudget),
+                samples,
+                work,
             ));
         }
-        work += graph.visits();
-        let point = match origin.checked_add(direction.checked_scale(distance)?) {
+        let point = match direction
+            .checked_scale(distance)
+            .and_then(|step| origin.checked_add(step))
+        {
             Ok(v) => v,
-            Err(_) => return Ok(SolidEntryOutcome::Indeterminate(SolidQueryIssue::Numeric)),
+            Err(_) => {
+                return Ok(report(
+                    SolidEntryOutcome::Indeterminate(SolidQueryIssue::Numeric),
+                    samples,
+                    work,
+                ));
+            }
         };
+        work += graph.visits();
+        samples += 1;
         let value = match graph.sample(point) {
             Ok(v) => v,
-            Err(_) => return Ok(SolidEntryOutcome::Indeterminate(SolidQueryIssue::Numeric)),
+            Err(_) => {
+                return Ok(report(
+                    SolidEntryOutcome::Indeterminate(SolidQueryIssue::Numeric),
+                    samples,
+                    work,
+                ));
+            }
         };
         if step == 0 {
             if value < 0.0 {
-                return Ok(SolidEntryOutcome::Indeterminate(
-                    SolidQueryIssue::StartsInside,
+                return Ok(report(
+                    SolidEntryOutcome::Indeterminate(SolidQueryIssue::StartsInside),
+                    samples,
+                    work,
                 ));
             }
             if value <= o.tolerance {
-                return Ok(SolidEntryOutcome::Indeterminate(
-                    SolidQueryIssue::StartNearZero,
+                return Ok(report(
+                    SolidEntryOutcome::Indeterminate(SolidQueryIssue::StartNearZero),
+                    samples,
+                    work,
                 ));
             }
             if ray_segment_excluded(graph, origin, direction, o.near, o.far) {
-                return Ok(SolidEntryOutcome::BoundsMiss);
+                return Ok(report(SolidEntryOutcome::BoundsMiss, samples, work));
             }
         } else {
             if value < 0.0 {
-                return Ok(SolidEntryOutcome::Indeterminate(SolidQueryIssue::Numeric));
+                return Ok(report(
+                    SolidEntryOutcome::Indeterminate(SolidQueryIssue::Numeric),
+                    samples,
+                    work,
+                ));
             }
             if value <= o.tolerance {
-                return Ok(SolidEntryOutcome::ApproximateEntry { distance });
+                return Ok(report(
+                    SolidEntryOutcome::ApproximateEntry { distance },
+                    samples,
+                    work,
+                ));
             }
         }
         let next = distance + value * o.safety;
         if !next.is_finite() || next <= distance {
-            return Ok(SolidEntryOutcome::Indeterminate(SolidQueryIssue::Numeric));
+            return Ok(report(
+                SolidEntryOutcome::Indeterminate(SolidQueryIssue::Numeric),
+                samples,
+                work,
+            ));
         }
         if next > o.far {
-            return Ok(SolidEntryOutcome::Indeterminate(
-                SolidQueryIssue::UncertifiedAdvance,
+            return Ok(report(
+                SolidEntryOutcome::Indeterminate(SolidQueryIssue::UncertifiedAdvance),
+                samples,
+                work,
             ));
         }
         distance = next;
     }
-    Ok(SolidEntryOutcome::Exhausted)
+    Ok(report(SolidEntryOutcome::Exhausted, samples, work))
 }

@@ -90,6 +90,16 @@ returns `BoundsMiss`. If an approximate field step passes `far` while those boxe
 overlap, the result is `Indeterminate(UncertifiedAdvance)` rather than a Miss.
 Work and sample caps return `Indeterminate(WorkBudget)` and `Exhausted`. A grazing
 tangent may exhaust.
+`trace_exterior_entry_report` returns the same outcome with the number of CPU
+sampler calls and charged expanded node visits. Charging uses the validated
+worst-case `Graph::visits()` for each sample, including repeated references; it
+does not count the actual nodes evaluated, which can differ on errors. Rejected
+inputs return an error without a report. The example prints the outward bounds,
+query outcome, sample count and charged visits as JSON. A start inside the solid
+or within tolerance of the zero set stays indeterminate. A tangent or near-tangent
+can produce an approximate entry, exhaustion, or uncertainty; none is a certified
+physical contact. `BoundsMiss` requires strict separation of closed bounds, so
+mere touching cannot be excluded.
 The result is not suitable for authoritative picking/contact without a certified
 floating-point policy. Existing `trace` and WGSL tracing are older zero-set preview
 queries and can classify an interior zero start differently.

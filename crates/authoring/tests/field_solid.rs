@@ -4,7 +4,7 @@ use spatial_math::Vec3;
 use world_authoring::field_graph::{
     IdealRegionEstimate, RegionAabb, RegionExclusion, SampleSign, SolidEntryOutcome,
     SolidQueryIssue, SolidRayOptions, TraceOptions, classify_sample, compile_json, estimate_region,
-    exclude_region, trace_exterior_entry,
+    exclude_region, trace_exterior_entry, trace_exterior_entry_report,
 };
 
 fn v(x: f64, y: f64, z: f64) -> Vec3 {
@@ -355,4 +355,64 @@ fn seeded_valid_unions_match_independent_spheres_and_never_exclude_occupied_poin
         }
     }
     assert_eq!(checked, 1024);
+}
+
+#[test]
+fn query_diagnostics_count_charged_work_without_changing_the_outcome() {
+    let g = graph(vec![sphere("s", 1.0)], "s");
+    let origin = v(0.0, 0.0, -3.0);
+    let direction = v(0.0, 0.0, 1.0);
+    let limited = SolidRayOptions {
+        max_work: 1,
+        ..opts()
+    };
+    let report = trace_exterior_entry_report(&g, origin, direction, limited).unwrap();
+    assert_eq!(
+        report.outcome,
+        trace_exterior_entry(&g, origin, direction, limited).unwrap()
+    );
+    assert_eq!(
+        report.outcome,
+        SolidEntryOutcome::Indeterminate(SolidQueryIssue::WorkBudget)
+    );
+    assert_eq!((report.samples, report.charged_visits), (1, 1));
+    let missed = trace_exterior_entry_report(&g, v(3.0, 0.0, -3.0), direction, opts()).unwrap();
+    assert_eq!(missed.outcome, SolidEntryOutcome::BoundsMiss);
+    assert_eq!((missed.samples, missed.charged_visits), (1, 1));
+
+    let repeated = graph(vec![sphere("s", 1.0), union("u", "s", "s")], "u");
+    let exhausted = trace_exterior_entry_report(
+        &repeated,
+        origin,
+        direction,
+        SolidRayOptions {
+            ray: TraceOptions {
+                iterations: 1,
+                ..opts().ray
+            },
+            ..opts()
+        },
+    )
+    .unwrap();
+    assert_eq!(exhausted.outcome, SolidEntryOutcome::Exhausted);
+    assert_eq!((exhausted.samples, exhausted.charged_visits), (1, 3));
+
+    let inside = trace_exterior_entry_report(&g, Vec3::ZERO, direction, opts()).unwrap();
+    assert_eq!(
+        inside.outcome,
+        SolidEntryOutcome::Indeterminate(SolidQueryIssue::StartsInside)
+    );
+    assert_eq!((inside.samples, inside.charged_visits), (1, 1));
+    let on_surface = trace_exterior_entry_report(&g, v(0.0, 0.0, -1.0), direction, opts()).unwrap();
+    assert_eq!(
+        on_surface.outcome,
+        SolidEntryOutcome::Indeterminate(SolidQueryIssue::StartNearZero)
+    );
+    let overflow =
+        trace_exterior_entry_report(&g, v(f64::MAX, f64::MAX, 0.0), direction, opts()).unwrap();
+    assert_eq!(
+        overflow.outcome,
+        SolidEntryOutcome::Indeterminate(SolidQueryIssue::Numeric)
+    );
+    assert_eq!((overflow.samples, overflow.charged_visits), (1, 1));
 }
