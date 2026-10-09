@@ -379,8 +379,58 @@ impl App {
             target.1
         );
     }
+    fn set_body_key(&mut self, index: usize, pressed: bool) {
+        if self.body_keys[index] != pressed {
+            self.body_keys[index] = pressed;
+            self.body_input_dirty = true;
+        }
+    }
+    fn set_focus(&mut self, focused: bool) {
+        self.focused = focused;
+        if !focused && self.life {
+            self.body_keys = [false; 4];
+            self.body_input_dirty = true;
+        }
+    }
+    fn toggle_pause(&mut self) {
+        if self.won {
+            return;
+        }
+        self.paused = !self.paused;
+        self.status = if self.paused {
+            "PAUSED. PRESS SPACE TO RESUME."
+        } else {
+            "RESUMED."
+        }
+        .into();
+        self.accumulator = Duration::ZERO;
+        self.previous = Instant::now();
+    }
+    fn restart_passage(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let initial = passage::initial()?;
+        self.world = initial.world().clone();
+        self.time = initial.time();
+        self.contact_cache = None;
+        self.selected = None;
+        self.last_camera = None;
+        self.pending_move = false;
+        self.pending_prune = None;
+        self.body_keys = [false; 4];
+        self.body_input_dirty = true;
+        self.paused = false;
+        self.won = false;
+        self.accumulator = Duration::ZERO;
+        self.previous = Instant::now();
+        self.status = "RESTARTED. REACH THE MAGENTA GOAL.".into();
+        Ok(())
+    }
     fn scene(&self) -> Result<Scene, Box<dyn std::error::Error>> {
         let mut scene = Scene::from_world(&self.world)?;
+        if self.passage
+            && let Some((organism, child)) = passage::branch(self.selected, &self.world)
+        {
+            scene.highlight_branch(organism, child, [0.98, 0.96, 0.18]);
+        }
         if self.passage {
             passage::decorate(&mut scene)?;
         }
@@ -393,6 +443,132 @@ impl App {
             )?)?;
         }
         Ok(scene)
+    }
+    fn simulation_tick(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.paused {
+            return Ok(());
+        }
+        let mut events = if self.life && self.pending_move {
+            let source_id = self.source_id.expect("life source exists");
+            let source = self
+                .world
+                .sources()
+                .iter()
+                .find(|s| s.id() == source_id)
+                .expect("life source exists");
+            let position = if self.passage {
+                if source.position().x() < 2.0 {
+                    v(2.4, 3.7, 0.2)
+                } else {
+                    v(0.55, 1.1, 0.0)
+                }
+            } else if source.position().x() == 0.0 {
+                v(2.0, 1.0, 0.0)
+            } else {
+                v(0.0, 2.0, 0.0)
+            };
+            vec![EnvironmentEvent {
+                tick: self.time.ticks() + 1,
+                order: 0,
+                kind: EnvironmentEventKind::MoveSource {
+                    id: source_id,
+                    position,
+                },
+            }]
+        } else {
+            Vec::new()
+        };
+        if let Some((organism, child)) = self.pending_prune {
+            events.push(EnvironmentEvent {
+                tick: self.time.ticks() + 1,
+                order: events.len() as u64,
+                kind: EnvironmentEventKind::PruneBranch { organism, child },
+            });
+        }
+        if self.body_input_dirty {
+            let x = f64::from(i32::from(self.body_keys[3]) - i32::from(self.body_keys[2]));
+            let z = f64::from(i32::from(self.body_keys[0]) - i32::from(self.body_keys[1]));
+            events.push(EnvironmentEvent {
+                tick: self.time.ticks() + 1,
+                order: events.len() as u64,
+                kind: EnvironmentEventKind::SetBodyVelocity {
+                    id: self.body_id.expect("life body exists"),
+                    velocity: v(x * 2.0, 0.0, z * 2.0),
+                },
+            });
+        }
+        let previous_contact = self
+            .world
+            .body()
+            .and_then(|body| body.contact())
+            .map(|hit| hit.collider);
+        let step_started = Instant::now();
+        let result = if self.life {
+            advance_life_cached(
+                &mut self.world,
+                &mut self.time,
+                self.step,
+                &events,
+                &mut self.contact_cache,
+            )
+        } else {
+            advance(&mut self.world, &mut self.time, self.step)
+        };
+        result?;
+        if self.measure {
+            self.step_samples
+                .push(step_started.elapsed().as_secs_f64() * 1000.0);
+        }
+        self.pending_move = false;
+        if self.passage
+            && events
+                .iter()
+                .any(|event| matches!(event.kind, EnvironmentEventKind::MoveSource { .. }))
+        {
+            self.status = if self.world.sources()[0].position().x() > 2.0 {
+                "SOURCE AWAY. BLUE GROWTH CONTINUES.".into()
+            } else {
+                "SOURCE RETURNED. GREEN STEM CAN REGROW.".into()
+            };
+        }
+        self.body_input_dirty = false;
+        let contact = self
+            .world
+            .body()
+            .and_then(|body| body.contact())
+            .map(|hit| hit.collider);
+        if contact != previous_contact && contact.is_some() {
+            if self.passage {
+                self.status = "BLOCKED. LOOK AROUND; CUT GREEN STEM.".into();
+            }
+            eprintln!(
+                "contact tick={} {:?}",
+                self.time.ticks(),
+                self.world.body().and_then(|body| body.contact())
+            );
+        }
+        if let Some((organism, child)) = self.pending_prune.take() {
+            self.selected = None;
+            self.status = if self.passage && organism != self.world.organisms()[0].id() {
+                "BLUE CUT; GREEN STEM STILL BLOCKS".into()
+            } else if self.passage && self.world.organisms()[0].node(1).is_some() {
+                "UPPER BRANCH CUT. CUT LOWER GREEN STEM.".into()
+            } else {
+                "STEM CLEARED. REACH MAGENTA GOAL.".into()
+            };
+            eprintln!(
+                "pruned tick={} organism={} child={}",
+                self.time.ticks(),
+                organism.value(),
+                child
+            );
+        }
+        if self.passage && passage::goal_reached(&self.world) {
+            self.won = true;
+            self.paused = true;
+            self.status = "PASSAGE COMPLETE! PRESS R TO RESTART.".into();
+        }
+        Ok(())
     }
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
         let frame_started = Instant::now();
@@ -408,129 +584,10 @@ impl App {
             self.accumulator += elapsed.min(Duration::from_millis(250));
             let mut steps = 0;
             while self.accumulator >= STEP && steps < 4 {
-                let mut events = if self.life && self.pending_move {
-                    let source_id = self.source_id.expect("life source exists");
-                    let source = self
-                        .world
-                        .sources()
-                        .iter()
-                        .find(|s| s.id() == source_id)
-                        .expect("life source exists");
-                    let position = if self.passage {
-                        if source.position().x() < 2.0 {
-                            v(2.4, 3.7, 0.2)
-                        } else {
-                            v(0.55, 1.1, 0.0)
-                        }
-                    } else if source.position().x() == 0.0 {
-                        v(2.0, 1.0, 0.0)
-                    } else {
-                        v(0.0, 2.0, 0.0)
-                    };
-                    vec![EnvironmentEvent {
-                        tick: self.time.ticks() + 1,
-                        order: 0,
-                        kind: EnvironmentEventKind::MoveSource {
-                            id: source_id,
-                            position,
-                        },
-                    }]
-                } else {
-                    Vec::new()
-                };
-                if let Some((organism, child)) = self.pending_prune {
-                    events.push(EnvironmentEvent {
-                        tick: self.time.ticks() + 1,
-                        order: events.len() as u64,
-                        kind: EnvironmentEventKind::PruneBranch { organism, child },
-                    });
-                }
-                if self.body_input_dirty {
-                    let x = f64::from(i32::from(self.body_keys[3]) - i32::from(self.body_keys[2]));
-                    let z = f64::from(i32::from(self.body_keys[0]) - i32::from(self.body_keys[1]));
-                    events.push(EnvironmentEvent {
-                        tick: self.time.ticks() + 1,
-                        order: events.len() as u64,
-                        kind: EnvironmentEventKind::SetBodyVelocity {
-                            id: self.body_id.expect("life body exists"),
-                            velocity: v(x * 2.0, 0.0, z * 2.0),
-                        },
-                    });
-                }
-                let previous_contact = self
-                    .world
-                    .body()
-                    .and_then(|body| body.contact())
-                    .map(|hit| hit.collider);
-                let step_started = Instant::now();
-                let result = if self.life {
-                    advance_life_cached(
-                        &mut self.world,
-                        &mut self.time,
-                        self.step,
-                        &events,
-                        &mut self.contact_cache,
-                    )
-                } else {
-                    advance(&mut self.world, &mut self.time, self.step)
-                };
-                if let Err(error) = result {
+                if let Err(error) = self.simulation_tick() {
                     eprintln!("simulation failed: {error}");
                     event_loop.exit();
                     return;
-                }
-                if self.measure {
-                    self.step_samples
-                        .push(step_started.elapsed().as_secs_f64() * 1000.0);
-                }
-                self.pending_move = false;
-                if self.passage
-                    && events
-                        .iter()
-                        .any(|event| matches!(event.kind, EnvironmentEventKind::MoveSource { .. }))
-                {
-                    self.status = if self.world.sources()[0].position().x() > 2.0 {
-                        "SOURCE AWAY. BLUE GROWTH CONTINUES.".into()
-                    } else {
-                        "SOURCE RETURNED. GREEN STEM CAN REGROW.".into()
-                    };
-                }
-                self.body_input_dirty = false;
-                let contact = self
-                    .world
-                    .body()
-                    .and_then(|body| body.contact())
-                    .map(|hit| hit.collider);
-                if contact != previous_contact && contact.is_some() {
-                    if self.passage {
-                        self.status = "BLOCKED. LOOK AROUND; CUT GREEN STEM.".into();
-                    }
-                    eprintln!(
-                        "contact tick={} {:?}",
-                        self.time.ticks(),
-                        self.world.body().and_then(|body| body.contact())
-                    );
-                }
-                if let Some((organism, child)) = self.pending_prune.take() {
-                    self.selected = None;
-                    self.status = if self.passage && organism != self.world.organisms()[0].id() {
-                        "BLUE CUT; GREEN STEM STILL BLOCKS".into()
-                    } else if self.passage && self.world.organisms()[0].node(1).is_some() {
-                        "UPPER BRANCH CUT. CUT LOWER GREEN STEM.".into()
-                    } else {
-                        "STEM CLEARED. REACH MAGENTA GOAL.".into()
-                    };
-                    eprintln!(
-                        "pruned tick={} organism={} child={}",
-                        self.time.ticks(),
-                        organism.value(),
-                        child
-                    );
-                }
-                if self.passage && passage::goal_reached(&self.world) {
-                    self.won = true;
-                    self.paused = true;
-                    self.status = "PASSAGE COMPLETE! PRESS R TO RESTART.".into();
                 }
                 self.accumulator -= STEP;
                 steps += 1;
@@ -872,12 +929,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
-            WindowEvent::Focused(false) if self.life => {
-                self.focused = false;
-                self.body_keys = [false; 4];
-                self.body_input_dirty = true;
-            }
-            WindowEvent::Focused(true) => self.focused = true,
+            WindowEvent::Focused(focused) => self.set_focus(focused),
             WindowEvent::CursorMoved { position, .. } => self.cursor = Some(position),
             WindowEvent::CursorLeft { .. } => self.cursor = None,
             WindowEvent::MouseInput {
@@ -917,10 +969,7 @@ impl ApplicationHandler for App {
                     _ => unreachable!(),
                 };
                 let pressed = event.state == ElementState::Pressed;
-                if self.body_keys[index] != pressed {
-                    self.body_keys[index] = pressed;
-                    self.body_input_dirty = true;
-                }
+                self.set_body_key(index, pressed);
             }
             WindowEvent::KeyboardInput { event, .. }
                 if self.focused && event.state == ElementState::Pressed && !event.repeat =>
@@ -928,45 +977,18 @@ impl ApplicationHandler for App {
                 if let PhysicalKey::Code(key) = event.physical_key {
                     match key {
                         KeyCode::Escape => event_loop.exit(),
-                        KeyCode::Space => {
-                            if self.won {
-                                return;
-                            }
-                            self.paused = !self.paused;
-                            self.status = if self.paused {
-                                "PAUSED. PRESS SPACE TO RESUME."
-                            } else {
-                                "RESUMED."
-                            }
-                            .into();
-                            self.accumulator = Duration::ZERO;
-                            self.previous = Instant::now();
-                        }
+                        KeyCode::Space => self.toggle_pause(),
                         KeyCode::KeyN => self.normals = !self.normals,
                         KeyCode::KeyM if self.life => {
                             self.pending_move = true;
                             self.status = "RESOURCE MOVE QUEUED".into();
                         }
                         KeyCode::KeyP if self.life => self.queue_prune(),
-                        KeyCode::KeyR if self.passage => match passage::initial() {
-                            Ok(initial) => {
-                                self.world = initial.world().clone();
-                                self.time = initial.time();
-                                self.contact_cache = None;
-                                self.selected = None;
-                                self.last_camera = None;
-                                self.pending_move = false;
-                                self.pending_prune = None;
-                                self.body_keys = [false; 4];
-                                self.body_input_dirty = true;
-                                self.paused = false;
-                                self.won = false;
-                                self.accumulator = Duration::ZERO;
-                                self.previous = Instant::now();
-                                self.status = "RESTARTED. REACH THE MAGENTA GOAL.".into();
+                        KeyCode::KeyR if self.passage => {
+                            if let Err(error) = self.restart_passage() {
+                                self.status = format!("RESTART FAILED: {error}");
                             }
-                            Err(error) => self.status = format!("RESTART FAILED: {error}"),
-                        },
+                        }
                         KeyCode::ArrowLeft | KeyCode::KeyA if !self.passage => {
                             self.yaw -= 0.15;
                             self.last_camera = None;
@@ -1056,4 +1078,478 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
     event_loop.run_app(&mut App::new(life, passage)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod app_tests {
+    use super::*;
+    use analytic_renderer::{GpuTraversal, Ray};
+    use std::{path::Path, sync::mpsc};
+
+    fn selected_branch(app: &App, organism_index: usize) -> SemanticTarget {
+        let organism = &app.world.organisms()[organism_index];
+        let node = &organism.nodes()[1];
+        let position = node.position();
+        let scene = app.scene().unwrap();
+        let ray = Ray::new(
+            v(position.x(), position.y(), position.z() - 0.6),
+            v(0.0, 0.0, 1.0),
+            0.0,
+            2.0,
+        )
+        .unwrap();
+        match scene.pick_ray(ray).unwrap() {
+            PickOutcome::Hit(hit) => {
+                assert_eq!(
+                    passage::branch(Some(hit.target), &app.world),
+                    Some((organism.id(), node.id()))
+                );
+                hit.target
+            }
+            other => panic!("branch was not pickable: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn passage_input_pause_focus_and_restart() {
+        let mut app = App::new(true, true).unwrap();
+        let initial = app.world.clone();
+        let initial_tick = app.time.ticks();
+        app.set_body_key(0, true);
+        app.simulation_tick().unwrap();
+        assert!(app.world.body().unwrap().position().z() > initial.body().unwrap().position().z());
+        app.toggle_pause();
+        let paused = (app.time, app.world.clone());
+        app.simulation_tick().unwrap();
+        assert_eq!((app.time, app.world.clone()), paused);
+        app.toggle_pause();
+        app.set_focus(false);
+        app.simulation_tick().unwrap();
+        assert_eq!(
+            app.world.body().unwrap().position(),
+            paused.1.body().unwrap().position()
+        );
+        assert!(!app.body_keys.iter().any(|pressed| *pressed));
+        app.restart_passage().unwrap();
+        assert_eq!(app.world, initial);
+        assert_eq!(app.time.ticks(), initial_tick);
+        assert!(!app.paused && !app.won && app.selected.is_none());
+        app.won = true;
+        app.paused = true;
+        app.toggle_pause();
+        assert!(app.paused);
+        app.restart_passage().unwrap();
+        assert!(!app.paused && !app.won);
+        println!("{{\"scenario\":\"input-pause-focus-restart\",\"result\":\"success\"}}");
+    }
+
+    #[test]
+    fn passage_picking_actions_and_highlight() {
+        let mut app = App::new(true, true).unwrap();
+        let wrong = selected_branch(&app, 1);
+        app.selected = Some(wrong);
+        app.queue_prune();
+        app.simulation_tick().unwrap();
+        assert!(app.world.organisms()[0].node(1).is_some());
+        assert!(app.selected.is_none());
+        let correct = selected_branch(&app, 0);
+        let plain = Scene::from_world(&app.world).unwrap();
+        app.selected = Some(correct);
+        let highlighted = app.scene().unwrap();
+        let changed: Vec<_> = plain
+            .primitives()
+            .iter()
+            .zip(highlighted.primitives())
+            .filter(|(before, after)| before.color() != after.color())
+            .collect();
+        assert!(!changed.is_empty());
+        let (organism, child) = passage::branch(Some(correct), &app.world).unwrap();
+        let mut invalid = Scene::from_world(&app.world).unwrap();
+        assert!(!invalid.highlight_branch(organism, child, [f32::NAN, 0.0, 0.0]));
+        assert!(
+            invalid
+                .primitives()
+                .iter()
+                .zip(plain.primitives())
+                .all(|(a, b)| a.color() == b.color())
+        );
+        assert!(changed.iter().all(|(_, after)| {
+            matches!(after.target(), Some(SemanticTarget::GrowthNode { organism: id, node }) if id == organism && node == child)
+                || matches!(after.target(), Some(SemanticTarget::Connection { organism: id, child: node }) if id == organism && node == child)
+        }));
+        app.pending_move = true;
+        app.queue_prune();
+        app.set_body_key(0, true);
+        app.simulation_tick().unwrap();
+        assert!(app.world.sources()[0].position().x() > 2.0);
+        assert!(app.world.organisms()[0].node(1).is_none());
+        assert!(app.selected.is_none());
+        app.selected = Some(correct);
+        app.queue_prune();
+        assert!(app.selected.is_none());
+        assert!(app.pending_prune.is_none());
+        app.pending_move = true;
+        app.simulation_tick().unwrap();
+        assert!(app.world.sources()[0].position().x() < 2.0);
+        println!("{{\"scenario\":\"picking-prune-source-order\",\"result\":\"success\"}}");
+    }
+
+    #[test]
+    fn growing_topology_keeps_only_live_semantic_selection() {
+        let mut app = App::new(true, true).unwrap();
+        let selected = selected_branch(&app, 1);
+        let before = app.world.organisms()[1].nodes().len();
+        app.selected = Some(selected);
+        app.pending_move = true;
+        for _ in 0..120 {
+            app.simulation_tick().unwrap();
+        }
+        assert!(app.world.organisms()[1].nodes().len() > before);
+        assert!(
+            passage::branch(app.selected, &app.world).is_some(),
+            "stable node identity should survive growth"
+        );
+        app.queue_prune();
+        app.simulation_tick().unwrap();
+        app.selected = Some(selected);
+        assert!(
+            passage::branch(app.selected, &app.world).is_none(),
+            "removed branch must not remain actionable"
+        );
+        assert!(
+            !app.scene()
+                .unwrap()
+                .primitives()
+                .iter()
+                .any(|p| p.color() == [0.98, 0.96, 0.18])
+        );
+        app.queue_prune();
+        assert!(app.selected.is_none() && app.pending_prune.is_none());
+        println!("{{\"scenario\":\"growth-and-stale-selection\",\"result\":\"success\"}}");
+    }
+
+    fn read_rgb(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: &wgpu::Texture,
+        size: [u32; 2],
+    ) -> Vec<u8> {
+        let [width, height] = size;
+        let row_bytes = width * 4;
+        let padded = row_bytes.div_ceil(256) * 256;
+        let output = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("passage capture"),
+            size: u64::from(padded) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("passage copy"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: image,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &output,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([encoder.finish()]);
+        let slice = output.slice(..);
+        let (tx, rx) = mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        rx.recv().unwrap().unwrap();
+        let mapped = slice.get_mapped_range().unwrap();
+        let mut rgb = Vec::with_capacity((width * height * 3) as usize);
+        for row in mapped.chunks_exact(padded as usize) {
+            for pixel in row[..row_bytes as usize].chunks_exact(4) {
+                rgb.extend_from_slice(&pixel[..3]);
+            }
+        }
+        rgb
+    }
+
+    fn write_bmp(path: &Path, rgb: &[u8], size: [u32; 2]) {
+        let [width, height] = size;
+        let stride = (width * 3).div_ceil(4) * 4;
+        let data_size = stride * height;
+        let mut bmp = Vec::with_capacity((54 + data_size) as usize);
+        bmp.extend_from_slice(b"BM");
+        bmp.extend_from_slice(&(54 + data_size).to_le_bytes());
+        bmp.extend_from_slice(&[0; 4]);
+        bmp.extend_from_slice(&54_u32.to_le_bytes());
+        bmp.extend_from_slice(&40_u32.to_le_bytes());
+        bmp.extend_from_slice(&width.to_le_bytes());
+        bmp.extend_from_slice(&height.to_le_bytes());
+        bmp.extend_from_slice(&1_u16.to_le_bytes());
+        bmp.extend_from_slice(&24_u16.to_le_bytes());
+        bmp.extend_from_slice(&[0; 24]);
+        for y in (0..height).rev() {
+            for pixel in
+                rgb[(y * width * 3) as usize..((y + 1) * width * 3) as usize].chunks_exact(3)
+            {
+                bmp.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+            }
+            bmp.resize(bmp.len() + (stride - width * 3) as usize, 0);
+        }
+        std::fs::write(path, bmp).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a native GPU; run explicitly with GENESIS_PASSAGE_CAPTURE_DIR for BMP captures"]
+    fn passage_gpu_state_images_match_direct_and_bvh() {
+        let mut app = App::new(true, true).unwrap();
+        let mut scenes = vec![("initial", app.scene().unwrap())];
+        app.selected = Some(selected_branch(&app, 0));
+        scenes.push(("selected", app.scene().unwrap()));
+        app.pending_move = true;
+        app.simulation_tick().unwrap();
+        scenes.push(("source-moved", app.scene().unwrap()));
+        app.queue_prune();
+        app.simulation_tick().unwrap();
+        scenes.push(("pruned", app.scene().unwrap()));
+        app.set_body_key(0, true);
+        for _ in 0..150 {
+            if app.won {
+                break;
+            }
+            app.simulation_tick().unwrap();
+        }
+        assert!(app.won);
+        scenes.push(("victory", app.scene().unwrap()));
+        app.restart_passage().unwrap();
+        scenes.push(("restart", app.scene().unwrap()));
+        let mut dense = WorldState::new(DeterministicSeed(17));
+        for index in 0..16 {
+            dense
+                .spawn_sphere(
+                    Sphere::new(0.4).unwrap(),
+                    Transform::new(v(index as f64 * 0.02, 0.0, 0.0), 1.0).unwrap(),
+                    0.0,
+                )
+                .unwrap();
+        }
+        scenes.push(("dense-overlap", Scene::from_world(&dense).unwrap()));
+        let instance = wgpu::Instance::default();
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            ..Default::default()
+        }))
+        .expect("native GPU required");
+        let info = adapter.get_info();
+        eprintln!(
+            "passage_gpu adapter={} backend={:?} driver={}",
+            info.name, info.backend, info.driver
+        );
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        let renderer =
+            pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+        let camera = Camera::look_at(
+            v(0.0, 0.55 + 0.25_f64.sin() * 5.3, -0.25_f64.cos() * 5.3),
+            v(0.0, 0.55, 0.0),
+            v(0.0, 1.0, 0.0),
+            0.95,
+        )
+        .unwrap();
+        let size = [640, 360];
+        let capture_dir = std::env::var_os("GENESIS_PASSAGE_CAPTURE_DIR");
+        if let Some(dir) = &capture_dir {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let mut frames = Vec::new();
+        for (name, scene) in &scenes {
+            let draw = |mode| {
+                let image = renderer
+                    .draw_with_traversal(
+                        &device,
+                        &queue,
+                        scene,
+                        camera,
+                        mode,
+                        DrawOptions {
+                            size,
+                            normal_debug: false,
+                            surface: None,
+                            timer: None,
+                        },
+                    )
+                    .unwrap();
+                read_rgb(&device, &queue, &image, size)
+            };
+            let direct = draw(GpuTraversal::Direct);
+            let bvh = draw(GpuTraversal::Bvh);
+            assert_eq!(direct, bvh, "{name}: direct/BVH image mismatch");
+            let rays: Vec<_> = [120, 240, 320, 400, 520]
+                .into_iter()
+                .flat_map(|x| {
+                    [90, 180, 270]
+                        .into_iter()
+                        .map(move |y| camera.ray(x, y, size[0], size[1]).unwrap())
+                })
+                .collect();
+            let direct_hits = renderer.query(&device, &queue, scene, &rays).unwrap();
+            let bvh_hits = renderer
+                .query_with_traversal(&device, &queue, scene, &rays, GpuTraversal::Bvh)
+                .unwrap();
+            for (direct, bvh) in direct_hits.iter().zip(bvh_hits.iter()) {
+                assert_eq!(
+                    direct.map(|hit| hit.id),
+                    bvh.map(|hit| hit.id),
+                    "{name}: identity mismatch"
+                );
+                if let (Some(direct), Some(bvh)) = (direct, bvh) {
+                    assert!(
+                        (direct.distance - bvh.distance).abs() <= 1e-4,
+                        "{name}: depth mismatch"
+                    );
+                }
+            }
+            if let Some(dir) = &capture_dir {
+                write_bmp(
+                    &Path::new(dir).join(format!("passage-{name}.bmp")),
+                    &direct,
+                    size,
+                );
+            }
+            eprintln!(
+                "passage_gpu state={name} size={}x{} mismatches=0",
+                size[0], size[1]
+            );
+            frames.push(direct);
+        }
+        for (a, b) in [(0, 1), (0, 2), (0, 3), (0, 4)] {
+            assert_ne!(frames[a], frames[b]);
+        }
+        assert_eq!(frames[0], frames[5], "restart differs from initial state");
+        for size in [[320, 180], [800, 600]] {
+            let image = renderer
+                .draw_with_traversal(
+                    &device,
+                    &queue,
+                    &scenes[0].1,
+                    camera,
+                    GpuTraversal::Bvh,
+                    DrawOptions {
+                        size,
+                        normal_debug: false,
+                        surface: None,
+                        timer: None,
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                read_rgb(&device, &queue, &image, size).len(),
+                (size[0] * size[1] * 3) as usize
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "release-profile native GPU offscreen measurement; no window presentation"]
+    fn passage_gpu_resolution_measurement() {
+        let mut app = App::new(true, true).unwrap();
+        let static_scene = app.scene().unwrap();
+        app.pending_move = true;
+        for _ in 0..120 {
+            app.simulation_tick().unwrap();
+        }
+        let growing_scene = app.scene().unwrap();
+        let instance = wgpu::Instance::default();
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            ..Default::default()
+        }))
+        .expect("native GPU required");
+        let features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: features,
+            ..Default::default()
+        }))
+        .unwrap();
+        let renderer =
+            pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+        let timer = GpuTimer::new(&device);
+        let camera = Camera::look_at(
+            v(0.0, 0.55 + 0.25_f64.sin() * 5.3, -0.25_f64.cos() * 5.3),
+            v(0.0, 0.55, 0.0),
+            v(0.0, 1.0, 0.0),
+            0.95,
+        )
+        .unwrap();
+        eprintln!(
+            "passage_offscreen adapter={:?} timestamp={} profile={}",
+            adapter.get_info(),
+            timer.is_some(),
+            if cfg!(debug_assertions) {
+                "dev"
+            } else {
+                "release"
+            }
+        );
+        for (name, scene) in [("initial", &static_scene), ("growing", &growing_scene)] {
+            for size in [[1280, 720], [1920, 1080], [2560, 1440]] {
+                let mut total = Vec::new();
+                let mut gpu = Vec::new();
+                for i in 0..12 {
+                    let start = Instant::now();
+                    renderer
+                        .draw_with_traversal(
+                            &device,
+                            &queue,
+                            scene,
+                            camera,
+                            GpuTraversal::Bvh,
+                            DrawOptions {
+                                size,
+                                normal_debug: false,
+                                surface: None,
+                                timer: timer.as_ref(),
+                            },
+                        )
+                        .unwrap();
+                    let gpu_ms = if let Some(timer) = &timer {
+                        Some(timer.read_ms(&device, &queue).unwrap())
+                    } else {
+                        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                        None
+                    };
+                    if i >= 2 {
+                        total.push(start.elapsed().as_secs_f64() * 1000.0);
+                        if let Some(ms) = gpu_ms {
+                            gpu.push(ms);
+                        }
+                    }
+                }
+                let (total_p50, total_p95) = median_p95(&total);
+                let (gpu_p50, gpu_p95) = median_p95(&gpu);
+                eprintln!(
+                    "passage_offscreen scene={name} primitives={} size={}x{} total_ms_p50={total_p50:.3} total_ms_p95={total_p95:.3} gpu_ms_p50={gpu_p50:.3} gpu_ms_p95={gpu_p95:.3} samples={} gpu_samples={}",
+                    scene.primitives().len(),
+                    size[0],
+                    size[1],
+                    total.len(),
+                    gpu.len()
+                );
+            }
+        }
+    }
 }

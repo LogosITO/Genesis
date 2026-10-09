@@ -509,6 +509,28 @@ impl Scene {
     pub fn primitives(&self) -> &[Primitive] {
         &self.primitives
     }
+    /// Colors the existing node and connection for a selected authoritative branch.
+    /// Returns false when the branch is absent; picking geometry and world state are unchanged.
+    pub fn highlight_branch(&mut self, organism: EntityId, child: u32, color: [f32; 3]) -> bool {
+        if color
+            .iter()
+            .any(|component| !component.is_finite() || !(0.0..=1.0).contains(component))
+        {
+            return false;
+        }
+        let mut found = false;
+        for primitive in &mut self.primitives {
+            if matches!(primitive.target,
+                Some(SemanticTarget::GrowthNode { organism: id, node }) if id == organism && node == child)
+                || matches!(primitive.target,
+                    Some(SemanticTarget::Connection { organism: id, child: node }) if id == organism && node == child)
+            {
+                primitive.color = color;
+                found = true;
+            }
+        }
+        found
+    }
     /// Nearest analytic boundary intersection in the closed ray interval.
     pub fn intersect(&self, ray: Ray) -> Option<Hit> {
         let mut closest: Option<Hit> = None;
