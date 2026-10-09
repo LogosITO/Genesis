@@ -50,7 +50,7 @@ cargo run --release -p first-light --locked -- --passage
 cargo test -p first-light passage_playthrough --locked -- --nocapture
 ```
 
-The orange body must cross a growing analytic branch after moving a finite resource source and pruning the stem. An in-window HUD shows controls and feedback; the headless playthrough prints a JSON success record. See the [player guide](docs/guides/the-passage.md) and [research record](docs/research/first-playable.md). On Windows, `powershell -ExecutionPolicy Bypass -File tools/package-passage.ps1` creates a local portable folder under `target/dist/`; it is not published.
+The orange body must cross a growing analytic branch after moving a finite resource source and pruning the stem. An in-window HUD shows controls and feedback; the headless playthrough prints a JSON success record. See the [player guide](docs/guides/the-passage.md), [manual QA checklist](docs/guides/playtest-qa.md), and [research record](docs/research/first-playable.md). On Windows, `powershell -ExecutionPolicy Bypass -File tools/package-passage.ps1` creates and checks a local ZIP under `target/dist/`; it is not published.
 
 ```sh
 cargo fmt --all -- --check

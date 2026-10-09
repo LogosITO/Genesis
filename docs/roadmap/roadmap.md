@@ -49,7 +49,7 @@ A small lane, one controllable body, two finite-resource organisms, tick-indexed
 
 ## Next candidate
 
-Validate the portable build and complete a short external playtest on Windows, then investigate camera/picking usability and GPU frame pacing with a measured full-frame workload.
+Complete the manual native QA checklist and verify the extracted Windows ZIP on a second supported machine. Check hosted Windows/Linux CI after the local commits are integrated. Then run a small external playtest using the offline feedback template, and investigate any observed camera, picking, or frame-pacing failures.
 
 ## Later research
 Growth grammars and L-systems, resource transport and recycling, destruction and recovery rules, broader physical interaction, embedding/FFI, standalone UI, and authored language. Sequence and scope will follow experiments, not promises.

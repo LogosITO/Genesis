@@ -4,7 +4,9 @@
 
 ## Run
 
-Build from source with Rust 1.94: `cargo run --release -p first-light --locked -- --passage`. On Windows, a portable package can be made with `powershell -ExecutionPolicy Bypass -File tools/package-passage.ps1`; open `PLAY.cmd` in the resulting directory. The executable needs a Vulkan or DirectX 12 adapter and a current graphics driver. It does not need a network connection or runtime assets. Linux compilation is covered by source CI; this package script is Windows-only.
+Build from source with Rust 1.94: `cargo run --release -p first-light --locked -- --passage`. On Windows, `powershell -ExecutionPolicy Bypass -File tools/package-passage.ps1` builds a portable ZIP in `target/dist/` and verifies extraction into a path with spaces. Extract the ZIP outside the repository and open `PLAY.cmd`. The ZIP includes a build ID and executable hash in `BUILD.txt`, an offline playtest card, a feedback template, the project licenses, and dependency license files. Neither Rust, Cargo, network access, nor source files are needed at runtime.
+
+The only tested native configuration so far is Windows x86_64 with an NVIDIA GeForce RTX 4070 SUPER using Vulkan and Rust's `wgpu` 30.0.1. A Vulkan or DirectX 12 adapter and a suitable driver are required. Minimum GPU generation, VRAM, Windows version, and other adapters have **not** been established. The launcher keeps an initialization error visible if the GPU cannot start. Linux source compilation is configured in CI; the portable ZIP is Windows-only.
 
 ## Objective and controls
 
@@ -21,7 +23,7 @@ Move the orange sphere through the narrow passage to the magenta goal. The two c
 | R | Restart the original scenario |
 | Esc | Exit |
 
-The HUD shows the selected target, tick, current status, pause state, and success. Inputs are cleared on focus loss. A cut or source move queued while paused waits until simulation resumes. A stale, root, ambiguous, or missing target cannot authorize a cut. Restart discards pending actions, selection, and derived collision state. You can restart any time if growth or resource use makes the route hard to read.
+The HUD shows the selected target, source position (NEAR/AWAY), central stem state (BLOCKS/CLEAR), current status, pause state, and success. The window title shows the tick and node counts. Inputs are cleared on focus loss. A cut or source move queued while paused waits until simulation resumes. A stale, root, ambiguous, or missing target cannot authorize a cut. Cutting the blue organism does not clear the green route; the HUD says so. Restart discards pending actions, selection, and derived collision state. You can restart any time if growth or resource use makes the route hard to read.
 
 ## Engineering notes
 
@@ -29,4 +31,4 @@ The lane walls are ordinary analytic spheres and participate in swept-sphere con
 
 `Scene::from_world` builds a disposable renderer snapshot. Semantic picks map back to stable world and node IDs. Pruning and source moves use typed tick-indexed events. Contact uses the CPU analytic swept-sphere BVH; the GPU is used for display only. Save/load and replay are exercised by the headless playthrough test: `cargo test -p first-light passage_playthrough --locked -- --nocapture`. The test prints one JSON result on success. Player-facing save/load is not offered, avoiding ambiguous file overwrite rules.
 
-Known limitations: the wall spheres overlap visibly, the lane can be walked around, and the demo's objective therefore requires the world-state changes as well as goal position. Contact has no sliding or depenetration. Overlapping organism primitives are separate solids, not a watertight union. Camera picking can be ambiguous near overlaps. Growth can fill the view over time; use **R** to reset. A manual end-to-end playtest on another Windows system and hosted Windows/Linux CI are still needed before a public playable claim.
+Known limitations: the wall spheres overlap visibly, the lane can be walked around, and the demo's objective therefore requires the world-state changes as well as goal position. Contact has no sliding or depenetration. Overlapping organism primitives are separate solids, not a watertight union. The lower green stem can be partially hidden by the walls; use the arrow keys to change the view. CPU semantic picking confirms it remains selectable in the default view, but a visual usability check remains necessary. Growth can fill the view over time; use **R** to reset. A complete manual playthrough remains pending. Use the [manual QA checklist](playtest-qa.md) before distributing a build. No external tester results or hosted Windows/Linux CI outcome are claimed here.

@@ -124,7 +124,7 @@ pub fn measure_cpu() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use analytic_renderer::{PickOutcome, Ray};
+    use analytic_renderer::{Camera, PickOutcome, Ray};
     use world_simulation::EnvironmentEventKind;
     use world_simulation::contact::{ContactScene, SweepOutcome};
 
@@ -247,6 +247,17 @@ mod tests {
         }
         assert_eq!(game, replay);
         assert!(game.world().organisms()[0].node(child).is_none());
+        assert_eq!(
+            branch(
+                Some(SemanticTarget::GrowthNode {
+                    organism: first,
+                    node: child,
+                }),
+                game.world(),
+            ),
+            None,
+            "a pruned selection must not authorize another cut"
+        );
         let after = ContactScene::from_world(game.world()).unwrap();
         assert_eq!(
             after
@@ -271,6 +282,65 @@ mod tests {
             "{{\"scenario\":\"the-passage\",\"result\":\"success\",\"tick\":{},\"z\":{}}}",
             game.time().ticks(),
             game.world().body().unwrap().position().z()
+        );
+    }
+
+    #[test]
+    fn cutting_other_organism_does_not_clear_passage() {
+        let mut game = initial().unwrap();
+        let other = &game.world().organisms()[1];
+        let other_id = other.id();
+        let child = other.nodes()[1].id();
+        assert_eq!(
+            branch(
+                Some(SemanticTarget::Connection {
+                    organism: other_id,
+                    child,
+                }),
+                game.world(),
+            ),
+            Some((other_id, child))
+        );
+        game.schedule(
+            game.time().ticks() + 1,
+            EnvironmentEventKind::PruneBranch {
+                organism: other_id,
+                child,
+            },
+        )
+        .unwrap();
+        game.tick().unwrap();
+        assert!(game.world().organisms()[0].node(1).is_some());
+        assert!(game.world().organisms()[1].node(child).is_none());
+        assert!(!goal_reached(game.world()));
+    }
+
+    #[test]
+    fn initial_camera_exposes_lower_green_stem_for_selection() {
+        let game = initial().unwrap();
+        let scene = Scene::from_world(game.world()).unwrap();
+        let organism = game.world().organisms()[0].id();
+        let camera = Camera::look_at(
+            point(0.0, 0.55 + 0.25_f64.sin() * 5.3, -0.25_f64.cos() * 5.3),
+            point(0.0, 0.55, 0.0),
+            point(0.0, 1.0, 0.0),
+            0.95,
+        )
+        .unwrap();
+        let mut visible = 0;
+        for y in 0..90 {
+            for x in 0..160 {
+                if matches!(scene.pick_pixel(camera, x, y, 160, 90, 100.0).unwrap(),
+                    PickOutcome::Hit(hit) if hit.target == SemanticTarget::GrowthNode { organism, node: 1 }
+                        || hit.target == SemanticTarget::Connection { organism, child: 1 })
+                {
+                    visible += 1;
+                }
+            }
+        }
+        assert!(
+            visible >= 10,
+            "lower stem has only {visible} selectable pixels at 160x90"
         );
     }
 }

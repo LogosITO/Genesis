@@ -72,7 +72,8 @@ impl Graphics {
                 force_fallback_adapter: false,
                 ..Default::default()
             })
-            .await?;
+            .await
+            .map_err(|error| format!("No compatible Vulkan or DirectX 12 GPU adapter: {error}"))?;
         let info = adapter.get_info();
         eprintln!(
             "adapter={} backend={:?} driver={} wgpu=30.0.1",
@@ -86,7 +87,8 @@ impl Graphics {
                 required_limits: wgpu::Limits::default(),
                 ..Default::default()
             })
-            .await?;
+            .await
+            .map_err(|error| format!("GPU device initialization failed: {error}"))?;
         let uncaptured_error = Arc::clone(&lost);
         device.on_uncaptured_error(Arc::new(move |error| {
             eprintln!("GPU error: {error}");
@@ -230,7 +232,7 @@ impl App {
             won: false,
             focused: true,
             status: if passage {
-                "M MOVE SOURCE; P CUT STEM; REACH GOAL.".into()
+                "MOVE SOURCE, CUT STEM, REACH GOAL".into()
             } else {
                 String::new()
             },
@@ -294,10 +296,14 @@ impl App {
         ) {
             Ok(PickOutcome::Hit(hit)) => {
                 self.selected = Some(hit.target);
-                self.status = if passage::branch(self.selected, &self.world).is_some() {
-                    "BRANCH SELECTED. PRESS P TO CUT."
-                } else {
-                    "TARGET SELECTED; ONLY BRANCHES CAN BE CUT."
+                self.status = match passage::branch(self.selected, &self.world) {
+                    Some((organism, _))
+                        if self.passage && organism != self.world.organisms()[0].id() =>
+                    {
+                        "BLUE PICKED; GREEN STEM STILL BLOCKS"
+                    }
+                    Some(_) => "BRANCH SELECTED. PRESS P TO CUT.",
+                    None => "ONLY GROWTH BRANCHES CAN BE CUT",
                 }
                 .into();
                 eprintln!(
@@ -310,12 +316,12 @@ impl App {
             }
             Ok(PickOutcome::Miss) => {
                 self.selected = None;
-                self.status = "NO TARGET UNDER CURSOR".into();
+                self.status = "NO TARGET; USE ARROWS TO CHANGE VIEW".into();
                 eprintln!("selection: miss");
             }
             Ok(PickOutcome::Ambiguous { first, second }) => {
                 self.selected = None;
-                self.status = "OVERLAPPING TARGETS; TRY ANOTHER ANGLE".into();
+                self.status = "OVERLAP; LOOK AROUND AND CLICK AGAIN".into();
                 eprintln!("selection: ambiguous {first:?} / {second:?}; no cut authorized");
             }
             Ok(PickOutcome::Indeterminate) => {
@@ -497,7 +503,7 @@ impl App {
                     .map(|hit| hit.collider);
                 if contact != previous_contact && contact.is_some() {
                     if self.passage {
-                        self.status = "BLOCKED. MOVE SOURCE AND CUT LOWER STEM.".into();
+                        self.status = "BLOCKED. LOOK AROUND; CUT GREEN STEM.".into();
                     }
                     eprintln!(
                         "contact tick={} {:?}",
@@ -507,7 +513,9 @@ impl App {
                 }
                 if let Some((organism, child)) = self.pending_prune.take() {
                     self.selected = None;
-                    self.status = if self.passage && self.world.organisms()[0].node(1).is_some() {
+                    self.status = if self.passage && organism != self.world.organisms()[0].id() {
+                        "BLUE CUT; GREEN STEM STILL BLOCKS".into()
+                    } else if self.passage && self.world.organisms()[0].node(1).is_some() {
                         "UPPER BRANCH CUT. CUT LOWER GREEN STEM.".into()
                     } else {
                         "STEM CLEARED. REACH MAGENTA GOAL.".into()
@@ -559,21 +567,22 @@ impl App {
                 Some(SemanticTarget::Sphere(_)) => "WALL".into(),
                 None => "NONE".into(),
             };
-            let counts: Vec<_> = self
-                .world
-                .organisms()
-                .iter()
-                .map(|tree| tree.nodes().len())
-                .collect();
             Some([
-                "THE PASSAGE - REACH THE MAGENTA GOAL".into(),
-                "WASD MOVE | ARROWS CAMERA | CLICK SELECT".into(),
-                "P CUT | M RESOURCE | SPACE PAUSE | R RESTART".into(),
+                "ORANGE PLAYER -> MAGENTA GOAL".into(),
+                "WASD MOVE | ARROWS LOOK | CLICK GREEN STEM".into(),
+                "M SOURCE | P CUT | SPACE PAUSE | R RESTART".into(),
                 format!(
-                    "SEL: {selected} | NODES {}/{} | TICK {}",
-                    counts[0],
-                    counts[1],
-                    self.time.ticks()
+                    "SOURCE {} | STEM {} | SEL {selected}",
+                    if self.world.sources()[0].position().x() > 2.0 {
+                        "AWAY"
+                    } else {
+                        "NEAR"
+                    },
+                    if self.world.organisms()[0].node(1).is_some() {
+                        "BLOCKS"
+                    } else {
+                        "CLEAR"
+                    }
                 ),
                 format!(
                     "{}: {}",
