@@ -28,7 +28,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, windows-2022]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Linux window-system build dependencies
@@ -49,3 +49,18 @@ jobs:
         run: cargo test --workspace --locked
       - name: Rustdoc
         run: cargo doc --workspace --no-deps --locked
+      - name: Verify portable Windows package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & ./tools/package-passage.ps1
+          $archive = Get-ChildItem target/dist -Filter 'the-passage-*.zip' | Select-Object -First 1
+          if (-not $archive) { throw 'Windows package ZIP missing' }
+          $checksum = (Get-Content -LiteralPath "$($archive.FullName).sha256" -Raw).Split(' ')[0]
+          if ($checksum -ne (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash) { throw 'Windows package checksum mismatch' }
+          $check = Join-Path $env:RUNNER_TEMP 'Genesis package smoke test'
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $check
+          $exe = Get-ChildItem -LiteralPath $check -Recurse -Filter ThePassage.exe | Select-Object -First 1
+          if (-not $exe) { throw 'Extracted executable missing' }
+          & $exe.FullName --passage-measure
+          if ($LASTEXITCODE -ne 0) { throw 'Extracted headless Passage check failed' }

@@ -72,6 +72,8 @@ $zipTime = [datetime]'1980-01-01T00:00:00'
 Get-ChildItem -LiteralPath $destination -Recurse -Force | ForEach-Object { $_.LastWriteTime = $zipTime }
 (Get-Item -LiteralPath $destination).LastWriteTime = $zipTime
 Compress-Archive -LiteralPath $destination -DestinationPath $archive -CompressionLevel Optimal
+$archiveHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+Set-Content -LiteralPath "$archive.sha256" -Value "$archiveHash  $(Split-Path $archive -Leaf)" -Encoding ascii
 $check = Join-Path $env:TEMP "Genesis package check $buildId"
 if (Test-Path -LiteralPath $check) { throw "Verification directory already exists: $check" }
 Expand-Archive -LiteralPath $archive -DestinationPath $check
