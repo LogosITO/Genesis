@@ -8,3 +8,5 @@ The [evidence ledger](../reference/research/references/) distinguishes establish
 The [First Structure measurement record](../reference/research/first-structure-measurements/) compares bounded node counts in development and release builds, with separate GPU timing and explicit snapshot overflow.
 
 The [First Scale measurement record](../reference/research/first-scale-benchmark/) reports the 381-primitive GPU scene, direct-path scaling, and the CPU-only BVH experiment.
+
+The [GPU BVH experiment](../reference/research/gpu-bvh-acceleration/) compares CPU direct, CPU BVH, GPU direct, and GPU BVH using offscreen readback and matched-scene timings.

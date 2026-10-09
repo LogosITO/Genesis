@@ -4,7 +4,8 @@ struct Camera {
     right: vec4<f32>,
     up: vec4<f32>,
     view: vec4<f32>, // width, height, near, far
-    settings: vec4<f32>, // x = 0 lit, 1 normals; y = object count
+    settings: vec4<f32>, // x = 0 lit, 1 normals
+    scene: vec4<u32>, // primitive count, BVH node count, unused, BVH enabled
 }
 struct Primitive {
     center_kind: vec4<f32>, // w = 0 sphere, 1 AABB, 2 capsule; xyz = capsule A
@@ -27,11 +28,18 @@ struct Hit {
     primitive_index: u32,
     valid: bool,
 }
+struct BvhNode {
+    lower: vec4<f32>,
+    upper: vec4<f32>,
+    info: vec4<u32>, // subtree exit, leaf count, unused, unused
+    leaf: vec4<u32>, // primitive indices for leaves of at most four
+}
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<storage, read> objects: array<Primitive>;
 @group(0) @binding(2) var image: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(3) var<storage, read> query_rays: array<Ray>;
 @group(0) @binding(4) var<storage, read_write> query_hits: array<GpuHit>;
+@group(0) @binding(5) var<storage, read> nodes: array<BvhNode>;
 
 fn no_hit() -> Hit {
     return Hit(0.0, vec3<f32>(0.0), 0xffffffffu, 0u, false);
@@ -135,19 +143,17 @@ fn capsule_hit(p: Primitive, origin: vec3<f32>, direction: vec3<f32>, near: f32,
     return best;
 }
 
-fn trace(origin: vec3<f32>, direction: vec3<f32>, near: f32, far: f32) -> Hit {
+fn intersect_one(p: Primitive, origin: vec3<f32>, direction: vec3<f32>, near: f32, far: f32) -> Hit {
+    if (p.center_kind.w == 0.0) { return sphere_hit(p, origin, direction, near, far); }
+    if (p.center_kind.w == 1.0) { return box_hit(p, origin, direction, near, far); }
+    return capsule_hit(p, origin, direction, near, far);
+}
+
+fn trace_direct(origin: vec3<f32>, direction: vec3<f32>, near: f32, far: f32) -> Hit {
     var closest = no_hit();
     var limit = far;
-    for (var i = 0u; i < min(u32(camera.settings.y), arrayLength(&objects)); i++) {
-        let p = objects[i];
-        var candidate = no_hit();
-        if (p.center_kind.w == 0.0) {
-            candidate = sphere_hit(p, origin, direction, near, limit);
-        } else if (p.center_kind.w == 1.0) {
-            candidate = box_hit(p, origin, direction, near, limit);
-        } else {
-            candidate = capsule_hit(p, origin, direction, near, limit);
-        }
+    for (var i = 0u; i < min(camera.scene.x, arrayLength(&objects)); i++) {
+        var candidate = intersect_one(objects[i], origin, direction, near, limit);
         if (candidate.valid && (!closest.valid || candidate.distance < closest.distance)) {
             candidate.primitive_index = i;
             closest = candidate;
@@ -155,6 +161,73 @@ fn trace(origin: vec3<f32>, direction: vec3<f32>, near: f32, far: f32) -> Hit {
         }
     }
     return closest;
+}
+
+fn node_intersects(node: BvhNode, origin: vec3<f32>, direction: vec3<f32>, near: f32, far: f32) -> bool {
+    var entry = near;
+    var exit = far;
+    for (var axis = 0u; axis < 3u; axis++) {
+        if (direction[axis] == 0.0) {
+            if (origin[axis] < node.lower[axis] || origin[axis] > node.upper[axis]) { return false; }
+            continue;
+        }
+        let a = (node.lower[axis] - origin[axis]) / direction[axis];
+        let b = (node.upper[axis] - origin[axis]) / direction[axis];
+        if (!(abs(a) <= 3.402823e38 && abs(b) <= 3.402823e38)) { return true; }
+        let slack = 8e-6 * max(max(abs(a), abs(b)), 1.0);
+        entry = max(entry, min(a, b) - slack);
+        exit = min(exit, max(a, b) + slack);
+        if (entry > exit) { return false; }
+    }
+    return true;
+}
+
+fn trace_bvh(origin: vec3<f32>, direction: vec3<f32>, near: f32, far: f32) -> Hit {
+    let node_count = camera.scene.y;
+    if (node_count == 0u || node_count > arrayLength(&nodes)) {
+        return trace_direct(origin, direction, near, far);
+    }
+    var closest = no_hit();
+    var cursor = 0u;
+    for (var visited = 0u; visited < node_count; visited++) {
+        if (cursor == node_count) { return closest; }
+        if (cursor > node_count) { return trace_direct(origin, direction, near, far); }
+        let node = nodes[cursor];
+        let subtree_exit = node.info.x;
+        let leaf_count = node.info.y;
+        if (subtree_exit <= cursor || subtree_exit > node_count || leaf_count > 4u) {
+            return trace_direct(origin, direction, near, far);
+        }
+        if (!node_intersects(node, origin, direction, near, far)) {
+            cursor = subtree_exit;
+            continue;
+        }
+        if (leaf_count == 0u) {
+            if (cursor + 1u >= subtree_exit) { return trace_direct(origin, direction, near, far); }
+            cursor += 1u;
+            continue;
+        }
+        for (var slot = 0u; slot < leaf_count; slot++) {
+            let primitive_index = node.leaf[slot];
+            if (primitive_index >= camera.scene.x || primitive_index >= arrayLength(&objects)) {
+                return trace_direct(origin, direction, near, far);
+            }
+            var candidate = intersect_one(objects[primitive_index], origin, direction, near, far);
+            if (candidate.valid && (!closest.valid || candidate.distance < closest.distance ||
+                (candidate.distance == closest.distance && primitive_index < closest.primitive_index))) {
+                candidate.primitive_index = primitive_index;
+                closest = candidate;
+            }
+        }
+        cursor = subtree_exit;
+    }
+    if (cursor != node_count) { return trace_direct(origin, direction, near, far); }
+    return closest;
+}
+
+fn trace(origin: vec3<f32>, direction: vec3<f32>, near: f32, far: f32) -> Hit {
+    if (camera.scene.w == 1u) { return trace_bvh(origin, direction, near, far); }
+    return trace_direct(origin, direction, near, far);
 }
 
 @compute @workgroup_size(8, 8)

@@ -4,7 +4,10 @@
 mod acceleration;
 mod gpu;
 pub use acceleration::{Bvh, PrimitiveBounds};
-pub use gpu::{DrawOptions, GpuRenderer, GpuResult, GpuTimer};
+pub use gpu::{
+    DrawOptions, GpuAccelerationStats, GpuRenderer, GpuResult, GpuTimer, GpuTraversal,
+    GpuUploadStats,
+};
 
 use analytic_field::{AxisAlignedBox, Capsule, Sphere};
 use spatial_math::{Transform, Vec3};
@@ -28,6 +31,13 @@ pub enum RenderError {
     /// Primitive buffer exceeds the configured budget or the device's binding/buffer limit.
     PrimitiveCapacity {
         /// Required storage bytes, including one dummy record for an empty scene.
+        requested_bytes: u64,
+        /// Smallest of the application budget and device limits.
+        allowed_bytes: u64,
+    },
+    /// BVH storage exceeds the configured acceleration budget or an adapter limit.
+    AccelerationCapacity {
+        /// Required bytes for the flattened hierarchy.
         requested_bytes: u64,
         /// Smallest of the application budget and device limits.
         allowed_bytes: u64,

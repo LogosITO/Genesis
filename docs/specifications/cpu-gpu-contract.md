@@ -26,4 +26,4 @@ The authoritative world permits 512 ordinary spheres and up to 4 × 48 growth no
 
 ## Open questions
 
-Numerically certified conservative steps, robust intersections over larger dynamic ranges, CSG solid-boundary semantics, GPU field lowering, cross-adapter parity, and high-object-count acceleration remain research tasks. Any future change must retain explicit uncertainty rather than silently treating iteration exhaustion as a miss.
+Numerically certified conservative steps, robust intersections over larger dynamic ranges, CSG solid-boundary semantics, GPU field lowering, and cross-adapter parity remain research tasks. Foundation 0.6.1 adds an experimental stackless GPU BVH. On 16,861 deterministic rays in the real 381-primitive scene, GPU direct and GPU BVH agreed exactly, while one CPU/GPU identity difference was a near-distance tie. This is sampled evidence, not a universal guarantee. Invalid BVH traversal metadata or visit exhaustion falls back to direct; no such event is converted to a miss. See [GPU BVH measurements](../research/gpu-bvh-acceleration.md).

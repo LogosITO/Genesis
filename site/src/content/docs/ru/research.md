@@ -8,3 +8,5 @@ template: splash
 [Измерения First Structure](../reference/research/first-structure-measurements/) сравнивают ограниченные размеры структуры в dev и release-сборках и отдельно отмечают переполнение GPU-снимка.
 
 [Измерения First Scale](../reference/research/first-scale-benchmark/) показывают сцену из 381 примитива, масштабирование прямого GPU-пути и отдельный эксперимент с CPU BVH.
+
+[Эксперимент GPU BVH](../reference/research/gpu-bvh-acceleration/) сравнивает CPU и GPU пути по реальному считыванию результатов и замерам одинаковых сцен. Технический отчёт пока доступен на английском языке.

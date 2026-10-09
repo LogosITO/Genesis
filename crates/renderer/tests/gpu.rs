@@ -3,7 +3,9 @@
 use analytic_field::{
     AxisAlignedBox, Capsule, Ray as FieldRay, RayOptions, RayOutcome, Sphere, trace,
 };
-use analytic_renderer::{Bvh, Camera, DrawOptions, GpuRenderer, GpuTimer, Primitive, Ray, Scene};
+use analytic_renderer::{
+    Bvh, Camera, DrawOptions, GpuRenderer, GpuTimer, GpuTraversal, Primitive, Ray, Scene,
+};
 use spatial_math::{Transform, Vec3};
 use std::{sync::mpsc, time::Instant};
 use world_state::{DeterministicSeed, GrowthParameters, WorldState};
@@ -64,6 +66,322 @@ fn cpu_bvh_matches_real_381_primitive_world() {
             }
         }
     }
+}
+
+#[test]
+#[ignore = "requires a compatible native GPU; run explicitly"]
+fn gpu_bvh_broad_real_scene_differential() {
+    let scene = Scene::from_world(&four_organism_world()).unwrap();
+    let bvh = Bvh::build(&scene).unwrap();
+    let mut rays: Vec<_> = (0..160)
+        .flat_map(|x| {
+            (0..100).map(move |y| {
+                r(
+                    v((x as f64 - 80.0) * 0.06, y as f64 * 0.06, -8.0),
+                    v(0.0, 0.0, 1.0),
+                )
+            })
+        })
+        .collect();
+    for x in -20..=20 {
+        for y in 0..=20 {
+            rays.push(r(
+                v(-5.0, y as f64 * 0.25, -8.0),
+                v(1.0, 0.0, 0.1 + x as f64 * 0.025),
+            ));
+        }
+    }
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        ..Default::default()
+    }))
+    .expect("GPU adapter required");
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let renderer =
+        pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+    let direct = renderer.query(&device, &queue, &scene, &rays).unwrap();
+    let accelerated = renderer
+        .query_with_traversal(&device, &queue, &scene, &rays, GpuTraversal::Bvh)
+        .unwrap();
+    let mut hits = 0;
+    let mut cpu_gpu_differences = 0;
+    for (index, ((ray, direct), accelerated)) in rays
+        .iter()
+        .zip(direct.iter().copied())
+        .zip(accelerated)
+        .enumerate()
+    {
+        let cpu = scene.intersect(*ray);
+        let cpu_bvh = bvh.intersect(*ray);
+        assert_eq!(
+            cpu.map(|hit| hit.id),
+            cpu_bvh.map(|hit| hit.id),
+            "CPU ray {index}"
+        );
+        if let (Some(cpu), Some(cpu_bvh)) = (cpu, cpu_bvh) {
+            assert_eq!(cpu.distance, cpu_bvh.distance, "CPU ray {index}");
+            assert_eq!(cpu.normal, cpu_bvh.normal, "CPU ray {index}");
+        }
+        assert_eq!(
+            direct.map(|hit| hit.id),
+            accelerated.map(|hit| hit.id),
+            "GPU ray {index}"
+        );
+        if let (Some(direct), Some(accelerated)) = (direct, accelerated) {
+            assert_eq!(direct.distance, accelerated.distance, "GPU ray {index}");
+            assert_eq!(direct.normal, accelerated.normal, "GPU ray {index}");
+            hits += 1;
+        }
+        match (cpu, direct) {
+            (None, None) => {}
+            (Some(cpu), Some(gpu)) => {
+                let tolerance = 5e-4_f64.max(cpu.distance * 3e-4);
+                assert!(
+                    (cpu.distance - f64::from(gpu.distance)).abs() <= tolerance,
+                    "CPU/GPU ray {index} distance"
+                );
+                if cpu.id == gpu.id {
+                    let alignment = cpu.normal.x() * f64::from(gpu.normal[0])
+                        + cpu.normal.y() * f64::from(gpu.normal[1])
+                        + cpu.normal.z() * f64::from(gpu.normal[2]);
+                    assert!(alignment >= 0.98, "CPU/GPU ray {index} normal");
+                } else {
+                    let selected = scene
+                        .primitives()
+                        .iter()
+                        .find(|primitive| primitive.id == gpu.id)
+                        .unwrap();
+                    let mut isolated = Scene::default();
+                    isolated.push(*selected).unwrap();
+                    let alternate = isolated
+                        .intersect(*ray)
+                        .expect("GPU-selected primitive must intersect CPU ray");
+                    assert!(
+                        (alternate.distance - cpu.distance).abs() <= tolerance,
+                        "CPU/GPU ray {index} is not a near tie"
+                    );
+                    cpu_gpu_differences += 1;
+                }
+            }
+            _ => panic!("CPU/GPU ray {index} classification mismatch"),
+        }
+    }
+    assert!(hits > 1000, "coverage must include visible geometry");
+    eprintln!(
+        "broad differential rays={} hits={hits} CPU/GPU ID differences={cpu_gpu_differences} nodes={} depth={} GPU BVH bytes={}",
+        rays.len(),
+        bvh.node_count(),
+        bvh.depth(),
+        renderer.acceleration_stats().unwrap().allocated_bytes
+    );
+}
+
+#[test]
+#[ignore = "requires a compatible native GPU; run explicitly"]
+fn gpu_bvh_analytic_edge_cases() {
+    let mut scene = Scene::default();
+    for (id, center, radius) in [
+        (1, v(0.0, 0.0, 0.0), 1.0),
+        (2, v(0.0, 0.0, 0.0), 1.0),
+        (6, v(0.0, -2.0, 0.0), 0.0001),
+        (7, v(0.0, 0.0, 3000.0), 1000.0),
+        (8, v(0.0, 0.0, 0.00001), 1.0),
+    ] {
+        scene
+            .push(
+                Primitive::sphere(
+                    id,
+                    Sphere::new(radius).unwrap(),
+                    Transform::new(center, 1.0).unwrap(),
+                    [1.0; 3],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    scene
+        .push(
+            Primitive::axis_aligned_box(
+                3,
+                AxisAlignedBox::new(v(1.0, 1.0, 1.0)).unwrap(),
+                Transform::new(v(3.0, 0.0, 0.0), 1.0).unwrap(),
+                [1.0; 3],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    scene
+        .push(
+            Primitive::capsule(
+                4,
+                Capsule::new(v(-3.0, 0.0, 0.0), v(-3.0, 0.0, 0.0), 0.5).unwrap(),
+                [1.0; 3],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    scene
+        .push(
+            Primitive::capsule(
+                5,
+                Capsule::new(v(-500.0, 2.0, 0.0), v(500.0, 2.0, 0.0), 0.2).unwrap(),
+                [1.0; 3],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let rays = [
+        r(v(0.0, 0.0, -5.0), v(0.0, 0.0, 1.0)),
+        r(v(0.0, 0.0, 0.0), v(0.0, 0.0, 1.0)),
+        r(v(-2.0, 1.0, 0.0), v(1.0, 0.0, 0.0)),
+        r(v(-2.0, 1.00001, 0.0), v(1.0, 0.0, 0.0)),
+        r(v(3.0, 0.0, -5.0), v(0.0, 0.0, 1.0)),
+        r(v(4.0, 0.0, -5.0), v(0.0, 0.0, 1.0)),
+        r(v(-3.0, 0.0, -5.0), v(0.0, 0.0, 1.0)),
+        r(v(400.0, 2.0, -5.0), v(0.0, 0.0, 1.0)),
+        r(v(0.0, -2.0, -0.01), v(0.0, 0.0, 1.0)),
+        r(v(0.0, 0.0, 1500.0), v(0.0, 0.0, 1.0)),
+        Ray::new(v(0.0, 0.0, -5.0), v(0.0, 0.0, 1.0), 4.5, 6.0).unwrap(),
+        Ray::new(v(0.0, 0.0, -5.0), v(0.0, 0.0, 1.0), 0.0, 3.0).unwrap(),
+    ];
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        ..Default::default()
+    }))
+    .expect("GPU adapter required");
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let renderer =
+        pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+    let direct = renderer.query(&device, &queue, &scene, &rays).unwrap();
+    let accelerated = renderer
+        .query_with_traversal(&device, &queue, &scene, &rays, GpuTraversal::Bvh)
+        .unwrap();
+    let bvh = Bvh::build(&scene).unwrap();
+    for (index, ((ray, direct), accelerated)) in rays
+        .iter()
+        .zip(direct.iter().copied())
+        .zip(accelerated)
+        .enumerate()
+    {
+        let cpu = scene.intersect(*ray);
+        let cpu_bvh = bvh.intersect(*ray);
+        assert_eq!(
+            cpu.map(|hit| hit.id),
+            cpu_bvh.map(|hit| hit.id),
+            "CPU edge ray {index}"
+        );
+        assert_eq!(
+            direct.map(|hit| hit.id),
+            accelerated.map(|hit| hit.id),
+            "GPU edge ray {index}"
+        );
+        if let (Some(direct), Some(accelerated)) = (direct, accelerated) {
+            assert_eq!(
+                direct.distance, accelerated.distance,
+                "GPU edge ray {index}"
+            );
+            assert_eq!(direct.normal, accelerated.normal, "GPU edge ray {index}");
+        }
+    }
+    assert_eq!(
+        direct[0].unwrap().id,
+        1,
+        "equal-depth ties retain insertion order"
+    );
+}
+
+#[test]
+#[ignore = "requires a compatible native GPU; run explicitly"]
+fn gpu_bvh_rebuilds_after_growth_and_source_movement() {
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        ..Default::default()
+    }))
+    .expect("GPU adapter required");
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let renderer =
+        pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+    let mut world = WorldState::new(DeterministicSeed(7));
+    world
+        .spawn_organism(
+            Vec3::ZERO,
+            GrowthParameters::new(0.14, 0.32, 0.12, 1.0).unwrap(),
+        )
+        .unwrap();
+    world.spawn_source(v(0.0, 2.0, 0.0), 100.0, 10.0).unwrap();
+    let mut time = world_simulation::SimulationTime::default();
+    let step = world_simulation::SimulationStep::new(0.01).unwrap();
+    let rays: Vec<_> = (-16..=16)
+        .flat_map(|x| {
+            (0..=24).map(move |y| r(v(x as f64 * 0.2, y as f64 * 0.2, -6.0), v(0.0, 0.0, 1.0)))
+        })
+        .collect();
+    for target in [1, 8, 16, 32, 48] {
+        while world.organisms()[0].nodes().len() < target {
+            world_simulation::advance_life(&mut world, &mut time, step, &[]).unwrap();
+        }
+        let original = world.clone();
+        let scene = Scene::from_world(&world).unwrap();
+        renderer
+            .query_with_traversal(&device, &queue, &scene, &rays[..1], GpuTraversal::Auto)
+            .unwrap();
+        let auto_upload = renderer.last_upload_stats().unwrap();
+        assert_eq!(auto_upload.bvh_bytes > 0, scene.primitives().len() > 4);
+        let direct = renderer.query(&device, &queue, &scene, &rays).unwrap();
+        let accelerated = renderer
+            .query_with_traversal(&device, &queue, &scene, &rays, GpuTraversal::Bvh)
+            .unwrap();
+        for (direct, accelerated) in direct.into_iter().zip(accelerated) {
+            assert_eq!(
+                direct.map(|hit| hit.id),
+                accelerated.map(|hit| hit.id),
+                "nodes={target}"
+            );
+        }
+        let builds = renderer.acceleration_stats().unwrap().rebuilds;
+        renderer
+            .query_with_traversal(&device, &queue, &scene, &rays[..1], GpuTraversal::Bvh)
+            .unwrap();
+        assert_eq!(
+            renderer.acceleration_stats().unwrap().rebuilds,
+            builds,
+            "unchanged snapshot must reuse BVH"
+        );
+        assert_eq!(
+            world, original,
+            "renderer cannot mutate authoritative world"
+        );
+    }
+    let previous = renderer.acceleration_stats().unwrap().rebuilds;
+    let source = world.sources()[0].id();
+    world
+        .source_mut(source)
+        .unwrap()
+        .move_to(v(4.0, 2.0, 0.0))
+        .unwrap();
+    let moved = Scene::from_world(&world).unwrap();
+    let ray = r(v(4.0, 2.0, -5.0), v(0.0, 0.0, 1.0));
+    let direct = renderer.query(&device, &queue, &moved, &[ray]).unwrap();
+    let accelerated = renderer
+        .query_with_traversal(&device, &queue, &moved, &[ray], GpuTraversal::Bvh)
+        .unwrap();
+    assert_eq!(
+        direct[0].map(|hit| hit.id),
+        accelerated[0].map(|hit| hit.id)
+    );
+    assert_eq!(
+        renderer.acceleration_stats().unwrap().rebuilds,
+        previous + 1
+    );
 }
 
 #[test]
@@ -195,6 +513,16 @@ fn gpu_analytic_parity_and_image_readback() {
         Ray::new(v(0.0, 0.0, 1.0), v(0.0, 0.0, 1.0), 0.001, 100.0).unwrap(), // deeper sphere
     ];
     let gpu = renderer.query(&device, &queue, &scene, &rays).unwrap();
+    let gpu_bvh = renderer
+        .query_with_traversal(&device, &queue, &scene, &rays, GpuTraversal::Bvh)
+        .unwrap();
+    for (direct, accelerated) in gpu.iter().zip(&gpu_bvh) {
+        assert_eq!(direct.map(|hit| hit.id), accelerated.map(|hit| hit.id));
+        if let (Some(direct), Some(accelerated)) = (direct, accelerated) {
+            assert_eq!(direct.distance, accelerated.distance);
+            assert_eq!(direct.normal, accelerated.normal);
+        }
+    }
     for (index, (ray, actual)) in rays.iter().zip(gpu).enumerate() {
         let expected = scene.intersect(*ray);
         match (expected, actual) {
@@ -566,11 +894,12 @@ fn gpu_first_life_snapshot_matches_cpu() {
     for i in 0..8 {
         let started = Instant::now();
         let _image = renderer
-            .draw(
+            .draw_with_traversal(
                 &device,
                 &queue,
                 &scene,
                 camera,
+                GpuTraversal::Direct,
                 DrawOptions {
                     size: [1280, 720],
                     normal_debug: false,
@@ -647,11 +976,12 @@ fn gpu_growth_scaling_measurements() {
         for i in 0..8 {
             let started = Instant::now();
             renderer
-                .draw(
+                .draw_with_traversal(
                     &device,
                     &queue,
                     &scene,
                     camera,
+                    GpuTraversal::Direct,
                     DrawOptions {
                         size: [1280, 720],
                         normal_debug: false,
@@ -758,11 +1088,12 @@ fn gpu_fixed_scene_scale_benchmark() {
         for i in 0..13 {
             let start = Instant::now();
             renderer
-                .draw(
+                .draw_with_traversal(
                     &device,
                     &queue,
                     &scene,
                     camera,
+                    GpuTraversal::Direct,
                     DrawOptions {
                         size: [1280, 720],
                         normal_debug: false,
@@ -828,6 +1159,16 @@ fn gpu_real_381_scene_and_dynamic_source() {
         .collect();
     let gpu = renderer.query(&device, &queue, &scene, &rays).unwrap();
     let mut compared_hits = 0;
+    let accelerated = renderer
+        .query_with_traversal(&device, &queue, &scene, &rays, GpuTraversal::Bvh)
+        .unwrap();
+    for (direct, accelerated) in gpu.iter().zip(accelerated) {
+        assert_eq!(direct.map(|hit| hit.id), accelerated.map(|hit| hit.id));
+        if let (Some(direct), Some(accelerated)) = (direct, accelerated) {
+            assert_eq!(direct.distance, accelerated.distance);
+            assert_eq!(direct.normal, accelerated.normal);
+        }
+    }
     let mut near_tie_ids = 0;
     for (index, (ray, actual)) in rays.iter().zip(gpu).enumerate() {
         match (scene.intersect(*ray), actual) {
@@ -925,7 +1266,7 @@ fn gpu_real_381_scene_and_dynamic_source() {
     let source_ray = r(v(5.0, 2.0, -5.0), v(0.0, 0.0, 1.0));
     let expected = moved.intersect(source_ray).unwrap();
     let actual = renderer
-        .query(&device, &queue, &moved, &[source_ray])
+        .query_with_traversal(&device, &queue, &moved, &[source_ray], GpuTraversal::Bvh)
         .unwrap()[0]
         .unwrap();
     assert_eq!(actual.id, expected.id);
@@ -981,11 +1322,12 @@ fn gpu_real_381_resolution_benchmark() {
         for index in 0..13 {
             let started = Instant::now();
             renderer
-                .draw(
+                .draw_with_traversal(
                     &device,
                     &queue,
                     &scene,
                     camera,
+                    GpuTraversal::Direct,
                     DrawOptions {
                         size,
                         normal_debug: false,
@@ -1021,6 +1363,310 @@ fn gpu_real_381_resolution_benchmark() {
 }
 
 #[test]
+#[ignore = "requires a compatible native GPU; run serially and explicitly"]
+fn gpu_bvh_comparison_benchmark() {
+    fn stats(mut values: Vec<f64>) -> (f64, f64) {
+        values.sort_by(f64::total_cmp);
+        (
+            values[values.len() / 2],
+            values[(values.len() * 95).div_ceil(100) - 1],
+        )
+    }
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        ..Default::default()
+    }))
+    .expect("GPU adapter required");
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+        ..Default::default()
+    }))
+    .unwrap();
+    let renderer =
+        pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+    let timer = GpuTimer::new(&device);
+    eprintln!(
+        "bvh_comparison adapter={:?} timestamp={}",
+        adapter.get_info(),
+        timer.is_some()
+    );
+    let measure = |label: &str,
+                   scene: &Scene,
+                   camera: Camera,
+                   size: [u32; 2],
+                   mode: GpuTraversal| {
+        let mut submit_ms = Vec::new();
+        let mut frame_ms = Vec::new();
+        let mut gpu_ms = Vec::new();
+        let mut first_upload = None;
+        for sample in 0..13 {
+            let started = Instant::now();
+            renderer
+                .draw_with_traversal(
+                    &device,
+                    &queue,
+                    scene,
+                    camera,
+                    mode,
+                    DrawOptions {
+                        size,
+                        normal_debug: false,
+                        surface: None,
+                        timer: timer.as_ref(),
+                    },
+                )
+                .unwrap();
+            let submitted = started.elapsed().as_secs_f64() * 1000.0;
+            if sample == 0 {
+                first_upload = renderer.last_upload_stats();
+            }
+            let gpu = timer
+                .as_ref()
+                .map(|value| value.read_ms(&device, &queue).unwrap());
+            let frame = started.elapsed().as_secs_f64() * 1000.0;
+            if sample >= 3 {
+                submit_ms.push(submitted);
+                frame_ms.push(frame);
+                if let Some(gpu) = gpu {
+                    gpu_ms.push(gpu);
+                }
+            }
+        }
+        eprintln!(
+            "bvh_comparison scene={label} primitives={} size={size:?} mode={mode:?} submit_ms={:?} full_frame_ms={:?} gpu_ms={:?} first_upload={first_upload:?} acceleration={:?}",
+            scene.primitives().len(),
+            stats(submit_ms),
+            stats(frame_ms),
+            if gpu_ms.is_empty() {
+                None
+            } else {
+                Some(stats(gpu_ms))
+            },
+            if mode == GpuTraversal::Bvh {
+                renderer.acceleration_stats()
+            } else {
+                None
+            }
+        );
+    };
+    let fixed_camera =
+        Camera::look_at(v(0.0, 0.0, -20.0), Vec3::ZERO, v(0.0, 1.0, 0.0), 0.95).unwrap();
+    let mut world = WorldState::new(DeterministicSeed(7));
+    for count in [1, 13, 48, 128, 256, 381] {
+        while world.entities().len() < count {
+            let index = world.entities().len();
+            world
+                .spawn_sphere(
+                    Sphere::new(0.18).unwrap(),
+                    Transform::new(
+                        v(
+                            (index % 16) as f64 * 0.45 - 3.375,
+                            (index / 16) as f64 * 0.45 - 5.4,
+                            0.0,
+                        ),
+                        1.0,
+                    )
+                    .unwrap(),
+                    0.0,
+                )
+                .unwrap();
+        }
+        let scene = Scene::from_world(&world).unwrap();
+        let mut builds = Vec::new();
+        for _ in 0..25 {
+            let started = Instant::now();
+            std::hint::black_box(Bvh::build(&scene).unwrap());
+            builds.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        eprintln!("bvh_build fixed_count={count} ms={:?}", stats(builds));
+        for mode in [GpuTraversal::Direct, GpuTraversal::Bvh] {
+            measure("fixed-grid", &scene, fixed_camera, [1280, 720], mode);
+        }
+    }
+    let real = Scene::from_world(&four_organism_world()).unwrap();
+    let real_camera =
+        Camera::look_at(v(0.0, 3.0, -12.0), v(0.0, 2.0, 0.0), v(0.0, 1.0, 0.0), 0.8).unwrap();
+    let mut builds = Vec::new();
+    for _ in 0..25 {
+        let started = Instant::now();
+        std::hint::black_box(Bvh::build(&real).unwrap());
+        builds.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    eprintln!("bvh_build real_381 ms={:?}", stats(builds));
+    for size in [[1280, 720], [1920, 1080], [2560, 1440]] {
+        for mode in [GpuTraversal::Direct, GpuTraversal::Bvh] {
+            measure("real-381", &real, real_camera, size, mode);
+        }
+    }
+}
+
+fn read_rgb(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    image: &wgpu::Texture,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    let row_bytes = width * 4;
+    let padded = row_bytes.div_ceil(256) * 256;
+    let output = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("analytic capture readback"),
+        size: u64::from(padded) * u64::from(height),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("analytic capture copy"),
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: image,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &output,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([encoder.finish()]);
+    let slice = output.slice(..);
+    let (tx, rx) = mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    rx.recv().unwrap().unwrap();
+    let mapped = slice.get_mapped_range().unwrap();
+    let mut rgb = Vec::with_capacity((width * height * 3) as usize);
+    for row in mapped.chunks_exact(padded as usize) {
+        for pixel in row[..row_bytes as usize].chunks_exact(4) {
+            rgb.extend_from_slice(&pixel[..3]);
+        }
+    }
+    rgb
+}
+
+#[test]
+#[ignore = "requires a compatible native GPU; run explicitly"]
+fn gpu_bvh_offscreen_image_parity() {
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        ..Default::default()
+    }))
+    .expect("GPU adapter required");
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let renderer =
+        pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+    let world = four_organism_world();
+    let stress = Scene::from_world(&world).unwrap();
+    let mut branch_world = WorldState::new(DeterministicSeed(7));
+    branch_world
+        .spawn_organism(
+            Vec3::ZERO,
+            GrowthParameters::new(0.14, 0.32, 0.12, 1.0).unwrap(),
+        )
+        .unwrap();
+    branch_world
+        .spawn_source(v(0.0, 2.0, 0.0), 100.0, 10.0)
+        .unwrap();
+    let mut time = world_simulation::SimulationTime::default();
+    let step = world_simulation::SimulationStep::new(0.01).unwrap();
+    while branch_world.organisms()[0].nodes().len() < 48 {
+        world_simulation::advance_life(&mut branch_world, &mut time, step, &[]).unwrap();
+    }
+    let branching = Scene::from_world(&branch_world).unwrap();
+    let scenes = [
+        (
+            "branching-organism",
+            &branching,
+            Camera::look_at(v(0.0, 3.0, -10.0), v(0.0, 2.0, 0.0), v(0.0, 1.0, 0.0), 0.8).unwrap(),
+        ),
+        (
+            "four-organism",
+            &stress,
+            Camera::look_at(v(0.0, 3.0, -12.0), v(0.0, 2.0, 0.0), v(0.0, 1.0, 0.0), 0.8).unwrap(),
+        ),
+        (
+            "overlapping-capsules",
+            &stress,
+            Camera::look_at(
+                v(-1.5, 1.0, -2.5),
+                v(-1.5, 1.0, 0.0),
+                v(0.0, 1.0, 0.0),
+                0.65,
+            )
+            .unwrap(),
+        ),
+        (
+            "moved-camera",
+            &stress,
+            Camera::look_at(v(4.0, 3.0, -9.0), v(0.0, 2.0, 0.0), v(0.0, 1.0, 0.0), 0.8).unwrap(),
+        ),
+    ];
+    let (width, height) = (800, 450);
+    for (name, scene, camera) in scenes {
+        let draw = |traversal| {
+            let image = renderer
+                .draw_with_traversal(
+                    &device,
+                    &queue,
+                    scene,
+                    camera,
+                    traversal,
+                    DrawOptions {
+                        size: [width, height],
+                        normal_debug: false,
+                        surface: None,
+                        timer: None,
+                    },
+                )
+                .unwrap();
+            read_rgb(&device, &queue, &image, width, height)
+        };
+        let direct = draw(GpuTraversal::Direct);
+        let accelerated = draw(GpuTraversal::Bvh);
+        assert_eq!(direct, accelerated, "{name}: offscreen pixels differ");
+        if let Some(directory) = std::env::var_os("GENESIS_CAPTURE_DIR") {
+            std::fs::create_dir_all(&directory).unwrap();
+            for (mode, pixels) in [("direct", &direct), ("bvh", &accelerated)] {
+                let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
+                ppm.extend_from_slice(pixels);
+                std::fs::write(
+                    std::path::Path::new(&directory).join(format!("{name}-{mode}.ppm")),
+                    ppm,
+                )
+                .unwrap();
+            }
+        }
+        eprintln!(
+            "bvh_image_parity scene={name} pixels={} mismatches=0",
+            width * height
+        );
+    }
+    assert_eq!(
+        renderer.acceleration_stats().unwrap().rebuilds,
+        1,
+        "camera moves must reuse the stress-scene BVH"
+    );
+}
+
+#[test]
 #[ignore = "requires a compatible native GPU; run explicitly"]
 fn gpu_first_scale_reference_captures() {
     fn capture(
@@ -1046,53 +1692,7 @@ fn gpu_first_scale_reference_captures() {
                 },
             )
             .unwrap();
-        let row_bytes = width * 4;
-        let padded = row_bytes.div_ceil(256) * 256;
-        let output = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("First Scale capture readback"),
-            size: u64::from(padded) * u64::from(height),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("First Scale capture copy"),
-        });
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &image,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &output,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded),
-                    rows_per_image: Some(height),
-                },
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        queue.submit([encoder.finish()]);
-        let slice = output.slice(..);
-        let (tx, rx) = mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = tx.send(result);
-        });
-        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        rx.recv().unwrap().unwrap();
-        let mapped = slice.get_mapped_range().unwrap();
-        let mut rgb = Vec::with_capacity((width * height * 3) as usize);
-        for row in mapped.chunks_exact(padded as usize) {
-            for pixel in row[..row_bytes as usize].chunks_exact(4) {
-                rgb.extend_from_slice(&pixel[..3]);
-            }
-        }
+        let rgb = read_rgb(device, queue, &image, width, height);
         let geometry_pixels = rgb.chunks_exact(3).filter(|pixel| pixel[1] > 70).count();
         assert!(
             geometry_pixels > 100,

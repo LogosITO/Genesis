@@ -21,11 +21,15 @@ Bounded two-child branching with shared resource allocation, analytic capsule co
 
 ## Foundation 0.6 — First Scale, experimental local slice
 
-Dynamic bounded GPU primitive storage removes the former 256-object cap. The real 381-primitive four-organism world renders on the reference adapter; sampled CPU/GPU direct hits agree within defined tolerances. A deterministic CPU BVH and conservative primitive bounds are validated against CPU direct rays. GPU BVH traversal and camera culling remain unfinished research, so large-scene rendering still scales roughly with pixels × primitives. See [snapshot capacity](../specifications/render-snapshot.md), [acceleration design](../architecture/spatial-acceleration.md), and [local measurements](../research/first-scale-benchmark.md).
+Dynamic bounded GPU primitive storage removes the former 256-object cap. The real 381-primitive four-organism world renders on the reference adapter; sampled CPU/GPU direct hits agree within defined tolerances. A deterministic CPU BVH and primitive bounds are validated against CPU direct rays. This stage used direct GPU traversal; see the historical [First Scale measurements](../research/first-scale-benchmark.md).
+
+## Foundation 0.6.1 — GPU BVH, experimental local slice
+
+The CPU-built hierarchy is flattened for bounded stackless WGSL traversal. A 16,861-ray four-way comparison and four pairs of real offscreen captures matched GPU direct and BVH on the reference adapter. Matched-scene timings support BVH for the tested larger scenes, while a single primitive is slower; automatic drawing retains direct traversal for up to four primitives. Floating-point bounds are not formally certified and other adapters remain untested. See the [design](../architecture/spatial-acceleration.md) and [local experiment](../research/gpu-bvh-acceleration.md).
 
 ## Candidate 0.7
 
-Test a bounded GPU BVH representation and traversal against CPU direct, CPU BVH, and GPU direct on identical rays and changing worlds. Enable it only if correctness and matched-scene measurements support it; keep direct traversal as a fallback. Investigate branch collision and shape continuity separately.
+Investigate branch collision and shape continuity, and test GPU BVH precision and selection policy on additional adapters and adversarial coordinates. Measure rebuild/upload cost during sustained topology changes before considering refitting. Maintain direct traversal as a reference and fallback.
 
 ## Later research
 Growth grammars and L-systems, finite resource budgets, destruction and recovery rules, physics queries, embedding/FFI, standalone UI, and authored language. Sequence and scope will follow experiments, not promises.

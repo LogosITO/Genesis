@@ -1,7 +1,29 @@
 //! Experimental CPU BVH over renderer snapshots. Bounds are acceleration data, not world geometry.
 
 use super::{Hit, Primitive, PrimitiveKind, Ray, RenderError, Scene, intersect_primitive};
+use bytemuck::{Pod, Zeroable};
 use spatial_math::Vec3;
+
+/// Preorder node: `meta` is [subtree exit, leaf count, unused, unused].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub(crate) struct FlatNode {
+    pub min: [f32; 4],
+    pub max: [f32; 4],
+    pub meta: [u32; 4],
+    pub leaf: [u32; 4],
+}
+
+fn gpu_bounds(value: f64, upper: bool, scale: f64) -> f32 {
+    let converted = value as f32;
+    // shortcut: eight f32 ulps are a practical guard, not a certified interval bound.
+    let margin = (8.0 * f32::EPSILON as f64 * scale.max(1.0)) as f32;
+    if upper {
+        (converted + margin).next_up()
+    } else {
+        (converted - margin).next_down()
+    }
+}
 
 /// Outward-rounded world-space bounds of one analytic primitive.
 #[derive(Clone, Copy, Debug)]
@@ -184,6 +206,73 @@ impl<'a> Bvh<'a> {
         self.indices.capacity() * std::mem::size_of::<usize>()
             + self.nodes.capacity() * std::mem::size_of::<Node>()
     }
+    /// Flattens validated preorder nodes for stackless GPU traversal.
+    pub(crate) fn flat_nodes(&self) -> Result<Vec<FlatNode>, RenderError> {
+        let count = self.nodes.len();
+        let mut flat = Vec::new();
+        flat.try_reserve_exact(count)
+            .map_err(|_| RenderError::TooManyObjects)?;
+        flat.resize(count, FlatNode::zeroed());
+        for index in (0..count).rev() {
+            let node = &self.nodes[index];
+            let exit = if node.count == 0 {
+                if node.left != index + 1 || node.right <= node.left || node.right >= count {
+                    return Err(RenderError::InvalidInput("invalid BVH children"));
+                }
+                flat[node.right].meta[0] as usize
+            } else {
+                index + 1
+            };
+            if exit <= index || exit > count || node.count > 4 {
+                return Err(RenderError::InvalidInput("invalid BVH node"));
+            }
+            let mut leaf = [0; 4];
+            if node.count > 0 {
+                let end = node
+                    .start
+                    .checked_add(node.count)
+                    .ok_or(RenderError::InvalidInput("invalid BVH leaf"))?;
+                for (slot, &primitive) in leaf.iter_mut().zip(
+                    self.indices
+                        .get(node.start..end)
+                        .ok_or(RenderError::InvalidInput("invalid BVH leaf"))?,
+                ) {
+                    *slot = u32::try_from(primitive).map_err(|_| RenderError::TooManyObjects)?;
+                    if primitive >= self.scene.primitives.len() {
+                        return Err(RenderError::InvalidInput("invalid BVH primitive index"));
+                    }
+                }
+            }
+            let scale = node
+                .bounds
+                .min
+                .iter()
+                .chain(node.bounds.max.iter())
+                .fold(1.0_f64, |size, value| size.max(value.abs()));
+            flat[index] = FlatNode {
+                min: [
+                    gpu_bounds(node.bounds.min[0], false, scale),
+                    gpu_bounds(node.bounds.min[1], false, scale),
+                    gpu_bounds(node.bounds.min[2], false, scale),
+                    0.0,
+                ],
+                max: [
+                    gpu_bounds(node.bounds.max[0], true, scale),
+                    gpu_bounds(node.bounds.max[1], true, scale),
+                    gpu_bounds(node.bounds.max[2], true, scale),
+                    0.0,
+                ],
+                meta: [
+                    u32::try_from(exit).map_err(|_| RenderError::TooManyObjects)?,
+                    node.count as u32,
+                    0,
+                    0,
+                ],
+                leaf,
+            };
+        }
+        Ok(flat)
+    }
     /// Returns the same nearest analytic hit and insertion-order tie winner as `Scene::intersect`.
     pub fn intersect(&self, ray: Ray) -> Option<Hit> {
         let mut best = None;
@@ -315,6 +404,16 @@ mod tests {
         let bvh = Bvh::build(&scene).unwrap();
         assert!(bvh.node_count() > 1);
         assert!(bvh.depth() > 1);
+        let flat = bvh.flat_nodes().unwrap();
+        assert_eq!(flat.len(), bvh.node_count());
+        for (index, node) in flat.iter().enumerate() {
+            assert!(node.meta[0] as usize > index);
+            assert!(node.meta[0] as usize <= flat.len());
+            assert!(node.meta[1] <= 4);
+            for &primitive in &node.leaf[..node.meta[1] as usize] {
+                assert!((primitive as usize) < scene.primitives().len());
+            }
+        }
         assert_eq!(
             bvh.intersect(Ray::new(v(0.0, 0.0, -3.0), v(0.0, 0.0, 1.0), 0.0, 10.0).unwrap())
                 .unwrap()
