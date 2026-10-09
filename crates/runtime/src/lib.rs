@@ -1,9 +1,11 @@
 //! Small embeddable coordinator; no graphics or UI dependency.
 
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use world_simulation::advance_life;
 use world_simulation::{
     EnvironmentEvent, EnvironmentEventKind, MAX_EVENTS_PER_TICK, SimulationError, SimulationStep,
-    SimulationTime, advance_life,
+    SimulationTime, advance_life_cached, contact::ContactScene,
 };
 use world_state::WorldState;
 
@@ -35,7 +37,7 @@ impl std::fmt::Display for ScheduleError {
 impl std::error::Error for ScheduleError {}
 
 /// Owns a world and its fixed-step clock.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Runtime {
     world: WorldState,
@@ -43,6 +45,18 @@ pub struct Runtime {
     step: SimulationStep,
     events: Vec<EnvironmentEvent>,
     next_order: u64,
+    #[serde(skip)]
+    contact_cache: Option<ContactScene>,
+}
+// Derived contact geometry is excluded from authoritative runtime equality.
+impl PartialEq for Runtime {
+    fn eq(&self, other: &Self) -> bool {
+        self.world == other.world
+            && self.time == other.time
+            && self.step == other.step
+            && self.events == other.events
+            && self.next_order == other.next_order
+    }
 }
 impl Runtime {
     /// Creates a runtime from a world and fixed step.
@@ -53,6 +67,7 @@ impl Runtime {
             step,
             events: Vec::new(),
             next_order: 0,
+            contact_cache: None,
         }
     }
     /// Advances exactly one fixed step.
@@ -68,7 +83,13 @@ impl Runtime {
             .filter(|e| e.tick == tick)
             .cloned()
             .collect();
-        advance_life(&mut self.world, &mut self.time, self.step, &applicable)?;
+        advance_life_cached(
+            &mut self.world,
+            &mut self.time,
+            self.step,
+            &applicable,
+            &mut self.contact_cache,
+        )?;
         self.events.retain(|e| e.tick > tick);
         Ok(())
     }
@@ -732,11 +753,24 @@ mod tests {
             .spawn_finite_source(Vec3::new(0.0, 2.0, 0.0).unwrap(), 4.0, 10.0, 0.0, 0.2, 0.2)
             .unwrap();
         let mut runtime = Runtime::new(world, SimulationStep::new(0.1).unwrap());
+        let mut maximum_balance_error = 0.0_f64;
         for _ in 0..2000 {
             runtime
                 .tick()
                 .unwrap_or_else(|error| panic!("tick {}: {error:?}", runtime.time().ticks() + 1));
             let stock = runtime.world().sources()[0].reservoir().unwrap();
+            let expected =
+                stock.initial_stored() + stock.total_replenished() - stock.total_allocated();
+            let error = (expected - stock.stored()).abs();
+            maximum_balance_error = maximum_balance_error.max(error);
+            assert!(
+                error
+                    <= 512.0
+                        * f64::EPSILON
+                        * (1.0 + stock.total_replenished() + stock.total_allocated()),
+                "resource balance drift at tick {}: {error:e}",
+                runtime.time().ticks()
+            );
             assert!((0.0..=stock.capacity()).contains(&stock.stored()));
             assert!(stock.last_allocated() <= 0.2 + 1e-12);
             assert!(
@@ -750,6 +784,7 @@ mod tests {
         let saved = runtime.save_bytes().unwrap();
         assert_eq!(Runtime::load_bytes(&saved).unwrap(), runtime);
         assert_eq!(runtime.time().ticks(), 2000);
+        eprintln!("maximum 2000-tick resource balance error: {maximum_balance_error:e}");
     }
 
     #[test]
@@ -887,10 +922,12 @@ mod tests {
             drive(&mut continuous, organism);
         }
         let mut replay = Runtime::load_bytes(&continuous.save_bytes().unwrap()).unwrap();
+        assert!(replay.contact_cache.is_none());
         for _ in 1000..2000 {
             drive(&mut continuous, organism);
             drive(&mut replay, organism);
         }
+        assert!(replay.contact_cache.is_some());
         assert_eq!(continuous, replay);
         assert!(continuous.world().organisms()[0].next_node_id() > 20);
         assert_eq!(continuous.time().ticks(), 2000);

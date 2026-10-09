@@ -41,7 +41,7 @@ impl From<MathError> for ContactError {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Solid {
     id: ColliderId,
     a: Vec3,
@@ -49,7 +49,7 @@ struct Solid {
     radius: f64,
     bounds: Bounds,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Bounds {
     min: [f64; 3],
     max: [f64; 3],
@@ -79,6 +79,7 @@ impl Bounds {
         self.min[axis] / 2.0 + self.max[axis] / 2.0
     }
 }
+#[derive(Clone, Debug)]
 struct Node {
     bounds: Bounds,
     left: usize,
@@ -88,7 +89,8 @@ struct Node {
 }
 
 /// Snapshot of supported world solids. The BVH only rejects disjoint conservative bounds.
-/// Rebuild after each authoritative topology or radius change; no GPU dependency exists.
+/// Reuse requires exact authoritative collider equality; no GPU dependency exists.
+#[derive(Clone, Debug)]
 pub struct ContactScene {
     solids: Vec<Solid>,
     indices: Vec<usize>,
@@ -97,6 +99,10 @@ pub struct ContactScene {
 impl ContactScene {
     /// Builds exact sphere and capsule narrow-phase data from a validated world.
     pub fn from_world(world: &WorldState) -> Result<Self, ContactError> {
+        let solids = Self::collect_solids(world)?;
+        Ok(Self::from_solids(solids))
+    }
+    fn collect_solids(world: &WorldState) -> Result<Vec<Solid>, ContactError> {
         world.validate()?;
         let mut solids = Vec::new();
         for entity in world.entities() {
@@ -146,6 +152,9 @@ impl ContactScene {
                 }
             }
         }
+        Ok(solids)
+    }
+    fn from_solids(solids: Vec<Solid>) -> Self {
         let count = solids.len();
         let mut scene = Self {
             solids,
@@ -155,7 +164,17 @@ impl ContactScene {
         if count > 0 {
             scene.build(0, count);
         }
-        Ok(scene)
+        scene
+    }
+    /// Reuses the BVH only when every authoritative collider identity and shape is unchanged.
+    /// Returns whether a full rebuild was necessary.
+    pub fn refresh(&mut self, world: &WorldState) -> Result<bool, ContactError> {
+        let solids = Self::collect_solids(world)?;
+        if self.solids == solids {
+            return Ok(false);
+        }
+        *self = Self::from_solids(solids);
+        Ok(true)
     }
     fn build(&mut self, start: usize, end: usize) -> usize {
         let bounds = self.indices[start..end]
@@ -494,6 +513,126 @@ mod tests {
     }
 
     #[test]
+    fn surface_near_tangent_and_nearest_identity_are_classified_conservatively() {
+        let mut world = sphere_world();
+        let first = world.entities()[0].id();
+        let second = world
+            .spawn_sphere(
+                Sphere::new(1.0).unwrap(),
+                Transform::new(v(1e-10, 0.0, 0.0), 1.0).unwrap(),
+                0.0,
+            )
+            .unwrap();
+        let scene = ContactScene::from_world(&world).unwrap();
+        let SweepOutcome::Hit(hit) = scene
+            .sweep(v(-3.0, 0.0, 0.0), v(6.0, 0.0, 0.0), 0.5)
+            .unwrap()
+        else {
+            panic!("expected nearest sphere")
+        };
+        assert_eq!(hit.collider, ColliderId::Sphere(first));
+        assert_eq!(hit.fraction, 0.25);
+        assert_ne!(first, second);
+        assert!(matches!(
+            scene
+                .sweep(v(-1.5, 0.0, 0.0), v(-1.0, 0.0, 0.0), 0.5)
+                .unwrap(),
+            SweepOutcome::Miss
+        ));
+        assert!(matches!(
+            scene
+                .sweep(v(-1.5, 0.0, 0.0), v(1.0, 0.0, 0.0), 0.5)
+                .unwrap(),
+            SweepOutcome::Hit(BodyContact {
+                fraction: 0.0,
+                initial_overlap: false,
+                ..
+            })
+        ));
+        let SweepOutcome::Hit(short) = scene
+            .sweep(v(-1.500000001, 0.0, 0.0), v(2e-9, 0.0, 0.0), 0.5)
+            .unwrap()
+        else {
+            panic!("expected short sweep entry")
+        };
+        assert!((short.fraction - 0.5).abs() < 1e-6);
+        for offset in [-1e-14, 1e-14] {
+            let result = scene.sweep(v(-3.0, 1.5 + offset, 0.0), v(6.0, 0.0, 0.0), 0.5);
+            assert_eq!(
+                result,
+                scene.sweep_direct(v(-3.0, 1.5 + offset, 0.0), v(6.0, 0.0, 0.0), 0.5)
+            );
+            if offset < 0.0 {
+                assert!(matches!(
+                    result,
+                    Ok(SweepOutcome::Hit(_) | SweepOutcome::Indeterminate)
+                        | Err(ContactError::Indeterminate)
+                ));
+            } else {
+                assert!(matches!(
+                    result,
+                    Ok(SweepOutcome::Miss | SweepOutcome::Indeterminate)
+                        | Err(ContactError::Indeterminate)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn cached_scene_rebuilds_only_for_authoritative_collider_geometry() {
+        let mut world = WorldState::new(DeterministicSeed(8));
+        let organism = world
+            .spawn_organism(
+                Vec3::ZERO,
+                GrowthParameters::new(0.1, 0.3, 0.1, 1.0).unwrap(),
+            )
+            .unwrap();
+        let source = world
+            .spawn_finite_source(v(0.0, 1.0, 0.0), 3.0, 1.0, 0.5, 1.0, 0.1)
+            .unwrap();
+        let body = world.spawn_body(v(0.0, 0.0, -1.0), 0.1).unwrap();
+        let mut scene = ContactScene::from_world(&world).unwrap();
+        world.source_mut(source).unwrap().begin_tick().unwrap();
+        world.source_mut(source).unwrap().allocate(0.2).unwrap();
+        world
+            .source_mut(source)
+            .unwrap()
+            .move_to(v(0.5, 1.0, 0.0))
+            .unwrap();
+        world
+            .body_mut(body)
+            .unwrap()
+            .apply_motion(v(0.0, 0.0, -0.5), None)
+            .unwrap();
+        assert!(!scene.refresh(&world).unwrap());
+        let sphere = world
+            .spawn_sphere(
+                Sphere::new(0.2).unwrap(),
+                Transform::new(v(2.0, 0.0, 0.0), 1.0).unwrap(),
+                0.1,
+            )
+            .unwrap();
+        assert!(scene.refresh(&world).unwrap());
+        assert!(!scene.refresh(&world).unwrap());
+        assert_eq!(world.entity(sphere).unwrap().sphere().radius(), 0.2);
+        world.apply_radii(&[Sphere::new(0.3).unwrap()]).unwrap();
+        assert!(scene.refresh(&world).unwrap());
+        world.organisms_mut()[0]
+            .grow(&[(0.1, v(0.0, 1.0, 0.0))])
+            .unwrap();
+        assert!(scene.refresh(&world).unwrap());
+        assert_eq!(scene.solid_count(), 4);
+        assert_eq!(
+            scene.sweep(v(0.0, 0.3, -1.0), v(0.0, 0.0, 2.0), 0.1),
+            scene.sweep_direct(v(0.0, 0.3, -1.0), v(0.0, 0.0, 2.0), 0.1)
+        );
+        world.prune_branch(organism, 1).unwrap();
+        assert!(scene.refresh(&world).unwrap());
+        assert_eq!(scene.solid_count(), 2);
+        assert!(!scene.refresh(&world).unwrap());
+    }
+
+    #[test]
     fn direct_and_bvh_agree_on_dense_deterministic_sweeps() {
         let mut world = WorldState::new(DeterministicSeed(3));
         for i in 0..128 {
@@ -610,7 +749,11 @@ mod tests {
             let mut direct_query = Vec::new();
             let mut bvh_query = Vec::new();
             let mut rebuild = Vec::new();
+            let mut refresh = Vec::new();
             let mut full_tick = Vec::new();
+            let mut cached_tick = Vec::new();
+            let mut reusable_scene = ContactScene::from_world(world).unwrap();
+            let mut cache = None;
             for _ in 0..50 {
                 let now = Instant::now();
                 std::hint::black_box(scene.candidates(bounds, false));
@@ -635,6 +778,9 @@ mod tests {
                 let now = Instant::now();
                 std::hint::black_box(ContactScene::from_world(world).unwrap());
                 rebuild.push(now.elapsed().as_secs_f64() * 1e3);
+                let now = Instant::now();
+                assert!(!reusable_scene.refresh(world).unwrap());
+                refresh.push(now.elapsed().as_secs_f64() * 1e3);
                 let mut changed = sim_world.clone();
                 let mut time = crate::SimulationTime::default();
                 let now = Instant::now();
@@ -646,9 +792,21 @@ mod tests {
                 )
                 .unwrap();
                 full_tick.push(now.elapsed().as_secs_f64() * 1e3);
+                let mut changed = sim_world.clone();
+                let mut time = crate::SimulationTime::default();
+                let now = Instant::now();
+                crate::advance_life_cached(
+                    &mut changed,
+                    &mut time,
+                    crate::SimulationStep::new(0.01).unwrap(),
+                    &[],
+                    &mut cache,
+                )
+                .unwrap();
+                cached_tick.push(now.elapsed().as_secs_f64() * 1e3);
             }
             eprintln!(
-                "contact_cpu scene={label} solids={} nodes={} direct_candidates_ms={:?} bvh_candidates_ms={:?} narrow_ms={:?} direct_query_ms={:?} bvh_query_ms={:?} rebuild_ms={:?} full_tick_ms={:?}",
+                "contact_cpu scene={label} solids={} nodes={} direct_candidates_ms={:?} bvh_candidates_ms={:?} narrow_ms={:?} direct_query_ms={:?} bvh_query_ms={:?} rebuild_ms={:?} refresh_ms={:?} full_tick_ms={:?} cached_tick_ms={:?}",
                 scene.solid_count(),
                 scene.node_count(),
                 stats(direct_candidates),
@@ -657,7 +815,9 @@ mod tests {
                 stats(direct_query),
                 stats(bvh_query),
                 stats(rebuild),
-                stats(full_tick)
+                stats(refresh),
+                stats(full_tick),
+                stats(cached_tick)
             );
         }
         let mut small = WorldState::new(DeterministicSeed(3));

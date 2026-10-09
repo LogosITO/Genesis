@@ -20,7 +20,8 @@ use winit::{
     window::{Window, WindowId},
 };
 use world_simulation::{
-    EnvironmentEvent, EnvironmentEventKind, SimulationStep, SimulationTime, advance, advance_life,
+    EnvironmentEvent, EnvironmentEventKind, SimulationStep, SimulationTime, advance,
+    advance_life_cached, contact::ContactScene,
 };
 use world_state::{DeterministicSeed, EntityId, GrowthParameters, WorldState};
 
@@ -128,6 +129,7 @@ struct App {
     world: WorldState,
     time: SimulationTime,
     step: SimulationStep,
+    contact_cache: Option<ContactScene>,
     paused: bool,
     normals: bool,
     yaw: f64,
@@ -175,6 +177,7 @@ impl App {
             world,
             time: SimulationTime::default(),
             step: SimulationStep::new(STEP.as_secs_f64())?,
+            contact_cache: None,
             paused: false,
             normals: false,
             yaw: 0.0,
@@ -376,7 +379,13 @@ impl App {
                     .and_then(|body| body.contact())
                     .map(|hit| hit.collider);
                 let result = if self.life {
-                    advance_life(&mut self.world, &mut self.time, self.step, &events)
+                    advance_life_cached(
+                        &mut self.world,
+                        &mut self.time,
+                        self.step,
+                        &events,
+                        &mut self.contact_cache,
+                    )
                 } else {
                     advance(&mut self.world, &mut self.time, self.step)
                 };

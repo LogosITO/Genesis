@@ -90,7 +90,9 @@ pub fn advance(
 }
 
 mod life;
-pub use life::{EnvironmentEvent, EnvironmentEventKind, MAX_EVENTS_PER_TICK, advance_life};
+pub use life::{
+    EnvironmentEvent, EnvironmentEventKind, MAX_EVENTS_PER_TICK, advance_life, advance_life_cached,
+};
 pub mod contact;
 
 #[cfg(test)]

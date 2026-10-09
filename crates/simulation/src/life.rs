@@ -161,6 +161,20 @@ pub fn advance_life(
     step: SimulationStep,
     events: &[EnvironmentEvent],
 ) -> Result<(), SimulationError> {
+    advance_life_cached(world, time, step, events, &mut None)
+}
+
+/// Advances one tick while reusing a derived contact scene when its analytic solids are unchanged.
+/// The cache is disposable and must not be serialized as authoritative world state.
+/// A failed tick leaves world and time unchanged; the cache may be refreshed and is compared again
+/// before its next use.
+pub fn advance_life_cached(
+    world: &mut WorldState,
+    time: &mut SimulationTime,
+    step: SimulationStep,
+    events: &[EnvironmentEvent],
+    contact_cache: &mut Option<ContactScene>,
+) -> Result<(), SimulationError> {
     let next_tick = time
         .ticks()
         .checked_add(1)
@@ -282,7 +296,14 @@ pub fn advance_life(
             .desired_velocity()
             .checked_scale(step.seconds())
             .map_err(SimulationError::Math)?;
-        let scene = ContactScene::from_world(&proposed).map_err(SimulationError::Contact)?;
+        let scene = match contact_cache {
+            Some(scene) => {
+                scene.refresh(&proposed).map_err(SimulationError::Contact)?;
+                scene
+            }
+            None => contact_cache
+                .insert(ContactScene::from_world(&proposed).map_err(SimulationError::Contact)?),
+        };
         let outcome = scene
             .sweep(body.position(), movement, body.radius())
             .map_err(SimulationError::Contact)?;

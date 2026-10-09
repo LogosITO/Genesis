@@ -418,6 +418,305 @@ mod tests {
     }
 
     #[test]
+    fn finite_ecology_pick_prune_contact_snapshot_and_save_replay() {
+        use analytic_renderer::{PickOutcome, Ray, SemanticTarget};
+        use world_simulation::contact::{ContactScene, SweepOutcome};
+
+        let mut world = WorldState::new(DeterministicSeed(81));
+        let parameters = GrowthParameters::new(0.14, 0.32, 0.2, 1.0).unwrap();
+        let first = world
+            .spawn_organism(point(-0.6, 0.0, 0.0), parameters)
+            .unwrap();
+        world
+            .spawn_organism(point(0.6, 0.0, 0.0), parameters)
+            .unwrap();
+        let source = world
+            .spawn_finite_source(point(0.0, 2.0, 0.0), 4.0, 10.0, 0.0, 0.2, 0.2)
+            .unwrap();
+        let start = point(-0.6, 0.32, -1.0);
+        let body = world.spawn_body(start, 0.1).unwrap();
+        let mut runtime = Runtime::new(world, SimulationStep::new(0.1).unwrap());
+        while runtime.world().organisms()[0].node(1).is_none() {
+            assert!(runtime.time().ticks() < 20);
+            runtime.tick().unwrap();
+        }
+        let first_tree = &runtime.world().organisms()[0];
+        let child = first_tree.node(1).unwrap();
+        let midpoint = first_tree
+            .root()
+            .checked_add(child.position())
+            .unwrap()
+            .checked_scale(0.5)
+            .unwrap();
+        let scene = Scene::from_world(runtime.world()).unwrap();
+        let ray = Ray::new(
+            point(midpoint.x(), midpoint.y(), 3.0),
+            point(0.0, 0.0, -1.0),
+            0.0,
+            10.0,
+        )
+        .unwrap();
+        let PickOutcome::Hit(picked) = scene.pick_ray(ray).unwrap() else {
+            panic!("expected semantic connection selection")
+        };
+        assert_eq!(
+            picked.target,
+            SemanticTarget::Connection {
+                organism: first,
+                child: 1
+            }
+        );
+        let movement = point(0.0, 0.0, 2.0);
+        let before = ContactScene::from_world(runtime.world()).unwrap();
+        assert!(matches!(
+            before.sweep(start, movement, 0.1).unwrap(),
+            SweepOutcome::Hit(_)
+        ));
+        assert_eq!(
+            before.sweep(start, movement, 0.1),
+            before.sweep_direct(start, movement, 0.1)
+        );
+        let tick = runtime.time().ticks() + 1;
+        let mut allocation_probe = runtime.clone();
+        allocation_probe
+            .schedule(
+                tick,
+                EnvironmentEventKind::PruneBranch {
+                    organism: first,
+                    child: 1,
+                },
+            )
+            .unwrap();
+        allocation_probe.tick().unwrap();
+        let mut unpruned = runtime.clone();
+        unpruned.tick().unwrap();
+        assert_ne!(
+            allocation_probe.world().organisms()[0].budget(),
+            unpruned.world().organisms()[0].budget(),
+            "pruning must change the first organism's resource share"
+        );
+        assert_ne!(
+            allocation_probe.world().organisms()[1].budget(),
+            unpruned.world().organisms()[1].budget(),
+            "shared stock must redistribute to the remaining organism"
+        );
+        runtime
+            .schedule(
+                tick,
+                EnvironmentEventKind::PruneBranch {
+                    organism: first,
+                    child: 1,
+                },
+            )
+            .unwrap();
+        runtime
+            .schedule(
+                tick,
+                EnvironmentEventKind::SetSourceActive {
+                    id: source,
+                    active: false,
+                },
+            )
+            .unwrap();
+        runtime
+            .schedule(
+                tick,
+                EnvironmentEventKind::SetBodyVelocity {
+                    id: body,
+                    velocity: point(0.0, 0.0, 20.0),
+                },
+            )
+            .unwrap();
+        runtime.tick().unwrap();
+        assert!(runtime.world().organisms()[0].node(1).is_none());
+        assert!(runtime.world().body().unwrap().position().z() > 0.9);
+        assert_eq!(
+            runtime.world().sources()[0]
+                .reservoir()
+                .unwrap()
+                .last_allocated(),
+            0.0
+        );
+        let after = ContactScene::from_world(runtime.world()).unwrap();
+        assert_eq!(
+            after.sweep(start, movement, 0.1).unwrap(),
+            SweepOutcome::Miss
+        );
+        assert_eq!(
+            after.sweep(start, movement, 0.1),
+            after.sweep_direct(start, movement, 0.1)
+        );
+        assert!(
+            Scene::from_world(runtime.world())
+                .unwrap()
+                .primitives()
+                .iter()
+                .all(|primitive| primitive.target() != Some(picked.target))
+        );
+        let other_nodes = runtime.world().organisms()[1].nodes().len();
+        let tick = runtime.time().ticks() + 1;
+        runtime
+            .schedule(
+                tick,
+                EnvironmentEventKind::SetBodyVelocity {
+                    id: body,
+                    velocity: Vec3::ZERO,
+                },
+            )
+            .unwrap();
+        runtime
+            .schedule(
+                tick,
+                EnvironmentEventKind::SetSourceActive {
+                    id: source,
+                    active: true,
+                },
+            )
+            .unwrap();
+        for _ in 0..10 {
+            runtime.tick().unwrap();
+            runtime.world().validate().unwrap();
+            Scene::from_world(runtime.world()).unwrap();
+        }
+        let mut resumed = Runtime::load_bytes(&runtime.save_bytes().unwrap()).unwrap();
+        for _ in 0..20 {
+            runtime.tick().unwrap();
+            resumed.tick().unwrap();
+            Scene::from_world(runtime.world()).unwrap();
+            Scene::from_world(resumed.world()).unwrap();
+        }
+        assert_eq!(runtime, resumed);
+        assert_eq!(runtime.save_bytes().unwrap(), resumed.save_bytes().unwrap());
+        assert!(runtime.world().organisms()[1].nodes().len() > other_nodes);
+    }
+
+    #[test]
+    fn multi_seed_ecology_contact_and_snapshot_stress_replays() {
+        use world_simulation::contact::ContactScene;
+
+        fn drive(runtime: &mut Runtime) {
+            let next = runtime.time().ticks() + 1;
+            let seed = runtime.world().seed().0;
+            let source = runtime.world().sources()[0].id();
+            if next.is_multiple_of(40) {
+                runtime
+                    .schedule(
+                        next,
+                        EnvironmentEventKind::MoveSource {
+                            id: source,
+                            position: point(
+                                if (next / 40 + seed).is_multiple_of(2) {
+                                    -1.0
+                                } else {
+                                    1.0
+                                },
+                                2.0,
+                                0.0,
+                            ),
+                        },
+                    )
+                    .unwrap();
+            }
+            if next.is_multiple_of(60) {
+                let organism = &runtime.world().organisms()[(seed as usize) % 4];
+                if let Some(child) = organism.nodes().iter().find(|node| node.parent().is_some()) {
+                    runtime
+                        .schedule(
+                            next,
+                            EnvironmentEventKind::PruneBranch {
+                                organism: organism.id(),
+                                child: child.id(),
+                            },
+                        )
+                        .unwrap();
+                }
+            }
+            if next.is_multiple_of(30) {
+                runtime
+                    .schedule(
+                        next,
+                        EnvironmentEventKind::SetBodyVelocity {
+                            id: runtime.world().body().unwrap().id(),
+                            velocity: point(
+                                0.0,
+                                0.0,
+                                if (next / 30 + seed).is_multiple_of(2) {
+                                    -0.5
+                                } else {
+                                    0.5
+                                },
+                            ),
+                        },
+                    )
+                    .unwrap();
+            }
+            let previous_ids: Vec<_> = runtime
+                .world()
+                .organisms()
+                .iter()
+                .map(|tree| tree.next_node_id())
+                .collect();
+            runtime.tick().unwrap();
+            runtime.world().validate().unwrap();
+            assert!(runtime.pending_events().is_empty());
+            for (tree, previous) in runtime.world().organisms().iter().zip(previous_ids) {
+                assert!(tree.next_node_id() >= previous);
+            }
+            let stock = runtime.world().sources()[0].reservoir().unwrap();
+            let balance =
+                stock.initial_stored() + stock.total_replenished() - stock.total_allocated();
+            assert!(
+                (balance - stock.stored()).abs()
+                    <= 512.0
+                        * f64::EPSILON
+                        * (1.0 + stock.total_replenished() + stock.total_allocated())
+            );
+            let scene = ContactScene::from_world(runtime.world()).unwrap();
+            let start = point(0.0, 0.32, -1.0);
+            let displacement = point(0.0, 0.0, 2.0);
+            assert_eq!(
+                scene.sweep(start, displacement, 0.1),
+                scene.sweep_direct(start, displacement, 0.1)
+            );
+            assert!(
+                Scene::from_world(runtime.world())
+                    .unwrap()
+                    .primitives()
+                    .len()
+                    <= 512
+            );
+            assert!(runtime.save_bytes().unwrap().len() < world_runtime::MAX_SAVE_BYTES);
+        }
+        for seed in [13, 38, 80] {
+            let mut world = WorldState::new(DeterministicSeed(seed));
+            let parameters = GrowthParameters::new(0.1, 0.3, 0.2, 1.0).unwrap();
+            for x in [-1.5, -0.5, 0.5, 1.5] {
+                world
+                    .spawn_organism(point(x, 0.0, 0.0), parameters)
+                    .unwrap();
+            }
+            world
+                .spawn_finite_source(point(0.0, 2.0, 0.0), 4.0, 10.0, 0.0, 0.2, 0.2)
+                .unwrap();
+            world.spawn_body(point(0.0, 0.32, -1.0), 0.1).unwrap();
+            let mut continuous = Runtime::new(world, SimulationStep::new(0.1).unwrap());
+            for _ in 0..120 {
+                drive(&mut continuous);
+            }
+            let mut resumed = Runtime::load_bytes(&continuous.save_bytes().unwrap()).unwrap();
+            for _ in 120..240 {
+                drive(&mut continuous);
+                drive(&mut resumed);
+            }
+            assert_eq!(continuous, resumed, "seed {seed}");
+            assert_eq!(
+                continuous.save_bytes().unwrap(),
+                resumed.save_bytes().unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn save_load_continuation_matches_uninterrupted() {
         let mut continuous = initial("changed").unwrap();
         let mut split = continuous.clone();
