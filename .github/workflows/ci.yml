@@ -54,8 +54,10 @@ jobs:
         shell: pwsh
         run: |
           & ./tools/package-passage.ps1
-          $archive = Get-ChildItem target/dist -Filter 'the-passage-*.zip' | Select-Object -First 1
-          if (-not $archive) { throw 'Windows package ZIP missing' }
+          $commit = (& git rev-parse --short=12 HEAD).Trim()
+          $archivePath = Join-Path target/dist "the-passage-$commit-windows-x86_64.zip"
+          if (-not (Test-Path -LiteralPath $archivePath)) { throw "Windows package ZIP missing for $commit" }
+          $archive = Get-Item -LiteralPath $archivePath
           $checksum = (Get-Content -LiteralPath "$($archive.FullName).sha256" -Raw).Split(' ')[0]
           if ($checksum -ne (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash) { throw 'Windows package checksum mismatch' }
           $check = Join-Path $env:RUNNER_TEMP 'Genesis package smoke test'
