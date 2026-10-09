@@ -3,13 +3,14 @@
 mod hud;
 mod passage;
 
-use analytic_field::{AxisAlignedBox, Sphere};
+use analytic_field::{AxisAlignedBox, Capsule, Sphere};
 use analytic_renderer::{
     BranchVisibility, Camera, DrawOptions, GpuRenderer, GpuTimer, PickOutcome, Primitive, Scene,
     SemanticTarget,
 };
 use spatial_math::{Transform, Vec3};
 use std::{
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -23,6 +24,7 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
+use world_authoring::{Structure, compile_file};
 use world_simulation::{
     EnvironmentEvent, EnvironmentEventKind, SimulationStep, SimulationTime, advance,
     advance_life_cached, contact::ContactScene,
@@ -54,6 +56,84 @@ fn p99(samples: &[f64]) -> f64 {
 
 fn v(x: f64, y: f64, z: f64) -> Vec3 {
     Vec3::new(x, y, z).expect("finite scene coordinate")
+}
+
+struct AuthoredPreview {
+    path: PathBuf,
+    structure: Structure,
+    scene: Scene,
+    target: Vec3,
+    distance: f64,
+}
+
+impl AuthoredPreview {
+    fn from_structure(
+        path: PathBuf,
+        structure: Structure,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut scene = Scene::default();
+        let mut lower = [f64::INFINITY; 3];
+        let mut upper = [f64::NEG_INFINITY; 3];
+        for segment in structure.segments() {
+            let capsule = Capsule::new(segment.start, segment.end, segment.radius)?;
+            scene.push(Primitive::capsule(segment.id, capsule, [0.30, 0.82, 0.52])?)?;
+            for point in [segment.start, segment.end] {
+                for (index, value) in [point.x(), point.y(), point.z()].into_iter().enumerate() {
+                    lower[index] = lower[index].min(value);
+                    upper[index] = upper[index].max(value);
+                }
+            }
+        }
+        let extent = (0..3).map(|i| upper[i] - lower[i]).fold(0.0, f64::max);
+        if extent > 400.0 {
+            return Err("structure exceeds preview camera range (400 world units)".into());
+        }
+        let target = Vec3::new(
+            (lower[0] + upper[0]) / 2.0,
+            (lower[1] + upper[1]) / 2.0,
+            (lower[2] + upper[2]) / 2.0,
+        )?;
+        Ok(Self {
+            path,
+            structure,
+            scene,
+            target,
+            distance: (extent * 2.0).max(7.0),
+        })
+    }
+
+    fn load(path: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
+        let structure = compile_file(&path)?;
+        Self::from_structure(path, structure)
+    }
+
+    #[cfg(test)]
+    fn replace(&mut self, source: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        let next = Self::from_structure(self.path.clone(), world_authoring::compile_json(source)?)?;
+        *self = next;
+        Ok(())
+    }
+
+    fn reload(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let next = Self::load(self.path.clone())?;
+        *self = next;
+        Ok(())
+    }
+
+    fn print_summary(&self) {
+        println!(
+            "{}",
+            serde_json::json!({
+                "kind": "authored-structure",
+                "id": self.structure.id(),
+                "revision": self.structure.revision(),
+                "expanded_symbols": self.structure.expanded_symbols(),
+                "segments": self.structure.segments().len(),
+                "max_stack": self.structure.max_stack_used(),
+                "work": self.structure.work()
+            })
+        );
+    }
 }
 
 struct Graphics {
@@ -221,6 +301,7 @@ struct App {
     graphics: Option<Graphics>,
     lost: Arc<AtomicBool>,
     world: WorldState,
+    authored: Option<AuthoredPreview>,
     time: SimulationTime,
     step: SimulationStep,
     contact_cache: Option<ContactScene>,
@@ -305,6 +386,7 @@ impl App {
             graphics: None,
             lost: Arc::new(AtomicBool::new(false)),
             world,
+            authored: None,
             time,
             step: SimulationStep::new(STEP.as_secs_f64())?,
             contact_cache: None,
@@ -349,6 +431,15 @@ impl App {
             cursor: None,
             last_camera: None,
         })
+    }
+    fn authoring(path: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
+        let preview = AuthoredPreview::load(path)?;
+        preview.print_summary();
+        let mut app = Self::new(false, false)?;
+        app.world = WorldState::new(DeterministicSeed(7));
+        app.paused = true;
+        app.authored = Some(preview);
+        Ok(app)
     }
     fn pick_cursor(&mut self) {
         let Some(graphics) = self.graphics.as_ref() else {
@@ -541,6 +632,9 @@ impl App {
         Ok(())
     }
     fn scene(&self) -> Result<Scene, Box<dyn std::error::Error>> {
+        if let Some(preview) = &self.authored {
+            return Ok(preview.scene.clone());
+        }
         let mut scene = Scene::from_world(&self.world)?;
         if self.passage {
             scene.highlight_branch(self.world.organisms()[0].id(), 1, [0.18, 1.0, 0.22]);
@@ -847,20 +941,24 @@ impl App {
         } else {
             0.0
         };
-        let target = if self.passage {
+        let target = if let Some(preview) = &self.authored {
+            preview.target
+        } else if self.passage {
             v(0.0, 0.55, 0.0)
         } else {
             v(0.0, height / 2.0, 0.0)
         };
-        let distance = if self.passage {
+        let distance = if let Some(preview) = &self.authored {
+            preview.distance
+        } else if self.passage {
             5.3
         } else {
             (height * 1.1).max(7.0)
         };
         let origin = v(
-            self.yaw.sin() * distance,
+            target.x() + self.yaw.sin() * distance,
             target.y() + self.elevation.sin() * distance,
-            -self.yaw.cos() * self.elevation.cos() * distance,
+            target.z() - self.yaw.cos() * self.elevation.cos() * distance,
         );
         let camera = match Camera::look_at(origin, target, v(0.0, 1.0, 0.0), 0.95) {
             Ok(c) => c,
@@ -893,6 +991,8 @@ impl App {
             "{} — tick {}{} — selected {:?} — contact {:?}{}",
             if self.passage {
                 "The Passage"
+            } else if self.authored.is_some() {
+                "Genesis Authoring Preview"
             } else if self.life {
                 "First Life"
             } else {
@@ -967,6 +1067,25 @@ impl App {
             event_loop.exit();
             return;
         }
+        if self.authored.is_some()
+            && let Some(upload) = graphics.renderer.last_upload_stats()
+            && upload.bvh_build_ms > 0.0
+        {
+            let acceleration = graphics.renderer.acceleration_stats();
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "kind": "authored-gpu-build",
+                    "primitives": scene.primitives().len(),
+                    "bvh_build_ms": upload.bvh_build_ms,
+                    "upload_enqueue_ms": upload.enqueue_ms,
+                    "primitive_bytes": upload.primitive_bytes,
+                    "bvh_bytes": upload.bvh_bytes,
+                    "bvh_nodes": acceleration.map(|item| item.node_count),
+                    "bvh_depth": acceleration.map(|item| item.depth)
+                })
+            );
+        }
         if self.measure {
             self.submit_samples
                 .push(started.elapsed().as_secs_f64() * 1000.0);
@@ -1015,7 +1134,13 @@ impl App {
                 Ok(None) => "unavailable".to_string(),
                 Err(error) => format!("error:{error}"),
             };
-            let growth = if self.life {
+            let growth = if let Some(preview) = &self.authored {
+                format!(
+                    "authored={} segments={}",
+                    preview.structure.id(),
+                    scene.primitives().len()
+                )
+            } else if self.life {
                 format!(
                     "nodes={} active={} bifurcations={}",
                     self.world
@@ -1123,6 +1248,8 @@ impl ApplicationHandler for App {
             Window::default_attributes()
                 .with_title(if self.passage {
                     "The Passage — Genesis Experimental Demo"
+                } else if self.authored.is_some() {
+                    "Genesis Authoring Preview — Experimental"
                 } else if self.life {
                     "First Life — Experimental / Research Stage"
                 } else {
@@ -1241,7 +1368,7 @@ impl ApplicationHandler for App {
                 if let PhysicalKey::Code(key) = event.physical_key {
                     match key {
                         KeyCode::Escape => event_loop.exit(),
-                        KeyCode::Space => self.toggle_pause(),
+                        KeyCode::Space if self.authored.is_none() => self.toggle_pause(),
                         KeyCode::KeyN => self.normals = !self.normals,
                         KeyCode::KeyM if self.life => {
                             self.pending_move = true;
@@ -1255,6 +1382,19 @@ impl ApplicationHandler for App {
                         KeyCode::KeyR if self.passage => {
                             if let Err(error) = self.restart_passage() {
                                 self.status = format!("RESTART FAILED: {error}");
+                            }
+                        }
+                        KeyCode::KeyR if self.authored.is_some() => {
+                            let preview = self.authored.as_mut().expect("checked above");
+                            match preview.reload() {
+                                Ok(()) => {
+                                    preview.print_summary();
+                                    self.last_camera = None;
+                                    eprintln!("authored definition reloaded");
+                                }
+                                Err(error) => {
+                                    eprintln!("reload rejected; preview unchanged: {error}")
+                                }
                             }
                         }
                         KeyCode::ArrowLeft | KeyCode::KeyA if !self.passage => {
@@ -1312,21 +1452,26 @@ impl ApplicationHandler for App {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::args().nth(1).as_deref() == Some("--passage-measure") {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.as_slice() == ["--passage-measure"] {
         return passage::measure_cpu();
     }
-    let (life, passage) = match std::env::args().nth(1).as_deref() {
-        Some("--passage") => (true, true),
-        Some("--life") => (true, false),
-        None => (false, false),
-        Some(_) => return Err("usage: first-light [--life|--passage]".into()),
+    let mut app = match args.as_slice() {
+        [] => App::new(false, false)?,
+        [flag] if flag == "--passage" => App::new(true, true)?,
+        [flag] if flag == "--life" => App::new(true, false)?,
+        [flag, path] if flag == "--authoring" => App::authoring(PathBuf::from(path))?,
+        _ => return Err("usage: first-light [--life|--passage|--authoring FILE]".into()),
     };
+    let (life, passage) = (app.life, app.passage);
     eprintln!(
-        "{} controls: {} Space pause; N normals; {}Esc exit",
+        "{} controls: {} {}N normals; {}Esc exit",
         if passage {
             "The Passage"
         } else if life {
             "First Life"
+        } else if app.authored.is_some() {
+            "Genesis Authoring Preview"
         } else {
             "First Light"
         },
@@ -1335,7 +1480,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             "A/D or Left/Right orbit; W/S or Up/Down tilt;"
         },
-        if life && !passage {
+        if app.authored.is_some() {
+            ""
+        } else {
+            "Space pause; "
+        },
+        if app.authored.is_some() {
+            "R reload definition; "
+        } else if life && !passage {
             "M move resource source; Left click select; P prune selected branch; I/J/K/L move body; "
         } else if passage {
             "M move source; O switch source; Left click select; P prune branch; "
@@ -1344,7 +1496,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
     let event_loop = EventLoop::new()?;
-    event_loop.run_app(&mut App::new(life, passage)?)?;
+    event_loop.run_app(&mut app)?;
     Ok(())
 }
 
@@ -1354,6 +1506,91 @@ mod app_tests {
     use analytic_renderer::{GpuTraversal, Ray};
     use std::{path::Path, sync::mpsc};
     use world_simulation::advance_life;
+
+    const BRANCH_A: &[u8] = include_bytes!("../../authoring/branch-a.json");
+    const BRANCH_B: &[u8] = include_bytes!("../../authoring/branch-b.json");
+
+    #[test]
+    fn authored_preview_reload_is_atomic_and_matches_analytic_segments() {
+        let mut preview = AuthoredPreview::from_structure(
+            PathBuf::from("branch-a.json"),
+            world_authoring::compile_json(BRANCH_A).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(preview.scene.primitives().len(), 26);
+        for (primitive, segment) in preview
+            .scene
+            .primitives()
+            .iter()
+            .zip(preview.structure.segments())
+        {
+            assert_eq!(primitive.id, segment.id);
+            assert_eq!(primitive.center(), segment.start);
+            assert_eq!(primitive.dimensions(), segment.end);
+            assert_eq!(primitive.capsule_radius(), segment.radius);
+        }
+        assert!(preview.replace(b"{invalid").is_err());
+        assert_eq!(preview.structure.id(), "branch-a");
+        assert_eq!(preview.scene.primitives().len(), 26);
+        preview.replace(BRANCH_B).unwrap();
+        assert_eq!(preview.structure.id(), "branch-b");
+        assert_eq!(preview.scene.primitives().len(), 15);
+        assert_ne!(preview.structure.source(), BRANCH_A);
+    }
+
+    #[test]
+    #[ignore = "local release-profile CPU authoring, snapshot, and BVH timing"]
+    fn authored_scaling_benchmark() {
+        for iterations in 1..=6 {
+            let mut value: serde_json::Value = serde_json::from_slice(BRANCH_A).unwrap();
+            value["iterations"] = serde_json::json!(iterations);
+            value["budgets"]["max_symbols"] = serde_json::json!(65536);
+            value["budgets"]["max_segments"] = serde_json::json!(1024);
+            value["budgets"]["max_stack_depth"] = serde_json::json!(16);
+            value["budgets"]["max_work"] = serde_json::json!(1000000);
+            let source = serde_json::to_vec(&value).unwrap();
+            let mut compile = Vec::new();
+            let mut snapshot = Vec::new();
+            let mut bvh_build = Vec::new();
+            let mut result = None;
+            for _ in 0..30 {
+                let started = Instant::now();
+                let structure = world_authoring::compile_json(&source).unwrap();
+                compile.push(started.elapsed().as_secs_f64() * 1000.0);
+                let symbols = structure.expanded_symbols();
+                let started = Instant::now();
+                let preview = AuthoredPreview::from_structure(PathBuf::new(), structure).unwrap();
+                snapshot.push(started.elapsed().as_secs_f64() * 1000.0);
+                let started = Instant::now();
+                let bvh = analytic_renderer::Bvh::build(&preview.scene).unwrap();
+                bvh_build.push(started.elapsed().as_secs_f64() * 1000.0);
+                result = Some((
+                    symbols,
+                    preview.structure.segments().len(),
+                    bvh.node_count(),
+                    bvh.depth(),
+                ));
+            }
+            let (symbols, segments, nodes, depth) = result.unwrap();
+            println!(
+                "{}",
+                serde_json::json!({
+                    "kind": "authored-cpu-scale",
+                    "iterations": iterations,
+                    "input_bytes": source.len(),
+                    "expanded_symbols": symbols,
+                    "segments": segments,
+                    "bvh_nodes": nodes,
+                    "bvh_depth": depth,
+                    "minimum_source_and_segment_bytes": source.len() + segments * std::mem::size_of::<world_authoring::Segment>(),
+                    "samples": 30,
+                    "compile_ms": median_p95(&compile),
+                    "snapshot_ms": median_p95(&snapshot),
+                    "bvh_build_ms": median_p95(&bvh_build)
+                })
+            );
+        }
+    }
 
     #[test]
     fn surface_fault_policy_and_drawable_limits() {
@@ -1773,6 +2010,74 @@ mod app_tests {
             bmp.resize(bmp.len() + (stride - width * 3) as usize, 0);
         }
         std::fs::write(path, bmp).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a native GPU; set GENESIS_AUTHORING_CAPTURE_DIR for real BMP captures"]
+    fn authored_gpu_images_match_direct_and_bvh() {
+        let instance = wgpu::Instance::default();
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            ..Default::default()
+        }))
+        .expect("native GPU required");
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        let renderer =
+            pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+        let size = [640, 480];
+        let mut captures = Vec::new();
+        for (name, source) in [("branch-a", BRANCH_A), ("branch-b", BRANCH_B)] {
+            let preview = AuthoredPreview::from_structure(
+                PathBuf::from(name),
+                world_authoring::compile_json(source).unwrap(),
+            )
+            .unwrap();
+            let camera = Camera::look_at(
+                v(
+                    preview.target.x() + preview.distance * 0.35,
+                    preview.target.y() + preview.distance * 0.25,
+                    preview.target.z() - preview.distance * 0.9,
+                ),
+                preview.target,
+                v(0.0, 1.0, 0.0),
+                0.95,
+            )
+            .unwrap();
+            let draw = |traversal| {
+                let image = renderer
+                    .draw_with_traversal(
+                        &device,
+                        &queue,
+                        &preview.scene,
+                        camera,
+                        traversal,
+                        DrawOptions {
+                            size,
+                            normal_debug: false,
+                            surface: None,
+                            timer: None,
+                        },
+                    )
+                    .unwrap();
+                read_rgb(&device, &queue, &image, size)
+            };
+            let direct = draw(GpuTraversal::Direct);
+            let bvh = draw(GpuTraversal::Bvh);
+            assert_eq!(direct, bvh, "{name} direct/BVH mismatch");
+            assert!(direct.chunks_exact(3).any(|pixel| pixel != &direct[..3]));
+            if let Some(path) = std::env::var_os("GENESIS_AUTHORING_CAPTURE_DIR") {
+                let path = PathBuf::from(path);
+                std::fs::create_dir_all(&path).unwrap();
+                write_bmp(&path.join(format!("{name}.bmp")), &direct, size);
+            }
+            captures.push(direct);
+        }
+        assert_ne!(
+            captures[0], captures[1],
+            "different rules rendered identically"
+        );
     }
 
     #[test]

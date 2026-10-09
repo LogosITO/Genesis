@@ -52,6 +52,15 @@ cargo test -p first-light passage_playthrough --locked -- --nocapture
 
 The orange body must cross a growing analytic branch after moving a finite resource source and pruning the stem. An in-window HUD shows controls and feedback; the headless playthrough prints a JSON success record. See the [player guide](docs/guides/the-passage.md), [manual QA checklist](docs/guides/playtest-qa.md), and [research record](docs/research/first-playable.md). On Windows, `powershell -ExecutionPolicy Bypass -File tools/package-passage.ps1` creates and checks a local ZIP under `target/dist/`; it is not published.
 
+Inspect an external mathematical definition on the CPU, then display it as analytic capsules:
+
+```sh
+cargo run --release -p authoring-inspect --locked -- examples/authoring/branch-a.json
+cargo run --release -p first-light --locked -- --authoring examples/authoring/branch-a.json
+```
+
+Edit the JSON and press **R** in the preview to reload without recompiling. The static structure is separate from living `WorldState` organisms. A second definition, controls, and limits are in the [authoring example](examples/authoring/README.md) and [format contract](docs/specifications/mathematical-authoring.md).
+
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings

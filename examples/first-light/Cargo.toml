@@ -13,6 +13,8 @@ spatial-math = { path = "../../crates/math" }
 world-state = { path = "../../crates/world" }
 world-simulation = { path = "../../crates/simulation" }
 world-runtime = { path = "../../crates/runtime" }
+world-authoring = { path = "../../crates/authoring" }
+serde_json = { version = "=1.0.151", features = ["float_roundtrip"] }
 wgpu = { version = "=30.0.1", default-features = false, features = ["std", "wgsl", "dx12", "vulkan"] }
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland"] }
 pollster = "=1.0.1"

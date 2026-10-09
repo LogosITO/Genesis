@@ -106,6 +106,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "authoring-inspect"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "world-authoring",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -403,9 +411,11 @@ dependencies = [
  "analytic-renderer",
  "font8x8",
  "pollster",
+ "serde_json",
  "spatial-math",
  "wgpu",
  "winit",
+ "world-authoring",
  "world-runtime",
  "world-simulation",
  "world-state",
@@ -2384,6 +2394,15 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "world-authoring"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "spatial-math",
+]
 
 [[package]]
 name = "world-runtime"

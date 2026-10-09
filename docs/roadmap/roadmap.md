@@ -51,9 +51,17 @@ A small lane, one controllable body, two finite-resource organisms, tick-indexed
 
 Application-level transition tests, seven opt-in Passage GPU image states, release-profile offscreen resolution measurements, and a package checksum are in place. The user reported a manual 7/7 playthrough; native input automation and a second-machine check remain separate. See the [0.9.2 research record](../research/foundation-092.md).
 
+## Foundation 0.9.6 — native runtime reliability, local evidence
+
+Surface outcome handling, bounded reconfiguration, physical-size validation, scripted native frame measurements, GPU readback across viewport sizes, and an opt-in test audit are recorded in the [runtime contract](../specifications/native-runtime.md) and [local verification](../research/foundation-096.md). Real device-loss recovery remains partial.
+
+## Foundation 0.10 — static mathematical authoring, local experiment
+
+Versioned external JSON definitions, bounded deterministic rewriting, typed analytic capsule segments, a CPU inspector, and a native GPU preview with atomic file reload are implemented. These structures are static research previews, not living organisms or world saves. See the [format](../specifications/mathematical-authoring.md), [architecture RFC](../architecture/authoring-rfc.md), and [local experiment](../research/foundation-010.md).
+
 ## Next candidate
 
-Complete the remaining manual native QA checklist and verify the extracted Windows ZIP on a second supported machine. Check hosted Windows/Linux CI after this branch is integrated. Then run a small external playtest using the offline feedback template, and investigate any observed camera, picking, or frame-pacing failures. For mathematical research, prioritize conservative visibility and contact semantics around overlapping analytic objects.
+Complete the remaining manual native QA checklist and verify the extracted Windows ZIP on a second supported machine. Check hosted Windows/Linux CI after this branch is integrated. For authored structures, next specify stable identity under edits and a versioned save reference before any mutable `WorldState` integration. Investigate measured BVH build growth if larger authored structures become a real workload.
 
 ## Later research
-Growth grammars and L-systems, resource transport and recycling, destruction and recovery rules, broader physical interaction, embedding/FFI, standalone UI, and authored language. Sequence and scope will follow experiments, not promises.
+Living or stochastic grammars, resource transport and recycling, destruction and recovery rules, broader physical interaction, embedding/FFI, standalone UI, and a richer authored language. Sequence and scope will follow experiments, not promises.

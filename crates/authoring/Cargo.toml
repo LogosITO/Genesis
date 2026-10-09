@@ -1,0 +1,15 @@
+[package]
+name = "world-authoring"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "=1.0.151", features = ["float_roundtrip"] }
+spatial-math = { path = "../math" }
+
+[lints]
+workspace = true

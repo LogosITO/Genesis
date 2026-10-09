@@ -17,4 +17,6 @@ The [First Contact measurements](../reference/research/first-contact-measurement
 
 The [Foundation 0.9.6 local verification](../reference/research/foundation-096/) records native window measurements, resize evidence, and the opt-in test audit. The [native runtime contract](../reference/specifications/native-runtime/) defines surface and device failure policy.
 
+The [Foundation 0.10 authoring experiment](../reference/research/foundation-010/) records two external structures, GPU readbacks and bounded scaling measurements. The [authoring RFC](../reference/architecture/authoring-rfc/) separates structural generators from continuous mathematical fields.
+
 The [First Ecology experiment](../reference/research/first-ecology-experiment/) records six finite-resource scenarios, local CPU timings, replay, contact integration, and open measurement gaps.
