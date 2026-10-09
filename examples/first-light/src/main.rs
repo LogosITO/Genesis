@@ -5,7 +5,8 @@ mod passage;
 
 use analytic_field::{AxisAlignedBox, Sphere};
 use analytic_renderer::{
-    Camera, DrawOptions, GpuRenderer, GpuTimer, PickOutcome, Primitive, Scene, SemanticTarget,
+    BranchVisibility, Camera, DrawOptions, GpuRenderer, GpuTimer, PickOutcome, Primitive, Scene,
+    SemanticTarget,
 };
 use spatial_math::{Transform, Vec3};
 use std::{
@@ -175,6 +176,7 @@ struct App {
     body_keys: [bool; 4],
     body_input_dirty: bool,
     pending_move: bool,
+    pending_source_toggle: bool,
     pending_prune: Option<(EntityId, u32)>,
     selected: Option<SemanticTarget>,
     cursor: Option<winit::dpi::PhysicalPosition<f64>>,
@@ -246,6 +248,7 @@ impl App {
             body_keys: [false; 4],
             body_input_dirty: false,
             pending_move: false,
+            pending_source_toggle: false,
             pending_prune: None,
             selected: None,
             cursor: None,
@@ -279,7 +282,7 @@ impl App {
             eprintln!("selection: click outside viewport");
             return;
         }
-        let scene = match Scene::from_world(&self.world) {
+        let scene = match self.scene() {
             Ok(scene) => scene,
             Err(error) => {
                 eprintln!("selection snapshot failed: {error}");
@@ -296,13 +299,30 @@ impl App {
         ) {
             Ok(PickOutcome::Hit(hit)) => {
                 self.selected = Some(hit.target);
+                let green_behind_front = self.passage
+                    && camera
+                        .ray(cursor.x as u32, cursor.y as u32, size.width, size.height)
+                        .ok()
+                        .and_then(|ray| {
+                            scene
+                                .branch_visibility(ray, self.world.organisms()[0].id(), 1)
+                                .ok()
+                        })
+                        .is_some_and(|visibility| {
+                            matches!(visibility, BranchVisibility::Occluded { .. })
+                        });
                 self.status = match passage::branch(self.selected, &self.world) {
                     Some((organism, _))
                         if self.passage && organism != self.world.organisms()[0].id() =>
                     {
-                        "BLUE PICKED; GREEN STEM STILL BLOCKS"
+                        if green_behind_front {
+                            "BLUE PICKED; GREEN STEM BEHIND IT. CHANGE VIEW."
+                        } else {
+                            "BLUE PICKED; GREEN STEM STILL BLOCKS"
+                        }
                     }
                     Some(_) => "BRANCH SELECTED. PRESS P TO CUT.",
+                    None if green_behind_front => "GREEN STEM BEHIND THIS OBJECT. CHANGE VIEW.",
                     None => "ONLY GROWTH BRANCHES CAN BE CUT",
                 }
                 .into();
@@ -414,6 +434,7 @@ impl App {
         self.selected = None;
         self.last_camera = None;
         self.pending_move = false;
+        self.pending_source_toggle = false;
         self.pending_prune = None;
         self.body_keys = [false; 4];
         self.body_input_dirty = true;
@@ -426,10 +447,11 @@ impl App {
     }
     fn scene(&self) -> Result<Scene, Box<dyn std::error::Error>> {
         let mut scene = Scene::from_world(&self.world)?;
-        if self.passage
-            && let Some((organism, child)) = passage::branch(self.selected, &self.world)
-        {
-            scene.highlight_branch(organism, child, [0.98, 0.96, 0.18]);
+        if self.passage {
+            scene.highlight_branch(self.world.organisms()[0].id(), 1, [0.18, 1.0, 0.22]);
+            if let Some((organism, child)) = passage::branch(self.selected, &self.world) {
+                scene.highlight_branch(organism, child, [0.98, 0.96, 0.18]);
+            }
         }
         if self.passage {
             passage::decorate(&mut scene)?;
@@ -478,6 +500,17 @@ impl App {
         } else {
             Vec::new()
         };
+        if self.pending_source_toggle {
+            let source = self.world.sources().first().expect("life source exists");
+            events.push(EnvironmentEvent {
+                tick: self.time.ticks() + 1,
+                order: events.len() as u64,
+                kind: EnvironmentEventKind::SetSourceActive {
+                    id: source.id(),
+                    active: !source.active(),
+                },
+            });
+        }
         if let Some((organism, child)) = self.pending_prune {
             events.push(EnvironmentEvent {
                 tick: self.time.ticks() + 1,
@@ -520,6 +553,19 @@ impl App {
                 .push(step_started.elapsed().as_secs_f64() * 1000.0);
         }
         self.pending_move = false;
+        self.pending_source_toggle = false;
+        if self.passage
+            && events
+                .iter()
+                .any(|event| matches!(event.kind, EnvironmentEventKind::SetSourceActive { .. }))
+        {
+            self.status = if self.world.sources()[0].active() {
+                "SOURCE ON. GROWTH RESUMES."
+            } else {
+                "SOURCE OFF. RESOURCE INPUT PAUSED."
+            }
+            .into();
+        }
         if self.passage
             && events
                 .iter()
@@ -627,13 +673,18 @@ impl App {
             Some([
                 "ORANGE PLAYER -> MAGENTA GOAL".into(),
                 "WASD MOVE | ARROWS LOOK | CLICK GREEN STEM".into(),
-                "M SOURCE | P CUT | SPACE PAUSE | R RESTART".into(),
+                "M MOVE | O SWITCH | P CUT | SPACE PAUSE | R RESTART".into(),
                 format!(
-                    "SOURCE {} | STEM {} | SEL {selected}",
+                    "SOURCE {} {} | STEM {} | SEL {selected}",
                     if self.world.sources()[0].position().x() > 2.0 {
                         "AWAY"
                     } else {
                         "NEAR"
+                    },
+                    if self.world.sources()[0].active() {
+                        "ON"
+                    } else {
+                        "OFF"
                     },
                     if self.world.organisms()[0].node(1).is_some() {
                         "BLOCKS"
@@ -745,8 +796,12 @@ impl App {
                 return;
             }
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
-            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Validation => {
-                eprintln!("surface lost or invalid; exiting");
+            wgpu::CurrentSurfaceTexture::Lost => {
+                graphics.resize(size.width, size.height);
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                eprintln!("surface validation failed; exiting");
                 event_loop.exit();
                 return;
             }
@@ -983,6 +1038,10 @@ impl ApplicationHandler for App {
                             self.pending_move = true;
                             self.status = "RESOURCE MOVE QUEUED".into();
                         }
+                        KeyCode::KeyO if self.passage => {
+                            self.pending_source_toggle = true;
+                            self.status = "SOURCE SWITCH QUEUED".into();
+                        }
                         KeyCode::KeyP if self.life => self.queue_prune(),
                         KeyCode::KeyR if self.passage => {
                             if let Err(error) = self.restart_passage() {
@@ -1070,7 +1129,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if life && !passage {
             "M move resource source; Left click select; P prune selected branch; I/J/K/L move body; "
         } else if passage {
-            "M move source; Left click select; P prune branch; "
+            "M move source; O switch source; Left click select; P prune branch; "
         } else {
             ""
         },
@@ -1085,6 +1144,7 @@ mod app_tests {
     use super::*;
     use analytic_renderer::{GpuTraversal, Ray};
     use std::{path::Path, sync::mpsc};
+    use world_simulation::advance_life;
 
     fn selected_branch(app: &App, organism_index: usize) -> SemanticTarget {
         let organism = &app.world.organisms()[organism_index];
@@ -1146,6 +1206,11 @@ mod app_tests {
     #[test]
     fn passage_picking_actions_and_highlight() {
         let mut app = App::new(true, true).unwrap();
+        let goal_ray = Ray::new(v(0.0, 0.55, 3.0), v(0.0, 0.0, -1.0), 0.001, 100.0).unwrap();
+        assert!(matches!(
+            app.scene().unwrap().pick_ray(goal_ray).unwrap(),
+            PickOutcome::Indeterminate
+        ));
         let wrong = selected_branch(&app, 1);
         app.selected = Some(wrong);
         app.queue_prune();
@@ -1153,7 +1218,7 @@ mod app_tests {
         assert!(app.world.organisms()[0].node(1).is_some());
         assert!(app.selected.is_none());
         let correct = selected_branch(&app, 0);
-        let plain = Scene::from_world(&app.world).unwrap();
+        let plain = app.scene().unwrap();
         app.selected = Some(correct);
         let highlighted = app.scene().unwrap();
         let changed: Vec<_> = plain
@@ -1164,7 +1229,7 @@ mod app_tests {
             .collect();
         assert!(!changed.is_empty());
         let (organism, child) = passage::branch(Some(correct), &app.world).unwrap();
-        let mut invalid = Scene::from_world(&app.world).unwrap();
+        let mut invalid = plain.clone();
         assert!(!invalid.highlight_branch(organism, child, [f32::NAN, 0.0, 0.0]));
         assert!(
             invalid
@@ -1192,6 +1257,50 @@ mod app_tests {
         app.simulation_tick().unwrap();
         assert!(app.world.sources()[0].position().x() < 2.0);
         println!("{{\"scenario\":\"picking-prune-source-order\",\"result\":\"success\"}}");
+    }
+
+    #[test]
+    fn passage_source_switch_is_tick_ordered_and_replayable() {
+        let mut app = App::new(true, true).unwrap();
+        let source = app.world.sources()[0].id();
+        let mut replay_world = app.world.clone();
+        let mut replay_time = app.time;
+        let event_tick = replay_time.ticks() + 1;
+        app.pending_source_toggle = true;
+        app.simulation_tick().unwrap();
+        advance_life(
+            &mut replay_world,
+            &mut replay_time,
+            app.step,
+            &[EnvironmentEvent {
+                tick: event_tick,
+                order: 0,
+                kind: EnvironmentEventKind::SetSourceActive {
+                    id: source,
+                    active: false,
+                },
+            }],
+        )
+        .unwrap();
+        assert_eq!(app.world, replay_world);
+        assert_eq!(app.time, replay_time);
+        assert!(!app.world.sources()[0].active());
+        assert!(!app.pending_source_toggle);
+        let before = app.world.organisms()[1].nodes().len();
+        for _ in 0..60 {
+            app.simulation_tick().unwrap();
+        }
+        assert_eq!(app.world.organisms()[1].nodes().len(), before);
+        app.pending_source_toggle = true;
+        app.simulation_tick().unwrap();
+        assert!(app.world.sources()[0].active());
+        for _ in 0..120 {
+            app.simulation_tick().unwrap();
+        }
+        assert!(app.world.organisms()[1].nodes().len() > before);
+        app.restart_passage().unwrap();
+        assert!(app.world.sources()[0].active());
+        assert!(!app.pending_source_toggle);
     }
 
     #[test]

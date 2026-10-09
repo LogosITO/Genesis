@@ -15,6 +15,7 @@ Move the **orange player** through the blue-walled lane to the **magenta goal**.
 | Left click | Select a visible node or connection |
 | P | Cut the selected non-root branch |
 | M | Move the yellow source |
+| O | Switch its resource input on or off |
 | Space | Pause or resume |
 | R | Restart |
 | Esc | Exit |

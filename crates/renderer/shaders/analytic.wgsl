@@ -245,7 +245,8 @@ fn render(@builtin(global_invocation_id) gid: vec3<u32>) {
         } else {
             let base = objects[hit.primitive_index].color.xyz;
             let light = normalize(vec3<f32>(0.5, 0.8, -0.6));
-            color = base * (0.18 + 0.82 * max(dot(hit.normal, light), 0.0));
+            let diffuse = 0.18 + 0.82 * max(dot(hit.normal, light), 0.0);
+            color = base * mix(diffuse, 1.0, objects[hit.primitive_index].color.w);
         }
     }
     textureStore(image, vec2<i32>(gid.xy), vec4<f32>(color, 1.0));

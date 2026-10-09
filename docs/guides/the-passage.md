@@ -10,7 +10,7 @@ The only tested native configuration so far is Windows x86_64 with an NVIDIA GeF
 
 ## Objective and controls
 
-Move the orange sphere through the narrow passage to the magenta goal. The two colored structures grow from a shared finite resource. The green central stem blocks the route. **M** moves the yellow resource source away from that stem, **left-click** selects a visible green node or connection, and **P** cuts the selected branch at the next simulation tick. Then move through the gap. Victory requires the actual body centre inside the far goal region, the central first branch removed, and the source moved. The magenta sphere is a visible marker; it is not collision geometry.
+Move the orange sphere through the narrow passage to the magenta goal. The two colored structures grow from a shared finite resource. The green central stem blocks the route. **M** moves the yellow resource source away from that stem, **O** switches its resource input on or off, **left-click** selects a visible green node or connection, and **P** cuts the selected branch at the next simulation tick. Then move through the gap. Victory requires the actual body centre inside the far goal region, the central first branch removed, and the source moved. The magenta sphere is a visible marker; it is not collision geometry.
 
 | Input | Action |
 | --- | --- |
@@ -19,11 +19,12 @@ Move the orange sphere through the narrow passage to the magenta goal. The two c
 | Left click | Select an analytic world target |
 | P | Prune a selected non-root branch |
 | M | Toggle the source between the central and outer locations |
+| O | Switch source resource input on or off at the next tick |
 | Space | Pause or resume fixed-step simulation |
 | R | Restart the original scenario |
 | Esc | Exit |
 
-The HUD shows the selected target, source position (NEAR/AWAY), central stem state (BLOCKS/CLEAR), current status, pause state, and success. The window title shows the tick and node counts. Inputs are cleared on focus loss. A cut or source move queued while paused waits until simulation resumes. A stale, root, ambiguous, or missing target cannot authorize a cut. Cutting the blue organism does not clear the green route; the HUD says so. Restart discards pending actions, selection, and derived collision state. You can restart any time if growth or resource use makes the route hard to read.
+The HUD shows the selected target, source position (NEAR/AWAY), activity (ON/OFF), central stem state (BLOCKS/CLEAR), current status, pause state, and success. The window title shows the tick and node counts. Inputs are cleared on focus loss. A cut, source move, or switch queued while paused waits until simulation resumes. A stale, root, ambiguous, or missing target cannot authorize a cut. Cutting the blue organism does not clear the green route; the HUD says so. Restart discards pending actions, selection, and derived collision state. You can restart any time if growth or resource use makes the route hard to read.
 
 ## Engineering notes
 
@@ -31,4 +32,4 @@ The lane walls are ordinary analytic spheres and participate in swept-sphere con
 
 `Scene::from_world` builds a disposable renderer snapshot. Semantic picks map back to stable world and node IDs. Pruning and source moves use typed tick-indexed events. Contact uses the CPU analytic swept-sphere BVH; the GPU is used for display only. Save/load and replay are exercised by the headless playthrough test: `cargo test -p first-light passage_playthrough --locked -- --nocapture`. The test prints one JSON result on success. Player-facing save/load is not offered, avoiding ambiguous file overwrite rules.
 
-Known limitations: the wall spheres overlap visibly, the lane can be walked around, and the demo's objective therefore requires the world-state changes as well as goal position. Contact has no sliding or depenetration. Overlapping organism primitives are separate solids, not a watertight union. The lower green stem can be partially hidden by the walls; use the arrow keys to change the view. CPU semantic picking confirms it remains selectable in the default view. A selected branch now highlights its existing node and connection in yellow, but this does not make a hidden branch visible before selection. Growth can fill the view over time; use **R** to reset. The user reported a complete 7/7 manual playthrough on the reference machine; the [manual QA checklist](playtest-qa.md) has not been independently completed by an agent or second tester. See the [0.9.2 research record](../research/foundation-092.md) for automated evidence and limits.
+Known limitations: the wall spheres overlap visibly, the lane can be walked around, and the demo's objective therefore requires the world-state changes as well as goal position. Contact has no sliding or depenetration. Overlapping organism primitives are separate solids, not a watertight union. The lower green stem is brighter but remains small and can be hidden by walls; use the arrow keys to change the view. A click on a nearer object does not select through it; the HUD explains strict occlusion when detected. CPU semantic picking confirms that some stem pixels remain selectable in the default view. A selected branch highlights its existing node and connection in yellow. The source switch pauses new resource input, although stored node energy may still complete growth. Growth can fill the view over time; use **R** to reset. The user reported a complete 7/7 manual playthrough on the reference machine before these changes; the [manual QA checklist](playtest-qa.md) has not been repeated for this build. See the [0.9.3 research record](../research/foundation-093-095.md) for current automated evidence and limits.

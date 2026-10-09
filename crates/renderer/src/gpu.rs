@@ -151,7 +151,12 @@ fn scene_data(scene: &Scene) -> Vec<GpuPrimitive> {
                 },
             ),
             dimensions: vec4(p.dimensions, p.radius as f32),
-            color: [p.color[0], p.color[1], p.color[2], 1.0],
+            color: [
+                p.color[0],
+                p.color[1],
+                p.color[2],
+                if p.emphasis { 1.0 } else { 0.0 },
+            ],
             identity: [p.id, 0, 0, 0],
         })
         .collect()

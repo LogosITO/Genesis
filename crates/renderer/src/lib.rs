@@ -267,6 +267,23 @@ pub enum PickOutcome {
     Indeterminate,
 }
 
+/// Whether a ray can select a particular live branch in this render snapshot.
+/// Occlusion describes visible surface order; it does not change gameplay contact or picking.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BranchVisibility {
+    /// The ray does not cross the branch's analytic node or connection.
+    OffRay,
+    /// The branch owns the nearest unambiguous visible surface.
+    Visible,
+    /// A different authoritative target is strictly nearer than the branch.
+    Occluded {
+        /// The authoritative target on the nearer surface.
+        front: SemanticTarget,
+    },
+    /// Near-coincident hits or CPU direct/BVH disagreement prevent a safe classification.
+    Indeterminate,
+}
+
 /// One snapshot primitive, in world coordinates, with a stable caller-supplied ID.
 #[derive(Clone, Copy, Debug)]
 pub struct Primitive {
@@ -278,6 +295,7 @@ pub struct Primitive {
     dimensions: Vec3,
     radius: f64,
     color: [f32; 3],
+    emphasis: bool,
     target: Option<SemanticTarget>,
 }
 impl Primitive {
@@ -311,6 +329,7 @@ impl Primitive {
             dimensions,
             radius: 0.0,
             color,
+            emphasis: false,
             target: None,
         })
     }
@@ -363,6 +382,7 @@ impl Primitive {
             dimensions: b,
             radius,
             color,
+            emphasis: false,
             target: None,
         })
     }
@@ -509,7 +529,7 @@ impl Scene {
     pub fn primitives(&self) -> &[Primitive] {
         &self.primitives
     }
-    /// Colors the existing node and connection for a selected authoritative branch.
+    /// Colors the existing node and connection without diffuse dimming in this snapshot.
     /// Returns false when the branch is absent; picking geometry and world state are unchanged.
     pub fn highlight_branch(&mut self, organism: EntityId, child: u32, color: [f32; 3]) -> bool {
         if color
@@ -526,6 +546,7 @@ impl Scene {
                     Some(SemanticTarget::Connection { organism: id, child: node }) if id == organism && node == child)
             {
                 primitive.color = color;
+                primitive.emphasis = true;
                 found = true;
             }
         }
@@ -598,6 +619,48 @@ impl Scene {
             position,
             normal: nearest.normal,
         }))
+    }
+    /// Classifies analytic occlusion without allowing selection through the front surface.
+    pub fn branch_visibility(
+        &self,
+        ray: Ray,
+        organism: EntityId,
+        child: u32,
+    ) -> Result<BranchVisibility, RenderError> {
+        let branch_distance = self
+            .primitives
+            .iter()
+            .filter(|primitive| {
+                matches!(primitive.target,
+                    Some(SemanticTarget::GrowthNode { organism: id, node }) if id == organism && node == child)
+                    || matches!(primitive.target,
+                        Some(SemanticTarget::Connection { organism: id, child: node }) if id == organism && node == child)
+            })
+            .filter_map(|primitive| intersect_primitive(*primitive, ray).map(|hit| hit.distance))
+            .min_by(f64::total_cmp);
+        let Some(distance) = branch_distance else {
+            return Ok(BranchVisibility::OffRay);
+        };
+        Ok(match self.pick_ray(ray)? {
+            PickOutcome::Hit(front) => {
+                let front_is_branch = matches!(front.target,
+                    SemanticTarget::GrowthNode { organism: id, node } if id == organism && node == child)
+                    || matches!(front.target,
+                        SemanticTarget::Connection { organism: id, child: node } if id == organism && node == child);
+                if front_is_branch {
+                    BranchVisibility::Visible
+                } else if distance > front.distance + 1e-8_f64.max(front.distance * 1e-7) {
+                    BranchVisibility::Occluded {
+                        front: front.target,
+                    }
+                } else {
+                    BranchVisibility::Indeterminate
+                }
+            }
+            PickOutcome::Miss | PickOutcome::Ambiguous { .. } | PickOutcome::Indeterminate => {
+                BranchVisibility::Indeterminate
+            }
+        })
     }
     /// Picks a pixel center with a finite maximum interaction distance.
     pub fn pick_pixel(
@@ -1375,6 +1438,66 @@ mod tests {
         ));
         let inside = ray(Vec3::ZERO, v(0.0, 0.0, 1.0));
         assert_eq!(manual.intersect(inside).unwrap().distance, 1.0);
+    }
+
+    #[test]
+    fn branch_visibility_separates_selection_from_occlusion() {
+        use world_state::{DeterministicSeed, GrowthParameters};
+        let mut world = WorldState::new(DeterministicSeed(19));
+        let organism = world
+            .spawn_organism(
+                Vec3::ZERO,
+                GrowthParameters::new(0.14, 0.32, 1.0, 1.0).unwrap(),
+            )
+            .unwrap();
+        world.organisms_mut()[0]
+            .grow(&[(1.0, v(0.0, 1.0, 0.0))])
+            .unwrap();
+        let node = world.organisms()[0].nodes()[1].position();
+        let aim = ray(v(node.x(), node.y(), -3.0), v(0.0, 0.0, 1.0));
+        let unobstructed = Scene::from_world(&world).unwrap();
+        assert_eq!(
+            unobstructed.branch_visibility(aim, organism, 1).unwrap(),
+            BranchVisibility::Visible
+        );
+        assert_eq!(
+            unobstructed
+                .branch_visibility(ray(v(3.0, node.y(), -3.0), v(0.0, 0.0, 1.0)), organism, 1)
+                .unwrap(),
+            BranchVisibility::OffRay
+        );
+        let mut coincident = world.clone();
+        let wall = world
+            .spawn_sphere(
+                Sphere::new(0.3).unwrap(),
+                Transform::new(v(0.0, node.y(), -1.0), 1.0).unwrap(),
+                0.0,
+            )
+            .unwrap();
+        let obstructed = Scene::from_world(&world).unwrap();
+        assert_eq!(
+            obstructed.branch_visibility(aim, organism, 1).unwrap(),
+            BranchVisibility::Occluded {
+                front: SemanticTarget::Sphere(wall)
+            }
+        );
+        assert!(matches!(obstructed.pick_ray(aim).unwrap(),
+            PickOutcome::Hit(hit) if hit.target == SemanticTarget::Sphere(wall)));
+        assert_eq!(obstructed.intersect(aim).unwrap().normal, v(0.0, 0.0, -1.0));
+        let same_node = coincident.organisms()[0].nodes()[1].position();
+        coincident
+            .spawn_sphere(
+                Sphere::new(0.14).unwrap(),
+                Transform::new(same_node, 1.0).unwrap(),
+                0.0,
+            )
+            .unwrap();
+        let tied = Scene::from_world(&coincident).unwrap();
+        assert_eq!(
+            tied.branch_visibility(aim, coincident.organisms()[0].id(), 1)
+                .unwrap(),
+            BranchVisibility::Indeterminate
+        );
     }
 
     #[test]
