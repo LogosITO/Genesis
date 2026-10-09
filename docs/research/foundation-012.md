@@ -24,6 +24,8 @@ Selected-ray agreement is not a universal finite-precision proof. CPU uses `f64`
 
 The scaling test generated balanced unions of translated instances of one sphere with shared child references. Each row used 40 parser/compiler/CPU samples and 12 GPU query/frame samples. Values below are p50 milliseconds; GPU columns include host preparation, submission and blocking readback, **not isolated GPU compute time**. Query batches had 512 rays. Frames were 320×240 RGBA8. The same shader and scene were used at each iteration budget. `compile` includes JSON parse and validation. Node payload is 32 bytes per node, excluding allocation overhead, uniform, ray and image buffers.
 
+For either four-node 640×480 capture, requested GPU payload is 128 bytes of nodes, 112 uniform bytes, 32 dummy-ray bytes, 32 output bytes, a 1,228,800-byte RGBA8 texture, and a 1,228,800-byte aligned readback buffer: **2,457,904 nominal bytes**. The returned CPU RGBA vector adds 1,228,800 bytes. Driver allocation granularity and actual peak residency were not measured.
+
 | Nodes / expanded visits | Budget | JSON parse | Compile incl. parse | CPU sample | Query 512 + readback | Frame + readback | Node bytes |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 2 / 2 | 32 | 0.0119 | 0.0180 | 0.000121 | 0.864 | 2.054 | 64 |
