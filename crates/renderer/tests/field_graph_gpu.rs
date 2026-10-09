@@ -488,6 +488,94 @@ fn stats(mut values: Vec<f64>) -> (f64, f64) {
 }
 
 #[test]
+#[ignore = "native release-profile GPU resolution matrix; run serially with --nocapture"]
+fn field_graph_resolution_matrix() {
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        apply_limit_buckets: false,
+    }))
+    .unwrap();
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+        ..Default::default()
+    }))
+    .unwrap();
+    let renderer = pollster::block_on(GraphGpuRenderer::new(&device)).unwrap();
+    let timer = analytic_renderer::GpuTimer::new(&device);
+    let simple = compile_json(br#"{"format_version":1,"id":"sphere","root":"s","nodes":[{"op":"sphere","id":"s","radius":1}]}"#).unwrap();
+    let balanced = compile_json(include_bytes!(
+        "../../../examples/field-graph/definitions/balanced-16.json"
+    ))
+    .unwrap();
+    for graph in [&simple, &balanced] {
+        for size in [[320, 240], [1280, 720], [1920, 1080], [2560, 1440]] {
+            let options = || GraphRenderOptions {
+                size,
+                policy: GraphTracePolicy::default(),
+                timer: timer.as_ref(),
+            };
+            renderer
+                .render_rgba_timed(&device, &queue, graph, camera(), options())
+                .unwrap();
+            let mut full = Vec::new();
+            let mut prepare = Vec::new();
+            let mut readback = Vec::new();
+            let mut compute = Vec::new();
+            for _ in 0..5 {
+                let frame = renderer
+                    .render_rgba_timed(&device, &queue, graph, camera(), options())
+                    .unwrap();
+                assert_eq!(frame.rgba.len(), (size[0] * size[1] * 4) as usize);
+                full.push(frame.full_frame_ms);
+                prepare.push(frame.cpu_prepare_ms);
+                readback.push(frame.readback_wait_ms);
+                if let Some(ms) = frame.gpu_compute_ms {
+                    compute.push(ms);
+                }
+            }
+            let row_bytes = size[0] * 4;
+            let readback_bytes = row_bytes.div_ceil(256) * 256 * size[1];
+            println!(
+                "field_resolution adapter={} backend={:?} profile={} nodes={} visits={} size={}x{} full_ms={:?} prepare_ms={:?} readback_wait_ms={:?} gpu_compute_ms={:?} node_bytes={} image_bytes={} readback_bytes={}",
+                adapter.get_info().name,
+                adapter.get_info().backend,
+                if cfg!(debug_assertions) {
+                    "debug"
+                } else {
+                    "release"
+                },
+                graph.nodes().len(),
+                graph.visits(),
+                size[0],
+                size[1],
+                stats(full),
+                stats(prepare),
+                stats(readback),
+                (!compute.is_empty()).then(|| stats(compute)),
+                graph.nodes().len() * 32,
+                row_bytes * size[1],
+                readback_bytes
+            );
+        }
+    }
+    assert!(
+        renderer
+            .render_rgba(
+                &device,
+                &queue,
+                &simple,
+                camera(),
+                [2561, 1440],
+                GraphTracePolicy::default()
+            )
+            .is_err()
+    );
+}
+
+#[test]
 #[ignore = "local GPU timing; run explicitly with --ignored --nocapture"]
 fn field_graph_scaling_measurements() {
     let instance = wgpu::Instance::default();

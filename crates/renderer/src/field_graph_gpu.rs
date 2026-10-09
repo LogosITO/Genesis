@@ -146,7 +146,7 @@ pub struct GraphFrame {
 
 /// Offscreen graph draw size, trace policy, and optional compute timestamp sampler.
 pub struct GraphRenderOptions<'a> {
-    /// Pixel dimensions, each from 1 to 2048.
+    /// Pixel dimensions, each from 1 to 4096, with at most 3,686,400 pixels total.
     pub size: [u32; 2],
     /// Bounded field tracer settings.
     pub policy: GraphTracePolicy,
@@ -294,9 +294,14 @@ impl GraphGpuRenderer {
         policy: GraphTracePolicy,
     ) -> Result<GpuConfig, RenderError> {
         policy.validate()?;
-        if size[0] == 0 || size[1] == 0 || size[0] > 2048 || size[1] > 2048 {
+        if size[0] == 0
+            || size[1] == 0
+            || size[0] > 4096
+            || size[1] > 4096
+            || u64::from(size[0]) * u64::from(size[1]) > 2560 * 1440
+        {
             return Err(RenderError::InvalidInput(
-                "field image outside 1..=2048 pixels",
+                "field image exceeds dimension or pixel budget",
             ));
         }
         let aspect = f64::from(size[0]) / f64::from(size[1]);
