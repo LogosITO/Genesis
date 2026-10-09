@@ -256,7 +256,7 @@ fn render(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn query(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= arrayLength(&query_rays)) { return; }
     let ray = query_rays[gid.x];
-    let hit = trace(ray.origin_near.xyz, ray.direction_far.xyz, ray.origin_near.w, ray.direction_far.w);
+    let hit = trace(ray.origin_near.xyz, normalize(ray.direction_far.xyz), ray.origin_near.w, ray.direction_far.w);
     query_hits[gid.x].distance_normal = vec4<f32>(hit.normal, hit.distance);
     query_hits[gid.x].identity = vec4<u32>(u32(hit.valid), hit.id, 0u, 0u);
 }
