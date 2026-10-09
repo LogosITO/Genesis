@@ -506,11 +506,13 @@ fn field_graph_resolution_matrix() {
     let renderer = pollster::block_on(GraphGpuRenderer::new(&device)).unwrap();
     let timer = analytic_renderer::GpuTimer::new(&device);
     let simple = compile_json(br#"{"format_version":1,"id":"sphere","root":"s","nodes":[{"op":"sphere","id":"s","radius":1}]}"#).unwrap();
+    let medium8 = compile_json(generated_scene(4).as_bytes()).unwrap();
+    let medium16 = compile_json(generated_scene(8).as_bytes()).unwrap();
     let balanced = compile_json(include_bytes!(
         "../../../examples/field-graph/definitions/balanced-16.json"
     ))
     .unwrap();
-    for graph in [&simple, &balanced] {
+    for graph in [&simple, &medium8, &medium16, &balanced] {
         for size in [[320, 240], [1280, 720], [1920, 1080], [2560, 1440]] {
             let options = || GraphRenderOptions {
                 size,

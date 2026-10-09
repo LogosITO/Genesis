@@ -2,8 +2,8 @@
 
 **Status: partial.** A release-profile, ignored native GPU test measures the
 existing interpreter at four image sizes with GPU compute timestamps and CPU
-wall times. It runs a one-node sphere and the bounded 32-node, 47-visit
-`balanced-16.json` union. Run it with:
+wall times. It runs a one-node sphere, generated 8- and 16-node unions, and
+the bounded 32-node, 47-visit `balanced-16.json` union. Run it with:
 
 ```sh
 cargo test -p analytic-renderer --test field_graph_gpu --release field_graph_resolution_matrix -- --ignored --nocapture
@@ -22,6 +22,12 @@ buffer creation/upload and command encoding; it is not an isolated upload time.
 | Sphere, 1 node | 1440p | 17.02 ms | 20.22 ms |
 | Balanced union, 32 nodes | 1080p | 57.37 ms | 84.71 ms |
 | Balanced union, 32 nodes | 1440p | 96.96 ms | 106.57 ms |
+
+An extended third run measured the generated 8-node/11-visit graph at 7.28,
+17.39 and 30.93 ms GPU compute median at 720p, 1080p and 1440p. The
+16-node/23-visit graph took 12.09, 27.97 and 51.56 ms respectively. The
+32-node graph took 32.07, 67.07 and 117.07 ms in this run. Different graph
+placement changes ray lengths, so node count alone does not explain all cost.
 
 In run 2, the 32-node graph took 34.96 ms at 720p and 4.78 ms at 320×240.
 At 1440p its full blocking frame median was 110.78 ms, CPU preparation
