@@ -28,7 +28,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut summary = serde_json::json!({
         "kind": "authored-structure",
         "id": structure.id(),
+        "source_format_version": structure.format_version(),
         "revision": structure.revision(),
+        "content_sha256": structure.content_revision().hex(),
+        "compiler_semantics_version": world_authoring::COMPILER_SEMANTICS_VERSION,
         "input_bytes": structure.source().len(),
         "expanded_symbols": structure.expanded_symbols(),
         "segments": structure.segments().len(),

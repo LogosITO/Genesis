@@ -24,7 +24,7 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
-use world_authoring::{Structure, compile_file};
+use world_authoring::{SegmentReference, Structure, compile_json, read_source_file};
 use world_simulation::{
     EnvironmentEvent, EnvironmentEventKind, SimulationStep, SimulationTime, advance,
     advance_life_cached, contact::ContactScene,
@@ -64,6 +64,14 @@ struct AuthoredPreview {
     scene: Scene,
     target: Vec3,
     distance: f64,
+    generation: u64,
+    selection: Option<PreviewSelection>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PreviewSelection {
+    generation: u64,
+    segment: SegmentReference,
 }
 
 impl AuthoredPreview {
@@ -99,25 +107,49 @@ impl AuthoredPreview {
             scene,
             target,
             distance: (extent * 2.0).max(7.0),
+            generation: 1,
+            selection: None,
         })
     }
 
     fn load(path: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
-        let structure = compile_file(&path)?;
-        Self::from_structure(path, structure)
+        let structure = compile_json(&read_source_file(&path)?)?;
+        let preview = Self::from_structure(path, structure)?;
+        analytic_renderer::Bvh::build(&preview.scene)?;
+        Ok(preview)
     }
 
-    #[cfg(test)]
-    fn replace(&mut self, source: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-        let next = Self::from_structure(self.path.clone(), world_authoring::compile_json(source)?)?;
+    fn replace(&mut self, source: &[u8]) -> Result<bool, Box<dyn std::error::Error>> {
+        if source == self.structure.source() {
+            return Ok(false);
+        }
+        let generation = self
+            .generation
+            .checked_add(1)
+            .ok_or("preview generation overflow")?;
+        let mut next = Self::from_structure(self.path.clone(), compile_json(source)?)?;
+        analytic_renderer::Bvh::build(&next.scene)?;
+        next.generation = generation;
         *self = next;
-        Ok(())
+        Ok(true)
     }
 
-    fn reload(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let next = Self::load(self.path.clone())?;
-        *self = next;
-        Ok(())
+    fn reload(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+        self.replace(&read_source_file(&self.path)?)
+    }
+
+    fn select(&mut self, draw_id: u32) {
+        self.selection = self
+            .structure
+            .reference(draw_id)
+            .map(|segment| PreviewSelection {
+                generation: self.generation,
+                segment,
+            });
+    }
+
+    fn resolve(&self, selected: PreviewSelection) -> bool {
+        selected.generation == self.generation && self.structure.segment(selected.segment).is_some()
     }
 
     fn print_summary(&self) {
@@ -126,7 +158,11 @@ impl AuthoredPreview {
             serde_json::json!({
                 "kind": "authored-structure",
                 "id": self.structure.id(),
+                "source_format_version": self.structure.format_version(),
                 "revision": self.structure.revision(),
+                "content_sha256": self.structure.content_revision().hex(),
+                "compiler_semantics_version": world_authoring::COMPILER_SEMANTICS_VERSION,
+                "preview_generation": self.generation,
                 "expanded_symbols": self.structure.expanded_symbols(),
                 "segments": self.structure.segments().len(),
                 "max_stack": self.structure.max_stack_used(),
@@ -464,6 +500,9 @@ impl App {
             || cursor.y >= f64::from(size.height)
         {
             self.selected = None;
+            if let Some(preview) = self.authored.as_mut() {
+                preview.selection = None;
+            }
             self.status = "CLICK INSIDE THE WINDOW".into();
             eprintln!("selection: click outside viewport");
             return;
@@ -475,6 +514,28 @@ impl App {
                 return;
             }
         };
+        if let Some(preview) = self.authored.as_mut() {
+            match camera.ray(cursor.x as u32, cursor.y as u32, size.width, size.height) {
+                Ok(ray) => {
+                    preview.selection = None;
+                    if let Some(hit) = scene.intersect(ray) {
+                        preview.select(hit.id);
+                        self.status = if preview
+                            .selection
+                            .is_some_and(|selected| preview.resolve(selected))
+                        {
+                            format!("SEGMENT {} SELECTED (STATIC PREVIEW)", hit.id)
+                        } else {
+                            "PREVIEW SELECTION UNAVAILABLE".into()
+                        };
+                    } else {
+                        self.status = "NO AUTHORED SEGMENT AT CURSOR".into();
+                    }
+                }
+                Err(error) => self.status = format!("PREVIEW PICK FAILED: {error}"),
+            }
+            return;
+        }
         match scene.pick_pixel(
             camera,
             cursor.x as u32,
@@ -1327,7 +1388,7 @@ impl ApplicationHandler for App {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } if self.life && self.focused => self.pick_cursor(),
+            } if (self.life || self.authored.is_some()) && self.focused => self.pick_cursor(),
             WindowEvent::KeyboardInput { event, .. }
                 if self.life
                     && self.focused
@@ -1387,12 +1448,22 @@ impl ApplicationHandler for App {
                         KeyCode::KeyR if self.authored.is_some() => {
                             let preview = self.authored.as_mut().expect("checked above");
                             match preview.reload() {
-                                Ok(()) => {
+                                Ok(true) => {
                                     preview.print_summary();
                                     self.last_camera = None;
-                                    eprintln!("authored definition reloaded");
+                                    self.status =
+                                        "AUTHORED REVISION CHANGED; SELECTION CLEARED".into();
+                                    eprintln!(
+                                        "authored definition reloaded; preview generation {}",
+                                        preview.generation
+                                    );
+                                }
+                                Ok(false) => {
+                                    self.status = "AUTHORED SOURCE UNCHANGED".into();
+                                    eprintln!("authored source unchanged; no rebuild");
                                 }
                                 Err(error) => {
+                                    self.status = format!("RELOAD REJECTED: {error}");
                                     eprintln!("reload rejected; preview unchanged: {error}")
                                 }
                             }
@@ -1529,13 +1600,122 @@ mod app_tests {
             assert_eq!(primitive.dimensions(), segment.end);
             assert_eq!(primitive.capsule_radius(), segment.radius);
         }
+        preview.select(1);
+        let selected = preview.selection.unwrap();
+        assert!(preview.resolve(selected));
+        let before_nodes = analytic_renderer::Bvh::build(&preview.scene)
+            .unwrap()
+            .node_count();
+        assert!(!preview.replace(BRANCH_A).unwrap());
+        assert_eq!(preview.generation, 1);
+        assert_eq!(preview.selection, Some(selected));
         assert!(preview.replace(b"{invalid").is_err());
+        let mut over_budget: serde_json::Value = serde_json::from_slice(BRANCH_A).unwrap();
+        over_budget["budgets"]["max_segments"] = serde_json::json!(1);
+        assert!(
+            preview
+                .replace(&serde_json::to_vec(&over_budget).unwrap())
+                .is_err()
+        );
         assert_eq!(preview.structure.id(), "branch-a");
         assert_eq!(preview.scene.primitives().len(), 26);
-        preview.replace(BRANCH_B).unwrap();
+        assert!(preview.resolve(selected));
+        assert_eq!(
+            analytic_renderer::Bvh::build(&preview.scene)
+                .unwrap()
+                .node_count(),
+            before_nodes
+        );
+        assert!(preview.replace(BRANCH_B).unwrap());
         assert_eq!(preview.structure.id(), "branch-b");
         assert_eq!(preview.scene.primitives().len(), 15);
         assert_ne!(preview.structure.source(), BRANCH_A);
+        assert_eq!(preview.generation, 2);
+        assert!(preview.selection.is_none());
+        assert!(!preview.resolve(selected));
+        assert_ne!(
+            analytic_renderer::Bvh::build(&preview.scene)
+                .unwrap()
+                .node_count(),
+            before_nodes
+        );
+    }
+
+    #[test]
+    fn authored_file_reload_uses_exact_bytes_and_rolls_back() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../../target/authoring-reload-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, BRANCH_A).unwrap();
+        let mut preview = AuthoredPreview::load(path.clone()).unwrap();
+        assert!(!preview.reload().unwrap());
+        assert_eq!(preview.generation, 1);
+        std::fs::write(&path, BRANCH_B).unwrap();
+        assert!(preview.reload().unwrap());
+        assert_eq!(preview.generation, 2);
+        assert_eq!(preview.structure.source(), BRANCH_B);
+        std::fs::write(&path, b"{invalid").unwrap();
+        assert!(preview.reload().is_err());
+        assert_eq!(preview.generation, 2);
+        assert_eq!(preview.structure.source(), BRANCH_B);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    #[ignore = "local release-profile unchanged/changed preview reload timing"]
+    fn authored_reload_benchmark() {
+        let mut preview =
+            AuthoredPreview::from_structure(PathBuf::new(), compile_json(BRANCH_A).unwrap())
+                .unwrap();
+        let mut unchanged = Vec::new();
+        let mut changed = Vec::new();
+        for _ in 0..30 {
+            let unchanged_source = if preview.structure.id() == "branch-a" {
+                BRANCH_A
+            } else {
+                BRANCH_B
+            };
+            let start = Instant::now();
+            assert!(!preview.replace(unchanged_source).unwrap());
+            unchanged.push(start.elapsed().as_secs_f64() * 1000.0);
+            let source = if preview.structure.id() == "branch-a" {
+                BRANCH_B
+            } else {
+                BRANCH_A
+            };
+            let start = Instant::now();
+            assert!(preview.replace(source).unwrap());
+            changed.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        let generation_after_reload = preview.generation;
+        let mut swap = Vec::new();
+        for _ in 0..30 {
+            let source = if preview.structure.id() == "branch-a" {
+                BRANCH_B
+            } else {
+                BRANCH_A
+            };
+            let next =
+                AuthoredPreview::from_structure(PathBuf::new(), compile_json(source).unwrap())
+                    .unwrap();
+            analytic_renderer::Bvh::build(&next.scene).unwrap();
+            let start = Instant::now();
+            let old = std::mem::replace(&mut preview, next);
+            drop(old);
+            swap.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        println!(
+            "{}",
+            serde_json::json!({
+                "kind": "authored-reload",
+                "samples": 30,
+                "unchanged_ms": median_p95(&unchanged),
+                "changed_compile_scene_bvh_swap_ms": median_p95(&changed),
+                "prepared_swap_and_drop_ms": median_p95(&swap),
+                "generation_after_reload": generation_after_reload,
+            })
+        );
     }
 
     #[test]
@@ -2028,6 +2208,7 @@ mod app_tests {
             pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
         let size = [640, 480];
         let mut captures = Vec::new();
+        let mut rebuilds = Vec::new();
         for (name, source) in [("branch-a", BRANCH_A), ("branch-b", BRANCH_B)] {
             let preview = AuthoredPreview::from_structure(
                 PathBuf::from(name),
@@ -2066,6 +2247,10 @@ mod app_tests {
             let direct = draw(GpuTraversal::Direct);
             let bvh = draw(GpuTraversal::Bvh);
             assert_eq!(direct, bvh, "{name} direct/BVH mismatch");
+            let built = renderer.acceleration_stats().unwrap().rebuilds;
+            assert_eq!(draw(GpuTraversal::Bvh), bvh);
+            assert_eq!(renderer.acceleration_stats().unwrap().rebuilds, built);
+            rebuilds.push(built);
             assert!(direct.chunks_exact(3).any(|pixel| pixel != &direct[..3]));
             if let Some(path) = std::env::var_os("GENESIS_AUTHORING_CAPTURE_DIR") {
                 let path = PathBuf::from(path);
@@ -2078,6 +2263,7 @@ mod app_tests {
             captures[0], captures[1],
             "different rules rendered identically"
         );
+        assert_eq!(rebuilds[1], rebuilds[0] + 1);
     }
 
     #[test]

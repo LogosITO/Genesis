@@ -19,4 +19,6 @@ The [Foundation 0.9.6 local verification](../reference/research/foundation-096/)
 
 The [Foundation 0.10 authoring experiment](../reference/research/foundation-010/) records two external structures, GPU readbacks and bounded scaling measurements. The [authoring RFC](../reference/architecture/authoring-rfc/) separates structural generators from continuous mathematical fields.
 
+The [Foundation 0.10.1 provenance evaluation](../reference/research/foundation-0101/) measures exact-byte revisions, derivation identities, snapshot integrity and reload behavior. [ADR 0008](../reference/adr/0008-content-addressed-authoring/) records the decision.
+
 The [First Ecology experiment](../reference/research/first-ecology-experiment/) records six finite-resource scenarios, local CPU timings, replay, contact integration, and open measurement gaps.

@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "=1.0.151", features = ["float_roundtrip"] }
+sha2 = { version = "=0.11.0", default-features = false }
 spatial-math = { path = "../math" }
 
 [lints]

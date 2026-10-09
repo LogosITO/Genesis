@@ -59,9 +59,13 @@ Surface outcome handling, bounded reconfiguration, physical-size validation, scr
 
 Versioned external JSON definitions, bounded deterministic rewriting, typed analytic capsule segments, a CPU inspector, and a native GPU preview with atomic file reload are implemented. These structures are static research previews, not living organisms or world saves. See the [format](../specifications/mathematical-authoring.md), [architecture RFC](../architecture/authoring-rfc.md), and [local experiment](../research/foundation-010.md).
 
+## Foundation 0.10.1 — definition provenance, local experiment
+
+Exact-byte SHA-256 revisions, bounded derivation paths, versioned self-contained authoring snapshots, and generation-aware preview selection/reload are implemented for static structures. No mutable authored world instance or world-save schema is introduced. See [ADR 0008](../adr/0008-content-addressed-authoring.md) and the [local evaluation](../research/foundation-0101.md).
+
 ## Next candidate
 
-Complete the remaining manual native QA checklist and verify the extracted Windows ZIP on a second supported machine. Check hosted Windows/Linux CI after this branch is integrated. For authored structures, next specify stable identity under edits and a versioned save reference before any mutable `WorldState` integration. Investigate measured BVH build growth if larger authored structures become a real workload.
+Complete the remaining manual native QA checklist and verify the extracted Windows ZIP on a second supported machine. Check hosted Windows/Linux CI after these local commits are integrated. For authored structures, next prototype one bounded world-owned instance with explicit definition snapshot, transform, runtime state and revision-change policy. Investigate measured BVH build growth if larger authored structures become a real workload.
 
 ## Later research
 Living or stochastic grammars, resource transport and recycling, destruction and recovery rules, broader physical interaction, embedding/FFI, standalone UI, and a richer authored language. Sequence and scope will follow experiments, not promises.
