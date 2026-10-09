@@ -1,7 +1,9 @@
 //! Experimental analytic sphere, box, and capsule renderer. World state owns geometry;
-//! this crate converts a bounded snapshot to `f32` GPU data and never stores a mesh.
+//! this crate converts a snapshot to bounded `f32` GPU data and never stores a mesh.
 
+mod acceleration;
 mod gpu;
+pub use acceleration::{Bvh, PrimitiveBounds};
 pub use gpu::{DrawOptions, GpuRenderer, GpuResult, GpuTimer};
 
 use analytic_field::{AxisAlignedBox, Capsule, Sphere};
@@ -9,8 +11,6 @@ use spatial_math::{Transform, Vec3};
 use std::fmt;
 use world_state::{MAX_NODES, WorldState};
 
-/// Hard cap used by both CPU snapshots and the WGSL loop.
-pub const MAX_OBJECTS: usize = 256;
 /// Supported world-coordinate magnitude for the first GPU prototype.
 pub const MAX_COORDINATE: f64 = 10_000.0;
 /// Supported positive primitive dimension.
@@ -23,8 +23,15 @@ pub enum RenderError {
     InvalidInput(&'static str),
     /// A primitive ID was already present in the snapshot.
     DuplicateId,
-    /// More than 256 objects were supplied.
+    /// A snapshot cannot fit in addressable host memory or GPU count representation.
     TooManyObjects,
+    /// Primitive buffer exceeds the configured budget or the device's binding/buffer limit.
+    PrimitiveCapacity {
+        /// Required storage bytes, including one dummy record for an empty scene.
+        requested_bytes: u64,
+        /// Smallest of the application budget and device limits.
+        allowed_bytes: u64,
+    },
     /// GPU validation or execution failed.
     Gpu(String),
 }
@@ -308,13 +315,13 @@ impl Primitive {
     }
 }
 
-/// A bounded, renderer-owned snapshot. `WorldState` remains the authority for its spheres.
+/// A renderer-owned snapshot. `WorldState` remains the authority for its geometry.
 #[derive(Clone, Debug, Default)]
 pub struct Scene {
     primitives: Vec<Primitive>,
 }
 impl Scene {
-    /// Copies world geometry into a bounded snapshot. IDs encode category, entity and node.
+    /// Copies all world geometry into a snapshot. IDs encode category, entity and node.
     pub fn from_world(world: &WorldState) -> Result<Self, RenderError> {
         world
             .validate()
@@ -384,14 +391,17 @@ impl Scene {
         }
         Ok(scene)
     }
-    /// Adds a primitive, rejecting duplicate identity and excess workload.
+    /// Adds a primitive, rejecting duplicate identity and allocation failure.
     pub fn push(&mut self, primitive: Primitive) -> Result<(), RenderError> {
-        if self.primitives.len() == MAX_OBJECTS {
+        if self.primitives.len() >= u32::MAX as usize {
             return Err(RenderError::TooManyObjects);
         }
         if self.primitives.iter().any(|p| p.id == primitive.id) {
             return Err(RenderError::DuplicateId);
         }
+        self.primitives
+            .try_reserve(1)
+            .map_err(|_| RenderError::TooManyObjects)?;
         self.primitives.push(primitive);
         Ok(())
     }
@@ -735,7 +745,7 @@ mod tests {
         );
     }
     #[test]
-    fn world_capacity_does_not_hide_snapshot_overflow() {
+    fn world_capacity_above_old_renderer_limit_is_complete() {
         use world_state::DeterministicSeed;
         let mut world = WorldState::new(DeterministicSeed(1));
         for _ in 0..256 {
@@ -745,10 +755,12 @@ mod tests {
         }
         world.spawn_source(Vec3::ZERO, 1.0, 1.0).unwrap();
         world.validate().unwrap();
-        assert!(matches!(
-            Scene::from_world(&world),
-            Err(RenderError::TooManyObjects)
-        ));
+        let scene = Scene::from_world(&world).unwrap();
+        assert_eq!(scene.primitives().len(), 257);
+        assert_eq!(
+            scene.primitives().last().unwrap().id,
+            3_000_000 + world.sources()[0].id().value() as u32
+        );
     }
     #[test]
     fn camera_and_validation() {

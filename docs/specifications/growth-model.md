@@ -2,7 +2,7 @@
 
 ## Established knowledge
 
-Each organism is a rooted, ordered tree in `WorldState`. Node 0 is the root; every other node has one earlier parent ID, so cycles cannot form. IDs are allocation indices and are never reused. Nodes store world position and local maturity energy. The organism stores a shared budget. Limits are 4 organisms, 48 nodes each, 4 sources, and 512 ordinary spheres. These are world limits, independent of the renderer's 256-primitive snapshot limit.
+Each organism is a rooted, ordered tree in `WorldState`. Node 0 is the root; every other node has one earlier parent ID, so cycles cannot form. IDs are allocation indices and are never reused. Nodes store world position and local maturity energy. The organism stores a shared budget. Limits are 4 organisms, 48 nodes each, 4 sources, and 512 ordinary spheres. These are world limits, independent of the renderer's [dynamic GPU storage budget](render-snapshot.md).
 
 ## Decision and equations
 
@@ -16,7 +16,7 @@ The child direction is normalized from `(0.4 parent_x + 0.35 resource_dx + diver
 
 World and simulation time are cloned for an atomic tick. Events apply in insertion order; organisms and nodes are processed in allocation order; sources are sampled in insertion order. A step evaluates at most 4 × 48 × 4 source samples and 512 legacy radius updates. Candidate positions must remain within ±1000 units. Invalid values, topology, or out-of-range positions abort the tick without changing authoritative state. `Organism::grow` itself also commits atomically. Determinism means the same serialized initial state, events, build, and floating-point execution model produce the same state; arbitrary cross-platform bitwise identity is unproven.
 
-Rule parameters must be finite and positive: node radius and segment length ≤10 world units, threshold and uptake ≤1000. Each node renders as an analytic sphere. Every parent-child edge renders as an analytic capsule using authoritative endpoints and radius `0.55 × node_radius`. Overlapping primitives do not form a regularized watertight CSG union. A fully populated four-organism world needs 192 node spheres, 188 capsules, up to 4 source markers, plus ordinary spheres; it cannot fit the 256-primitive GPU snapshot. Overflow is an explicit error, never silent truncation.
+Rule parameters must be finite and positive: node radius and segment length ≤10 world units, threshold and uptake ≤1000. Each node renders as an analytic sphere. Every parent-child edge renders as an analytic capsule using authoritative endpoints and radius `0.55 × node_radius`. Overlapping primitives do not form a regularized watertight CSG union. A fully populated four-organism world needs 192 node spheres, 188 capsules, up to 4 source markers, plus ordinary spheres. The tested 381-primitive scene uses one source and renders completely on the reference adapter. Scenes above the configured GPU budget fail explicitly, without truncation.
 
 ## Open questions
 

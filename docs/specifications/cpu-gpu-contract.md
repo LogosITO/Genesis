@@ -10,7 +10,7 @@ Camera rays pass through pixel centers. `(0,0)` is the upper-left pixel. The per
 
 ## Supported input range
 
-The renderer rejects nonfinite color and coordinates, coordinates outside `[-10,000, 10,000]`, primitive world dimensions outside `[0.0001, 10,000]`, duplicate IDs, more than 256 objects, and world IDs that do not fit `u32`. Colors are linear RGB in `[0,1]`. Positive uniform scale is baked into world radius or half extents. Rotation and nonuniform scale are not supported by the existing `Transform` model. The range is an input guard, not a precision guarantee: a 0.0001-wide feature near coordinate 10,000 cannot be resolved reliably in `f32`.
+The renderer rejects nonfinite color and coordinates, coordinates outside `[-10,000, 10,000]`, primitive world dimensions outside `[0.0001, 10,000]`, duplicate IDs, and world IDs that do not fit `u32`. GPU primitive storage has an explicit application budget and adapter ceiling, reported by `PrimitiveCapacity`; see [render snapshot](render-snapshot.md). Colors are linear RGB in `[0,1]`. Positive uniform scale is baked into world radius or half extents. Rotation and nonuniform scale are not supported by the existing `Transform` model. The range is an input guard, not a precision guarantee: a 0.0001-wide feature near coordinate 10,000 cannot be resolved reliably in `f32`.
 
 ## Numerical limits
 
@@ -22,7 +22,7 @@ The opt-in parity fixture compares hit/miss and object ID exactly for chosen ray
 
 The renderer also copies analytic capsules as endpoint A, endpoint B, and radius in `f32`. CPU and WGSL intersect the finite cylinder side and two hemispherical caps. The [capsule contract](capsule.md) defines the field and supported domain. The opt-in parity fixture exercises side, cap, interior, tangent, near-parallel, seam, and degenerate rays with distance tolerance `0.0003` world units and normal dot product at least `0.998`. These selected-ray tolerances are not numerical certificates. Overlapping node spheres and connection capsules are drawn as separate nearest-hit primitives; no watertight CSG union is claimed.
 
-The authoritative world permits 512 ordinary spheres and up to 4 × 48 growth nodes. It can exceed the 256-primitive renderer budget. Snapshot construction returns `TooManyObjects`; it never silently omits geometry. Growth node IDs use the 1,000,000 range, connection IDs the 2,000,000 range, and resource marker IDs the 3,000,000 range, derived from stable world and node identities. See the [growth model](growth-model.md) for the complete worst-case count.
+The authoritative world permits 512 ordinary spheres and up to 4 × 48 growth nodes. A complete four-organism scene with one source has 381 render primitives and fits the tested reference adapter's dynamic storage budget. Larger scenes can fail explicitly at the configured GPU budget or device limits; there is no silent omission. Growth node IDs use the 1,000,000 range, connection IDs the 2,000,000 range, and resource marker IDs the 3,000,000 range, derived from stable world and node identities. See the [growth model](growth-model.md) and [First Scale measurements](../research/first-scale-benchmark.md).
 
 ## Open questions
 

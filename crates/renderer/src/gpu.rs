@@ -1,6 +1,6 @@
 use crate::{Camera, Ray, RenderError, Scene};
 use bytemuck::{Pod, Zeroable};
-use std::sync::mpsc;
+use std::sync::{Mutex, mpsc};
 use wgpu::util::DeviceExt;
 
 #[repr(C)]
@@ -9,7 +9,7 @@ struct GpuCamera {
     rows: [[f32; 4]; 6],
 }
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct GpuPrimitive {
     center_kind: [f32; 4],
     dimensions: [f32; 4],
@@ -181,13 +181,34 @@ pub struct GpuRenderer {
     query_pipeline: wgpu::ComputePipeline,
     present_layout: wgpu::BindGroupLayout,
     present_pipeline: wgpu::RenderPipeline,
+    primitive_budget_bytes: u64,
+    primitives: Mutex<Option<PrimitiveBuffer>>,
+}
+struct PrimitiveBuffer {
+    buffer: wgpu::Buffer,
+    capacity_bytes: u64,
+    data: Vec<GpuPrimitive>,
 }
 impl GpuRenderer {
-    /// Compiles and validates both WGSL pipelines. The surface format is used only for presentation.
+    /// Uses a 16 MiB primitive-storage budget. This excludes render targets and query buffers.
     pub async fn new(
         device: &wgpu::Device,
         surface_format: wgpu::TextureFormat,
     ) -> Result<Self, RenderError> {
+        Self::with_primitive_budget(device, surface_format, 16 * 1024 * 1024).await
+    }
+    /// Compiles and validates both WGSL pipelines. The surface format is used only for presentation.
+    /// `primitive_budget_bytes` limits the resident primitive buffer, including spare capacity.
+    pub async fn with_primitive_budget(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        primitive_budget_bytes: u64,
+    ) -> Result<Self, RenderError> {
+        if primitive_budget_bytes < std::mem::size_of::<GpuPrimitive>() as u64 {
+            return Err(RenderError::InvalidInput(
+                "primitive budget below one GPU record",
+            ));
+        }
         let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("analytic intersections"),
@@ -326,6 +347,8 @@ impl GpuRenderer {
             query_pipeline,
             present_layout,
             present_pipeline,
+            primitive_budget_bytes,
+            primitives: Mutex::new(None),
         })
     }
 
@@ -350,29 +373,74 @@ impl GpuRenderer {
     fn binding(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         scene: &Scene,
         camera: GpuCamera,
         image: &wgpu::TextureView,
         rays: &[GpuRay],
-        result_count: usize,
-    ) -> (wgpu::BindGroup, wgpu::Buffer) {
+    ) -> Result<(wgpu::BindGroup, wgpu::Buffer), RenderError> {
+        let record_bytes = std::mem::size_of::<GpuPrimitive>() as u64;
+        let requested_bytes = u64::try_from(scene.primitives().len().max(1))
+            .ok()
+            .and_then(|count| count.checked_mul(record_bytes))
+            .ok_or(RenderError::TooManyObjects)?;
+        let allowed_bytes = self
+            .primitive_budget_bytes
+            .min(device.limits().max_storage_buffer_binding_size)
+            .min(device.limits().max_buffer_size);
+        if requested_bytes > allowed_bytes {
+            return Err(RenderError::PrimitiveCapacity {
+                requested_bytes,
+                allowed_bytes,
+            });
+        }
+        let objects = scene_data(scene);
+        let mut cached = self
+            .primitives
+            .lock()
+            .map_err(|_| RenderError::Gpu("primitive buffer lock poisoned".into()))?;
+        let replace = cached
+            .as_ref()
+            .is_none_or(|old| requested_bytes > old.capacity_bytes);
+        if replace {
+            let capacity_bytes = requested_bytes.next_power_of_two().min(allowed_bytes);
+            let error_scope = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("analytic primitives"),
+                size: capacity_bytes,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            if let Some(error) = pollster::block_on(error_scope.pop()) {
+                return Err(RenderError::Gpu(format!(
+                    "primitive allocation failed: {error}"
+                )));
+            }
+            *cached = Some(PrimitiveBuffer {
+                buffer,
+                capacity_bytes,
+                data: Vec::new(),
+            });
+        }
+        let primitive_buffer = cached.as_mut().expect("created above");
+        if replace || primitive_buffer.data != objects {
+            if objects.is_empty() {
+                queue.write_buffer(
+                    &primitive_buffer.buffer,
+                    0,
+                    bytemuck::bytes_of(&GpuPrimitive::zeroed()),
+                );
+            } else {
+                queue.write_buffer(&primitive_buffer.buffer, 0, bytemuck::cast_slice(&objects));
+            }
+            primitive_buffer.data = objects;
+        }
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera uniform"),
             contents: bytemuck::bytes_of(&camera),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-        let objects = scene_data(scene);
-        let empty_object = GpuPrimitive::zeroed();
         let empty_ray = GpuRay::zeroed();
-        let objects_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("analytic primitives"),
-            contents: if objects.is_empty() {
-                bytemuck::bytes_of(&empty_object)
-            } else {
-                bytemuck::cast_slice(&objects)
-            },
-            usage: wgpu::BufferUsages::STORAGE,
-        });
         let ray_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("query rays"),
             contents: if rays.is_empty() {
@@ -384,7 +452,7 @@ impl GpuRenderer {
         });
         let result_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("query results"),
-            size: (result_count.max(1) * std::mem::size_of::<GpuHit>()) as u64,
+            size: (rays.len().max(1) * std::mem::size_of::<GpuHit>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
@@ -398,7 +466,7 @@ impl GpuRenderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: objects_buffer.as_entire_binding(),
+                    resource: primitive_buffer.buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -414,7 +482,7 @@ impl GpuRenderer {
                 },
             ],
         });
-        (group, result_buffer)
+        Ok((group, result_buffer))
     }
 
     /// Computes an offscreen RGBA8 image and optionally presents it to a surface view.
@@ -439,6 +507,7 @@ impl GpuRenderer {
         let image_view = image.create_view(&wgpu::TextureViewDescriptor::default());
         let (group, _) = self.binding(
             device,
+            queue,
             scene,
             camera_data(
                 camera,
@@ -449,8 +518,7 @@ impl GpuRenderer {
             ),
             &image_view,
             &[],
-            0,
-        );
+        )?;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("analytic frame"),
         });
@@ -532,7 +600,7 @@ impl GpuRenderer {
         let mut query_camera = GpuCamera::zeroed();
         query_camera.rows[5][1] = scene.primitives().len() as f32;
         let (group, result_buffer) =
-            self.binding(device, scene, query_camera, &image_view, &input, rays.len());
+            self.binding(device, queue, scene, query_camera, &image_view, &input)?;
         let size = (rays.len() * std::mem::size_of::<GpuHit>()) as u64;
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("query readback"),

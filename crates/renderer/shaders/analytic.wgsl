@@ -24,6 +24,7 @@ struct Hit {
     distance: f32,
     normal: vec3<f32>,
     id: u32,
+    primitive_index: u32,
     valid: bool,
 }
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -33,7 +34,7 @@ struct Hit {
 @group(0) @binding(4) var<storage, read_write> query_hits: array<GpuHit>;
 
 fn no_hit() -> Hit {
-    return Hit(0.0, vec3<f32>(0.0), 0xffffffffu, false);
+    return Hit(0.0, vec3<f32>(0.0), 0xffffffffu, 0u, false);
 }
 
 fn sphere_hit(p: Primitive, origin: vec3<f32>, direction: vec3<f32>, near: f32, far: f32) -> Hit {
@@ -47,7 +48,7 @@ fn sphere_hit(p: Primitive, origin: vec3<f32>, direction: vec3<f32>, near: f32, 
     let exit = -b + root;
     let t = select(exit, entry, entry >= near);
     if (t < near || t > far) { return no_hit(); }
-    return Hit(t, normalize(relative + t * direction), p.identity.x, true);
+    return Hit(t, normalize(relative + t * direction), p.identity.x, 0u, true);
 }
 
 fn box_hit(p: Primitive, origin: vec3<f32>, direction: vec3<f32>, near: f32, far: f32) -> Hit {
@@ -82,7 +83,7 @@ fn box_hit(p: Primitive, origin: vec3<f32>, direction: vec3<f32>, near: f32, far
     let use_entry = entry >= near;
     let t = select(exit, entry, use_entry);
     if (t < near || t > far) { return no_hit(); }
-    return Hit(t, select(exit_normal, entry_normal, use_entry), p.identity.x, true);
+    return Hit(t, select(exit_normal, entry_normal, use_entry), p.identity.x, 0u, true);
 }
 
 fn capsule_hit(p: Primitive, origin: vec3<f32>, direction: vec3<f32>, near: f32, far: f32) -> Hit {
@@ -109,7 +110,7 @@ fn capsule_hit(p: Primitive, origin: vec3<f32>, direction: vec3<f32>, near: f32,
                 let t = select((-qb + root) / qa, (-qb - root) / qa, i == 0u);
                 let along = parallel_o + t * parallel_d;
                 if (t >= near && t <= far && along >= 0.0 && along <= length && (!best.valid || t < best.distance)) {
-                    best = Hit(t, normalize(radial_o + t * radial_d), p.identity.x, true);
+                    best = Hit(t, normalize(radial_o + t * radial_d), p.identity.x, 0u, true);
                 }
             }
         }
@@ -127,7 +128,7 @@ fn capsule_hit(p: Primitive, origin: vec3<f32>, direction: vec3<f32>, near: f32,
             let point = origin + t * direction;
             let along = dot(point - a, unit);
             if (t >= near && t <= far && (length == 0.0 || (cap == 0u && along <= 0.0) || (cap == 1u && along >= length)) && (!best.valid || t < best.distance)) {
-                best = Hit(t, normalize(point - center), p.identity.x, true);
+                best = Hit(t, normalize(point - center), p.identity.x, 0u, true);
             }
         }
     }
@@ -137,7 +138,7 @@ fn capsule_hit(p: Primitive, origin: vec3<f32>, direction: vec3<f32>, near: f32,
 fn trace(origin: vec3<f32>, direction: vec3<f32>, near: f32, far: f32) -> Hit {
     var closest = no_hit();
     var limit = far;
-    for (var i = 0u; i < min(u32(camera.settings.y), 256u); i++) {
+    for (var i = 0u; i < min(u32(camera.settings.y), arrayLength(&objects)); i++) {
         let p = objects[i];
         var candidate = no_hit();
         if (p.center_kind.w == 0.0) {
@@ -148,6 +149,7 @@ fn trace(origin: vec3<f32>, direction: vec3<f32>, near: f32, far: f32) -> Hit {
             candidate = capsule_hit(p, origin, direction, near, limit);
         }
         if (candidate.valid && (!closest.valid || candidate.distance < closest.distance)) {
+            candidate.primitive_index = i;
             closest = candidate;
             limit = candidate.distance;
         }
@@ -168,10 +170,7 @@ fn render(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (camera.settings.x > 0.5) {
             color = hit.normal * 0.5 + vec3<f32>(0.5);
         } else {
-            var base = vec3<f32>(1.0);
-            for (var i = 0u; i < min(u32(camera.settings.y), 256u); i++) {
-                if (objects[i].identity.x == hit.id) { base = objects[i].color.xyz; break; }
-            }
+            let base = objects[hit.primitive_index].color.xyz;
             let light = normalize(vec3<f32>(0.5, 0.8, -0.6));
             color = base * (0.18 + 0.82 * max(dot(hit.normal, light), 0.0));
         }

@@ -113,19 +113,14 @@ fn scale_sample(
         .sum();
     let mut step_us = Vec::new();
     let mut snapshot_us = Vec::new();
-    let mut primitive_count = None;
-    let mut overflow = false;
+    let mut primitive_count = 0;
     for _ in 0..25 {
         let mut copy = runtime.clone();
         let started = Instant::now();
         copy.tick()?;
         step_us.push(started.elapsed().as_secs_f64() * 1e6);
         let started = Instant::now();
-        match Scene::from_world(runtime.world()) {
-            Ok(scene) => primitive_count = Some(scene.primitives().len()),
-            Err(analytic_renderer::RenderError::TooManyObjects) => overflow = true,
-            Err(error) => return Err(error.into()),
-        }
+        primitive_count = Scene::from_world(runtime.world())?.primitives().len();
         snapshot_us.push(started.elapsed().as_secs_f64() * 1e6);
     }
     step_us.sort_by(f64::total_cmp);
@@ -137,7 +132,7 @@ fn scale_sample(
     };
     Ok(serde_json::json!({
         "organisms": organisms, "nodes": nodes, "ticks": runtime.time().ticks(),
-        "primitives": primitive_count, "snapshot_overflow": overflow,
+        "primitives": primitive_count,
         "step_median_us": step_us[12], "snapshot_median_us": snapshot_us[12],
         "node_storage_lower_bound_bytes": nodes * std::mem::size_of::<GrowthNode>(),
         "save_bytes": save_bytes,
