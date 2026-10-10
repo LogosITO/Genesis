@@ -469,6 +469,7 @@ dependencies = [
  "analytic-renderer",
  "font8x8",
  "pollster",
+ "serde",
  "serde_json",
  "spatial-math",
  "wgpu",

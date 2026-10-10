@@ -72,6 +72,18 @@ impl Runtime {
             contact_cache: None,
         }
     }
+    /// Wraps a completed world/time snapshot for versioned saving.
+    /// No future events are inferred from the snapshot.
+    pub fn from_snapshot(
+        world: WorldState,
+        time: SimulationTime,
+        step: SimulationStep,
+    ) -> Result<Self, PersistenceError> {
+        let mut runtime = Self::new(world, step);
+        runtime.time = time;
+        runtime.validate()?;
+        Ok(runtime)
+    }
     /// Advances exactly one fixed step.
     pub fn tick(&mut self) -> Result<(), SimulationError> {
         let tick = self
@@ -258,6 +270,23 @@ mod tests {
     use super::*;
     use spatial_math::Vec3;
     use world_state::{DeterministicSeed, GrowthParameters};
+
+    #[test]
+    fn completed_snapshot_keeps_tick_and_world_through_save() {
+        let mut runtime = Runtime::new(
+            WorldState::new(DeterministicSeed(9)),
+            SimulationStep::new(0.1).unwrap(),
+        );
+        runtime.tick().unwrap();
+        let snapshot =
+            Runtime::from_snapshot(runtime.world().clone(), runtime.time(), runtime.step())
+                .unwrap();
+        assert_eq!(snapshot, runtime);
+        assert_eq!(
+            Runtime::load_bytes(&snapshot.save_bytes().unwrap()).unwrap(),
+            runtime
+        );
+    }
 
     fn fixture() -> (Runtime, world_state::EntityId) {
         let mut world = WorldState::new(DeterministicSeed(9));

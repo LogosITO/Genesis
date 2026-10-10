@@ -1,6 +1,7 @@
 //! Native First Light viewport. World simulation advances in fixed steps; rendering samples it.
 
 mod hud;
+mod living;
 mod passage;
 
 use analytic_field::{AxisAlignedBox, Capsule, Sphere};
@@ -25,6 +26,7 @@ use winit::{
     window::{Window, WindowId},
 };
 use world_authoring::{SegmentReference, Structure, compile_json, read_source_file};
+use world_runtime::Runtime;
 use world_simulation::{
     EnvironmentEvent, EnvironmentEventKind, SimulationStep, SimulationTime, advance, advance_life,
     advance_life_cached, contact::ContactScene,
@@ -243,7 +245,7 @@ impl Graphics {
     async fn open(
         window: Arc<Window>,
         lost: Arc<AtomicBool>,
-        passage: bool,
+        show_hud: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window.clone())?;
@@ -302,7 +304,7 @@ impl Graphics {
         surface.configure(&device, &config);
         let renderer = GpuRenderer::new(&device, format).await?;
         let timer = GpuTimer::new(&device);
-        let hud = passage.then(|| hud::Hud::new(&device, format));
+        let hud = show_hud.then(|| hud::Hud::new(&device, format));
         Ok(Self {
             window,
             surface,
@@ -351,7 +353,12 @@ struct App {
     frames: u32,
     cpu_total: Duration,
     life: bool,
+    living: bool,
     passage: bool,
+    fast: bool,
+    last_save: Option<PathBuf>,
+    living_scene_path: Option<PathBuf>,
+    living_profile_tick: Option<u64>,
     mixed: bool,
     show_analytic: bool,
     show_fields: bool,
@@ -440,7 +447,12 @@ impl App {
             frames: 0,
             cpu_total: Duration::ZERO,
             life,
+            living: false,
             passage,
+            fast: false,
+            last_save: None,
+            living_scene_path: None,
+            living_profile_tick: None,
             mixed: false,
             show_analytic: true,
             show_fields: true,
@@ -475,6 +487,98 @@ impl App {
             cursor: None,
             last_camera: None,
         })
+    }
+    fn living(runtime: Runtime) -> Result<Self, Box<dyn std::error::Error>> {
+        if runtime.step() != SimulationStep::new(STEP.as_secs_f64())?
+            || !runtime.pending_events().is_empty()
+            || runtime.world().organisms().len() != 2
+            || runtime.world().sources().len() != 2
+            || runtime
+                .world()
+                .sources()
+                .iter()
+                .any(|source| source.reservoir().is_none())
+            || runtime.world().organisms()[0].parameters()
+                == runtime.world().organisms()[1].parameters()
+        {
+            return Err("living-world save requires the native fixed step, no pending events, two organisms and two finite sources".into());
+        }
+        let mut app = Self::new(true, false)?;
+        app.living_profile_tick = match std::env::var("GENESIS_LIVING_INTERVENTION_TICK") {
+            Ok(value) => Some(
+                value
+                    .parse()
+                    .map_err(|_| "invalid living intervention tick")?,
+            ),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(error) => return Err(error.into()),
+        };
+        app.world = runtime.world().clone();
+        app.time = runtime.time();
+        app.step = runtime.step();
+        app.source_id = Some(app.world.sources()[0].id());
+        app.body_id = app.world.body().map(|body| body.id());
+        app.body_input_dirty = false;
+        app.living = true;
+        app.status = "TWO STRATEGIES; MOVE THE RESOURCE TO CHANGE THEIR FUTURE".into();
+        Ok(app)
+    }
+    fn living_scene(path: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
+        let runtime = living::read_scene(&path, SimulationStep::new(STEP.as_secs_f64())?)?;
+        let mut app = Self::living(runtime)?;
+        app.living_scene_path = Some(path);
+        Ok(app)
+    }
+    fn reset_living(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let reset = if let Some(path) = &self.living_scene_path {
+            Self::living(living::read_scene(path, self.step)?)?
+        } else {
+            Self::living(living::initial(self.step)?)?
+        };
+        self.world = reset.world;
+        self.time = reset.time;
+        self.source_id = reset.source_id;
+        self.body_id = reset.body_id;
+        self.contact_cache = None;
+        self.selected = None;
+        self.pending_move = false;
+        self.pending_source_toggle = false;
+        self.pending_prune = None;
+        self.paused = false;
+        self.fast = false;
+        self.accumulator = Duration::ZERO;
+        self.previous = Instant::now();
+        self.status = "RESET TO IDENTICAL INITIAL STATE".into();
+        Ok(())
+    }
+    fn save_living(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.pending_move || self.pending_source_toggle || self.pending_prune.is_some() {
+            return Err("advance the pending intervention before saving".into());
+        }
+        let directory = PathBuf::from("target/living-world-saves");
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join(format!("tick-{}.json", self.time.ticks()));
+        Runtime::from_snapshot(self.world.clone(), self.time, self.step)?.save_new(&path)?;
+        self.status = format!("SAVED {}", path.display());
+        self.last_save = Some(path);
+        Ok(())
+    }
+    fn load_living(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let path = self.last_save.as_ref().ok_or("NO SAVE IN THIS SESSION")?;
+        let loaded = Self::living(Runtime::load_file(path)?)?;
+        self.world = loaded.world;
+        self.time = loaded.time;
+        self.source_id = loaded.source_id;
+        self.body_id = loaded.body_id;
+        self.contact_cache = None;
+        self.selected = None;
+        self.pending_move = false;
+        self.pending_source_toggle = false;
+        self.pending_prune = None;
+        self.accumulator = Duration::ZERO;
+        self.previous = Instant::now();
+        self.status = format!("LOADED {}", path.display());
+        Ok(())
     }
     fn authoring(path: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
         let preview = AuthoredPreview::load(path)?;
@@ -726,7 +830,7 @@ impl App {
     }
     fn set_focus(&mut self, focused: bool) {
         self.focused = focused;
-        if !focused && self.life {
+        if !focused && self.life && !self.living {
             self.body_keys = [false; 4];
             self.body_input_dirty = true;
         }
@@ -792,6 +896,13 @@ impl App {
         if self.paused {
             return Ok(());
         }
+        if self.living
+            && self
+                .living_profile_tick
+                .is_some_and(|tick| self.time.ticks().checked_add(1) == Some(tick))
+        {
+            self.pending_move = true;
+        }
         if let Some(scenario) = self.benchmark_scenario {
             let tick = self.time.ticks().saturating_sub(45);
             match (scenario, tick) {
@@ -819,7 +930,13 @@ impl App {
                 .iter()
                 .find(|s| s.id() == source_id)
                 .expect("life source exists");
-            let position = if self.passage {
+            let position = if self.living {
+                if source.position().x() < 2.0 {
+                    v(4.0, 1.5, 0.0)
+                } else {
+                    v(-0.3, 1.8, 0.0)
+                }
+            } else if self.passage {
                 if source.position().x() < 2.0 {
                     v(2.4, 3.7, 0.2)
                 } else {
@@ -895,7 +1012,7 @@ impl App {
         }
         self.pending_move = false;
         self.pending_source_toggle = false;
-        if self.passage
+        if (self.passage || self.living)
             && events
                 .iter()
                 .any(|event| matches!(event.kind, EnvironmentEventKind::SetSourceActive { .. }))
@@ -907,12 +1024,14 @@ impl App {
             }
             .into();
         }
-        if self.passage
+        if (self.passage || self.living)
             && events
                 .iter()
                 .any(|event| matches!(event.kind, EnvironmentEventKind::MoveSource { .. }))
         {
-            self.status = if self.world.sources()[0].position().x() > 2.0 {
+            self.status = if self.living {
+                "SOURCE MOVED; RESOURCE UPTAKE WILL FOLLOW THE NEW FIELD".into()
+            } else if self.world.sources()[0].position().x() > 2.0 {
                 "SOURCE AWAY. BLUE GROWTH CONTINUES.".into()
             } else {
                 "SOURCE RETURNED. GREEN STEM CAN REGROW.".into()
@@ -971,9 +1090,11 @@ impl App {
             self.interval_samples.push(elapsed.as_secs_f64() * 1000.0);
         }
         if !self.paused {
-            self.accumulator += elapsed.min(Duration::from_millis(250));
+            let multiplier = if self.living && self.fast { 4 } else { 1 };
+            let max_steps = 4 * multiplier;
+            self.accumulator += elapsed.min(Duration::from_millis(250)) * multiplier;
             let mut steps = 0;
-            while self.accumulator >= STEP && steps < 4 {
+            while self.accumulator >= STEP && steps < max_steps {
                 if let Err(error) = self.simulation_tick() {
                     eprintln!("simulation failed: {error}");
                     event_loop.exit();
@@ -988,8 +1109,8 @@ impl App {
                     break;
                 }
             }
-            // shortcut: drop excess wall-time debt after four fixed steps; use a separate simulation worker if sustained frame times exceed 67 ms.
-            self.accumulator = self.accumulator.min(STEP * 4);
+            // shortcut: bound catch-up work per frame; use a simulation worker if sustained load exceeds this budget.
+            self.accumulator = self.accumulator.min(STEP * max_steps);
         }
         let snapshot_started = Instant::now();
         let scene = match self.scene() {
@@ -1004,7 +1125,42 @@ impl App {
             self.snapshot_samples
                 .push(snapshot_started.elapsed().as_secs_f64() * 1000.0);
         }
-        let hud_lines = if self.passage {
+        let hud_lines = if self.living {
+            let counts = self
+                .world
+                .organisms()
+                .iter()
+                .map(|organism| organism.nodes().len())
+                .collect::<Vec<_>>();
+            let stocks = self
+                .world
+                .sources()
+                .iter()
+                .map(|source| source.reservoir().expect("finite source").stored())
+                .collect::<Vec<_>>();
+            Some([
+                "GENESIS LIVING WORLD | EXPERIMENTAL".into(),
+                "SPACE PAUSE | . STEP | F FAST | M MOVE SOURCE".into(),
+                "R RESET | F5 SAVE | F9 LOAD | ARROWS LOOK".into(),
+                format!(
+                    "TICK {} | NODES {counts:?} | STOCK {:.3}/{:.3}",
+                    self.time.ticks(),
+                    stocks[0],
+                    stocks[1]
+                ),
+                format!(
+                    "{} | ANALYTIC GPU | {}",
+                    if self.paused {
+                        "PAUSED"
+                    } else if self.fast {
+                        "FAST"
+                    } else {
+                        "RUNNING"
+                    },
+                    self.status
+                ),
+            ])
+        } else if self.passage {
             let selected = match self.selected {
                 Some(SemanticTarget::Connection { organism, child }) => {
                     format!("BRANCH {}:{}", organism.value(), child)
@@ -1123,7 +1279,9 @@ impl App {
         };
         graphics.window.set_title(&format!(
             "{} — tick {}{} — selected {:?} — contact {:?}{}{}",
-            if self.passage {
+            if self.living {
+                "Genesis Living World"
+            } else if self.passage {
                 "The Passage"
             } else if self.mixed {
                 "Genesis Mixed Research View"
@@ -1418,7 +1576,9 @@ impl ApplicationHandler for App {
         }
         let window = match event_loop.create_window(
             Window::default_attributes()
-                .with_title(if self.passage {
+                .with_title(if self.living {
+                    "Genesis Living World — Experimental"
+                } else if self.passage {
                     "The Passage — Genesis Experimental Demo"
                 } else if self.authored.is_some() {
                     "Genesis Authoring Preview — Experimental"
@@ -1451,7 +1611,11 @@ impl ApplicationHandler for App {
                 return;
             }
         };
-        match pollster::block_on(Graphics::open(window, self.lost.clone(), self.passage)) {
+        match pollster::block_on(Graphics::open(
+            window,
+            self.lost.clone(),
+            self.passage || self.living,
+        )) {
             Ok(graphics) => {
                 self.graphics = Some(graphics);
                 self.previous = Instant::now();
@@ -1508,6 +1672,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::KeyboardInput { event, .. }
                 if self.life
+                    && !self.living
                     && self.focused
                     && (self.passage
                         || matches!(
@@ -1575,11 +1740,43 @@ impl ApplicationHandler for App {
                             self.pending_move = true;
                             self.status = "RESOURCE MOVE QUEUED".into();
                         }
-                        KeyCode::KeyO if self.passage => {
+                        KeyCode::KeyO if self.passage || self.living => {
                             self.pending_source_toggle = true;
                             self.status = "SOURCE SWITCH QUEUED".into();
                         }
+                        KeyCode::KeyF if self.living => {
+                            self.fast = !self.fast;
+                            self.status = if self.fast {
+                                "FAST TIME"
+                            } else {
+                                "NORMAL TIME"
+                            }
+                            .into();
+                        }
+                        KeyCode::Period if self.living && self.paused => {
+                            self.paused = false;
+                            let result = self.simulation_tick();
+                            self.paused = true;
+                            if let Err(error) = result {
+                                self.status = format!("STEP REJECTED: {error}");
+                            }
+                        }
+                        KeyCode::F5 if self.living => {
+                            if let Err(error) = self.save_living() {
+                                self.status = format!("SAVE FAILED: {error}");
+                            }
+                        }
+                        KeyCode::F9 if self.living => {
+                            if let Err(error) = self.load_living() {
+                                self.status = format!("LOAD FAILED: {error}");
+                            }
+                        }
                         KeyCode::KeyP if self.life => self.queue_prune(),
+                        KeyCode::KeyR if self.living => {
+                            if let Err(error) = self.reset_living() {
+                                self.status = format!("RESET FAILED: {error}");
+                            }
+                        }
                         KeyCode::KeyR if self.passage => {
                             if let Err(error) = self.restart_passage() {
                                 self.status = format!("RESTART FAILED: {error}");
@@ -1664,6 +1861,14 @@ impl ApplicationHandler for App {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.as_slice() == ["--living-experiment"] {
+        println!("{}", serde_json::to_string_pretty(&living::experiment()?)?);
+        return Ok(());
+    }
+    if args.as_slice() == ["--living-measure"] {
+        println!("{}", living::measure_cpu()?);
+        return Ok(());
+    }
     if args.as_slice() == ["--passage-measure"] {
         return passage::measure_cpu();
     }
@@ -1671,12 +1876,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [] => App::new(false, false)?,
         [flag] if flag == "--passage" => App::new(true, true)?,
         [flag] if flag == "--life" => App::new(true, false)?,
+        [flag] if flag == "--living" => {
+            App::living(living::initial(SimulationStep::new(STEP.as_secs_f64())?)?)?
+        }
+        [flag, path] if flag == "--living-scene" => App::living_scene(PathBuf::from(path))?,
+        [flag, path] if flag == "--living-load" => App::living(Runtime::load_file(path)?)?,
         [flag] if flag == "--mixed" => App::mixed()?,
         [flag, path] if flag == "--authoring" => App::authoring(PathBuf::from(path))?,
         [flag, path] if flag == "--authored-world" => App::authored_world(PathBuf::from(path))?,
         _ => {
             return Err(
-                "usage: first-light [--life|--passage|--mixed|--authoring FILE|--authored-world FILE]"
+                "usage: first-light [--life|--living|--living-scene FILE|--living-load FILE|--living-experiment|--living-measure|--passage|--mixed|--authoring FILE|--authored-world FILE]"
                     .into(),
             );
         }
@@ -1684,7 +1894,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (life, passage) = (app.life, app.passage);
     eprintln!(
         "{} controls: {} {}N normals; {}Esc exit",
-        if passage {
+        if app.living {
+            "Genesis Living World"
+        } else if passage {
             "The Passage"
         } else if app.mixed {
             "Genesis Mixed Research View"
@@ -1713,6 +1925,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "R reload definition; "
         } else if !app.world.authored_instances().is_empty() {
             "Left click select; E enable/disable; M move +X; "
+        } else if app.living {
+            "M move resource; O toggle source; P prune; F fast time; . fixed step; R reset; F5 save; F9 load; "
         } else if life && !passage {
             "M move resource source; Left click select; P prune selected branch; I/J/K/L move body; "
         } else if passage {
@@ -1732,6 +1946,74 @@ mod app_tests {
     use analytic_renderer::{GpuTraversal, Ray};
     use std::{path::Path, sync::mpsc};
     use world_simulation::advance_life;
+
+    #[test]
+    fn living_native_state_uses_same_laws_and_resets_exactly() {
+        let initial = living::initial(SimulationStep::new(STEP.as_secs_f64()).unwrap()).unwrap();
+        let mut app = App::living(initial.clone()).unwrap();
+        app.pending_move = true;
+        assert!(app.save_living().is_err());
+        app.pending_move = false;
+        for _ in 0..60 {
+            app.simulation_tick().unwrap();
+        }
+        let mut control = initial.clone();
+        for _ in 0..60 {
+            control.tick().unwrap();
+        }
+        assert_eq!(&app.world, control.world());
+        app.pending_move = true;
+        app.simulation_tick().unwrap();
+        control
+            .schedule(61, living::intervention(&control))
+            .unwrap();
+        control.tick().unwrap();
+        assert_eq!(&app.world, control.world());
+        let saved = Runtime::from_snapshot(app.world.clone(), app.time, app.step)
+            .unwrap()
+            .save_bytes()
+            .unwrap();
+        let restored = Runtime::load_bytes(&saved).unwrap();
+        assert_eq!(restored.world(), &app.world);
+        assert_eq!(restored.time(), app.time);
+        app.reset_living().unwrap();
+        assert_eq!(&app.world, initial.world());
+        assert_eq!(app.time, initial.time());
+    }
+
+    #[test]
+    fn living_window_profile_applies_the_same_typed_intervention() {
+        let initial = living::initial(SimulationStep::new(STEP.as_secs_f64()).unwrap()).unwrap();
+        let mut app = App::living(initial).unwrap();
+        app.living_profile_tick = Some(1);
+        app.simulation_tick().unwrap();
+        assert_eq!(app.world.sources()[0].position(), v(4.0, 1.5, 0.0));
+        assert_eq!(app.time.ticks(), 1);
+    }
+
+    #[test]
+    fn living_scene_reload_rejects_invalid_file_without_mutation() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../../target/living-scene-test-{}.json",
+            std::process::id()
+        ));
+        let original = include_bytes!("../scenes/living-world.json");
+        std::fs::write(&path, original).unwrap();
+        let mut app = App::living_scene(path.clone()).unwrap();
+        let before = app.world.clone();
+        app.simulation_tick().unwrap();
+        std::fs::write(&path, b"{bad json").unwrap();
+        let running = app.world.clone();
+        assert!(app.reset_living().is_err());
+        assert_eq!(app.world, running);
+        let mut changed: serde_json::Value = serde_json::from_slice(original).unwrap();
+        changed["organisms"][1]["uptake"] = serde_json::json!(1.1);
+        std::fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+        app.reset_living().unwrap();
+        assert_ne!(app.world, before);
+        assert_eq!(app.time.ticks(), 0);
+        std::fs::remove_file(path).unwrap();
+    }
 
     const BRANCH_A: &[u8] = include_bytes!("../../authoring/branch-a.json");
     const BRANCH_B: &[u8] = include_bytes!("../../authoring/branch-b.json");
@@ -2345,6 +2627,207 @@ mod app_tests {
             bmp.resize(bmp.len() + (stride - width * 3) as usize, 0);
         }
         std::fs::write(path, bmp).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a native GPU; set GENESIS_LIVING_CAPTURE_DIR for actual BMP readbacks"]
+    fn living_world_gpu_frames_follow_authoritative_divergence() {
+        let initial = living::initial(SimulationStep::new(STEP.as_secs_f64()).unwrap()).unwrap();
+        let (mut control, mut changed) = (initial.clone(), initial);
+        let mut scenes = vec![(
+            "initial-control",
+            Scene::from_world(control.world()).unwrap(),
+        )];
+        scenes.push((
+            "initial-intervention",
+            Scene::from_world(changed.world()).unwrap(),
+        ));
+        for tick in 1..=240 {
+            if tick == 61 {
+                changed
+                    .schedule(tick, living::intervention(&changed))
+                    .unwrap();
+            }
+            control.tick().unwrap();
+            changed.tick().unwrap();
+            if [60, 120, 240].contains(&tick) {
+                scenes.push((
+                    match tick {
+                        60 => "t60-control",
+                        120 => "t120-control",
+                        _ => "t240-control",
+                    },
+                    Scene::from_world(control.world()).unwrap(),
+                ));
+                scenes.push((
+                    match tick {
+                        60 => "t60-intervention",
+                        120 => "t120-intervention",
+                        _ => "t240-intervention",
+                    },
+                    Scene::from_world(changed.world()).unwrap(),
+                ));
+            }
+        }
+        let instance = wgpu::Instance::default();
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            ..Default::default()
+        }))
+        .expect("native GPU required");
+        let info = adapter.get_info();
+        eprintln!(
+            "living_gpu adapter={} backend={:?} driver={}",
+            info.name, info.backend, info.driver
+        );
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        let renderer =
+            pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+        let camera =
+            Camera::look_at(v(0.8, 3.2, -9.0), v(0.8, 1.5, 0.0), v(0.0, 1.0, 0.0), 0.95).unwrap();
+        let size = [640, 360];
+        let capture_dir = std::env::var_os("GENESIS_LIVING_CAPTURE_DIR");
+        if let Some(dir) = &capture_dir {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let mut images = Vec::new();
+        for (name, scene) in &scenes {
+            let draw = |traversal| {
+                let image = renderer
+                    .draw_with_traversal(
+                        &device,
+                        &queue,
+                        scene,
+                        camera,
+                        traversal,
+                        DrawOptions {
+                            size,
+                            normal_debug: false,
+                            surface: None,
+                            timer: None,
+                        },
+                    )
+                    .unwrap();
+                read_rgb(&device, &queue, &image, size)
+            };
+            let direct = draw(GpuTraversal::Direct);
+            assert_eq!(
+                direct,
+                draw(GpuTraversal::Bvh),
+                "{name}: direct/BVH mismatch"
+            );
+            if let Some(dir) = &capture_dir {
+                write_bmp(
+                    &Path::new(dir).join(format!("living-{name}.bmp")),
+                    &direct,
+                    size,
+                );
+            }
+            images.push(direct);
+        }
+        assert_eq!(images[0], images[1]);
+        assert_eq!(images[2], images[3]);
+        assert_ne!(images[4], images[5]);
+        assert_ne!(images[6], images[7]);
+        assert_ne!(images[0], images[6]);
+    }
+
+    #[test]
+    #[ignore = "release-profile offscreen GPU timing of the living-world workload"]
+    fn living_world_gpu_resolution_measurement() {
+        let mut runtime =
+            living::initial(SimulationStep::new(STEP.as_secs_f64()).unwrap()).unwrap();
+        let mut scenes = Vec::new();
+        for tick in 1..=240 {
+            if tick == 61 {
+                runtime
+                    .schedule(tick, living::intervention(&runtime))
+                    .unwrap();
+            }
+            runtime.tick().unwrap();
+            if [60, 120, 240].contains(&tick) {
+                scenes.push((tick, Scene::from_world(runtime.world()).unwrap()));
+            }
+        }
+        let instance = wgpu::Instance::default();
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            ..Default::default()
+        }))
+        .expect("native GPU required");
+        let features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: features,
+            ..Default::default()
+        }))
+        .unwrap();
+        let renderer =
+            pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+        let timer = GpuTimer::new(&device);
+        let camera =
+            Camera::look_at(v(0.8, 3.2, -9.0), v(0.8, 1.5, 0.0), v(0.0, 1.0, 0.0), 0.95).unwrap();
+        eprintln!(
+            "living_gpu_measure adapter={:?} timestamp={} profile={}",
+            adapter.get_info(),
+            timer.is_some(),
+            if cfg!(debug_assertions) {
+                "dev"
+            } else {
+                "release"
+            }
+        );
+        for (tick, scene) in &scenes {
+            for size in [[1280, 720], [1920, 1080], [2560, 1440]] {
+                let mut total = Vec::new();
+                let mut gpu = Vec::new();
+                for i in 0..9 {
+                    let started = Instant::now();
+                    renderer
+                        .draw_with_traversal(
+                            &device,
+                            &queue,
+                            scene,
+                            camera,
+                            GpuTraversal::Bvh,
+                            DrawOptions {
+                                size,
+                                normal_debug: false,
+                                surface: None,
+                                timer: timer.as_ref(),
+                            },
+                        )
+                        .unwrap();
+                    let gpu_ms = if let Some(timer) = &timer {
+                        Some(timer.read_ms(&device, &queue).unwrap())
+                    } else {
+                        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                        None
+                    };
+                    if i >= 2 {
+                        total.push(started.elapsed().as_secs_f64() * 1000.0);
+                        if let Some(ms) = gpu_ms {
+                            gpu.push(ms);
+                        }
+                    }
+                }
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "kind": "living-world-offscreen",
+                        "tick": tick,
+                        "primitives": scene.primitives().len(),
+                        "size": size,
+                        "total_ms_p50_p95": median_p95(&total),
+                        "gpu_ms_p50_p95": if gpu.is_empty() { None } else { Some(median_p95(&gpu)) },
+                        "samples": total.len(),
+                        "gpu_samples": gpu.len(),
+                    })
+                );
+            }
+        }
     }
 
     #[test]
