@@ -4,7 +4,7 @@ use analytic_renderer::{
     Camera, DrawOptions, GpuRenderer, GpuTimer, MixedDrawOptions, field_graph_gpu::GraphTracePolicy,
 };
 use spatial_math::{Transform, Vec3};
-use std::time::Instant;
+use std::{process::Command, time::Instant};
 use world_state::{DeterministicSeed, WorldState};
 
 fn v(x: f64, y: f64, z: f64) -> Vec3 {
@@ -55,6 +55,34 @@ fn stats(values: &mut [f64]) -> [f64; 2] {
     ]
 }
 
+fn source_state() -> (Option<String>, Option<bool>) {
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&workspace)
+            .args(args)
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    let root = git(&["rev-parse", "--show-toplevel"])
+        .and_then(|path| std::path::Path::new(&path).canonicalize().ok());
+    if root.as_deref() != Some(workspace.as_path()) {
+        return (None, None);
+    }
+    (
+        git(&["rev-parse", "HEAD"]),
+        git(&["status", "--porcelain"]).map(|s| !s.is_empty()),
+    )
+}
+
 #[test]
 #[ignore = "requires native GPU timestamps; release-profile mixed compute matrix"]
 fn native_mixed_compute_matrix() {
@@ -72,6 +100,7 @@ fn native_mixed_compute_matrix() {
     let timer = GpuTimer::new(&device);
     let camera = Camera::look_at(v(0.0, 0.0, -6.0), Vec3::ZERO, v(0.0, 1.0, 0.0), 0.9).unwrap();
     let info = adapter.get_info();
+    let (source_commit, source_dirty) = source_state();
     let resolutions = [[1280, 720], [1920, 1080], [2560, 1440]];
     let cases = [
         ("field", 1),
@@ -170,9 +199,16 @@ fn native_mixed_compute_matrix() {
             println!(
                 "MIXED_BENCH {}",
                 serde_json::json!({
+                    "benchmark": "native_mixed_compute_matrix",
+                    "source_commit": source_commit, "source_dirty": source_dirty,
+                    "definition_hashes": world.field_definitions().iter().map(|d| d.revision().hex()).collect::<Vec<_>>(),
                     "adapter": info.name, "backend": format!("{:?}", info.backend), "driver": info.driver,
+                    "os": std::env::consts::OS,
+                    "cpu": std::env::var("PROCESSOR_IDENTIFIER").ok(),
                     "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
                     "kind": kind, "nodes": nodes_requested, "size": size, "warmup": 3, "samples": 7,
+                    "present_mode": "offscreen", "gpu_timing_source": "timestamp_query",
+                    "cpu_timing_source": "Instant wall clock",
                     "cpu_draw_submit_ms": stats(&mut cpu),
                     "gpu_compute_ms": (!gpu.is_empty()).then(|| stats(&mut gpu)),
                     "timestamp_wait_ms": stats(&mut wait),

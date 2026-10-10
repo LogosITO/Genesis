@@ -292,7 +292,11 @@ mod tests {
             let mut pruning = Vec::new();
             let mut snapshot = Vec::new();
             let mut bvh = Vec::new();
+            let mut world_clone = Vec::new();
             for _ in 0..25 {
+                let started = Instant::now();
+                std::hint::black_box(runtime.world().clone());
+                world_clone.push(started.elapsed().as_secs_f64() * 1e3);
                 let started = Instant::now();
                 std::hint::black_box(scene.pick_ray(ray).unwrap());
                 picking.push(started.elapsed().as_secs_f64() * 1e3);
@@ -317,8 +321,9 @@ mod tests {
                 bvh.push(started.elapsed().as_secs_f64() * 1e3);
             }
             eprintln!(
-                "interaction_cpu scene={label} primitives={} pick_ms={:?} schedule_ms={:?} prune_ms={:?} snapshot_ms={:?} bvh_ms={:?}",
+                "interaction_cpu scene={label} primitives={} clone_ms={:?} pick_ms={:?} schedule_ms={:?} prune_ms={:?} snapshot_ms={:?} bvh_ms={:?}",
                 scene.primitives().len(),
+                stats(world_clone),
                 stats(picking),
                 stats(validation),
                 stats(pruning),

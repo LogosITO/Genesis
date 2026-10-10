@@ -204,10 +204,14 @@ pub(crate) fn gpu_nodes(graph: &Graph) -> Vec<GpuNode> {
 impl GraphGpuRenderer {
     /// Compile the fixed shader; external JSON can never provide WGSL source.
     pub async fn new(device: &wgpu::Device) -> Result<Self, RenderError> {
+        Self::new_source(device, include_str!("../shaders/field_graph.wgsl")).await
+    }
+
+    async fn new_source(device: &wgpu::Device, source: &str) -> Result<Self, RenderError> {
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("validated field graph interpreter"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/field_graph.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("field graph resources"),
@@ -822,4 +826,252 @@ fn read_buffer(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<Vec<u8>, 
         .to_vec();
     buffer.unmap();
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod workload_tests {
+    use super::*;
+    use spatial_math::Vec3;
+    use world_authoring::field_graph::{Node, compile_json};
+
+    fn v(x: f64, y: f64, z: f64) -> Vec3 {
+        Vec3::new(x, y, z).unwrap()
+    }
+
+    #[test]
+    #[ignore = "requires native GPU; profile real query step and status distributions"]
+    fn gpu_ray_workload_distribution() {
+        let instance = wgpu::Instance::default();
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .unwrap();
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        let renderer = pollster::block_on(GraphGpuRenderer::new(&device)).unwrap();
+        let camera = Camera::look_at(v(0.0, 0.0, -6.0), Vec3::ZERO, v(0.0, 1.0, 0.0), 0.9).unwrap();
+        let size = [256, 256];
+        let rays = (0..size[1])
+            .flat_map(|y| (0..size[0]).map(move |x| camera.ray(x, y, size[0], size[1]).unwrap()))
+            .collect::<Vec<_>>();
+        let data = rays
+            .iter()
+            .map(|ray| {
+                let (near, far) = ray.interval();
+                GpuRay {
+                    origin_near: vec4(ray.origin(), near as f32),
+                    direction_far: vec4(ray.direction(), far as f32),
+                }
+            })
+            .collect::<Vec<_>>();
+        for (name, source) in [
+            ("sphere", br#"{"format_version":1,"id":"profile-sphere","root":"s","nodes":[{"op":"sphere","id":"s","radius":0.9}]}"#.as_slice()),
+            ("balanced-16", include_bytes!("../../../examples/field-graph/definitions/balanced-16.json").as_slice()),
+        ] {
+            let graph = compile_json(source).unwrap();
+            let config = GraphGpuRenderer::config(&graph, camera, size, GraphTracePolicy::default()).unwrap();
+            let outcomes = renderer.dispatch_query(&device, &queue, &graph, config, &data, &renderer.query_pipeline).unwrap();
+            let mut samples = Vec::with_capacity(outcomes.len());
+            let mut statuses = [0usize; 4];
+            for result in &outcomes {
+                let kind = result.meta[0] as usize;
+                assert!(kind < statuses.len());
+                statuses[kind] += 1;
+                let ray_samples = result.meta[1] + u32::from(kind != 3);
+                let normal_samples = if kind == 1 || (kind == 2 && result.meta[2] == 3) { 6 } else { 0 };
+                samples.push(ray_samples + normal_samples);
+            }
+            samples.sort_unstable();
+            let total: u64 = samples.iter().map(|&count| u64::from(count)).sum();
+            println!("GPU_WORKLOAD {}", serde_json::json!({
+                "scene": name, "definition_hash": graph.revision().hex(),
+                "adapter": adapter.get_info().name, "backend": format!("{:?}", adapter.get_info().backend),
+                "rays": outcomes.len(), "status_miss_hit_uncertain_exhausted": statuses,
+                "samples_total": total, "samples_p50": samples[samples.len()/2],
+                "samples_p95": samples[(samples.len()*95).div_ceil(100)-1], "samples_max": samples[samples.len()-1],
+                "charged_node_visits_upper_bound": total * graph.visits() as u64,
+                "graph_worst_case_visits_per_sample": graph.visits(),
+            }));
+        }
+    }
+
+    fn specialized_source(graph: &Graph) -> String {
+        fn literal(value: f64) -> String {
+            format!("{:e}", value as f32)
+        }
+        fn vector(value: Vec3) -> String {
+            format!(
+                "vec3<f32>({}, {}, {})",
+                literal(value.x()),
+                literal(value.y()),
+                literal(value.z())
+            )
+        }
+        fn emit(index: usize, graph: &Graph, emitted: &mut [bool], output: &mut String) {
+            if emitted[index] {
+                return;
+            }
+            let node = &graph.nodes()[index];
+            match node {
+                Node::Translate { child, .. } | Node::Scale { child, .. } => {
+                    emit(*child as usize, graph, emitted, output)
+                }
+                Node::Union { left, right } | Node::SmoothUnion { left, right, .. } => {
+                    emit(*left as usize, graph, emitted, output);
+                    emit(*right as usize, graph, emitted, output);
+                }
+                _ => {}
+            }
+            emitted[index] = true;
+            let body = match node {
+                Node::Sphere(s) => format!("return length(point) - {};", literal(s.radius())),
+                Node::Box(b) => format!(
+                    "let q = abs(point) - {}; return length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);",
+                    vector(b.half_extent())
+                ),
+                Node::Translate { child, offset } => {
+                    format!("return eval_{child}(point - {});", vector(*offset))
+                }
+                Node::Scale { child, factor } => format!(
+                    "return eval_{child}(point / {}) * {};",
+                    literal(*factor),
+                    literal(*factor)
+                ),
+                Node::Union { left, right } => {
+                    format!("return min(eval_{left}(point), eval_{right}(point));")
+                }
+                Node::SmoothUnion { left, right, width } => {
+                    let width = literal(*width);
+                    format!(
+                        "let a = eval_{left}(point); let b = eval_{right}(point); let blend = max({width} - abs(a - b), 0.0) / {width}; return min(a, b) - {width} * blend * blend / 4.0;"
+                    )
+                }
+            };
+            output.push_str(&format!(
+                "fn eval_{index}(point: vec3<f32>) -> f32 {{ {body} }}\n"
+            ));
+        }
+        let shader = include_str!("../shaders/field_graph.wgsl");
+        let start = shader.find("fn sample(").unwrap();
+        let end = shader.find("fn trace(").unwrap();
+        let mut generated = String::new();
+        let mut emitted = vec![false; graph.nodes().len()];
+        emit(graph.root() as usize, graph, &mut emitted, &mut generated);
+        generated.push_str(&format!(
+            "fn sample(point: vec3<f32>) -> f32 {{ return eval_{}(point); }}\n",
+            graph.root()
+        ));
+        format!("{}{}{}", &shader[..start], generated, &shader[end..])
+    }
+
+    fn save_bmp(path: &std::path::Path, rgba: &[u8], size: [u32; 2]) {
+        let [width, height] = size;
+        let stride = (width * 3).div_ceil(4) * 4;
+        let data_bytes = stride * height;
+        let mut bmp = Vec::with_capacity((54 + data_bytes) as usize);
+        bmp.extend_from_slice(b"BM");
+        bmp.extend_from_slice(&(54 + data_bytes).to_le_bytes());
+        bmp.extend_from_slice(&[0; 4]);
+        bmp.extend_from_slice(&54u32.to_le_bytes());
+        bmp.extend_from_slice(&40u32.to_le_bytes());
+        bmp.extend_from_slice(&(width as i32).to_le_bytes());
+        bmp.extend_from_slice(&(height as i32).to_le_bytes());
+        bmp.extend_from_slice(&1u16.to_le_bytes());
+        bmp.extend_from_slice(&24u16.to_le_bytes());
+        bmp.extend_from_slice(&[0; 24]);
+        for y in (0..height).rev() {
+            let row_start = bmp.len();
+            for pixel in
+                rgba[(y * width * 4) as usize..((y + 1) * width * 4) as usize].chunks_exact(4)
+            {
+                bmp.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+            }
+            bmp.resize(row_start + stride as usize, 0);
+        }
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bmp).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires native GPU; compare validated graph specialization to the interpreter"]
+    fn specialized_wgsl_feasibility() {
+        let instance = wgpu::Instance::default();
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .unwrap();
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+            ..Default::default()
+        }))
+        .unwrap();
+        let timer = GpuTimer::new(&device);
+        let camera = Camera::look_at(v(0.0, 0.0, -6.0), Vec3::ZERO, v(0.0, 1.0, 0.0), 0.9).unwrap();
+        for (name, source) in [
+            ("sphere", br#"{"format_version":1,"id":"profile-sphere","root":"s","nodes":[{"op":"sphere","id":"s","radius":0.9}]}"#.as_slice()),
+            ("balanced-16", include_bytes!("../../../examples/field-graph/definitions/balanced-16.json").as_slice()),
+            ("smooth-bridge", include_bytes!("../../../examples/field-graph/definitions/smooth-bridge.json").as_slice()),
+        ] {
+            let graph = compile_json(source).unwrap();
+            let started = Instant::now();
+            let interpreter = pollster::block_on(GraphGpuRenderer::new(&device)).unwrap();
+            let interpreter_compile_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let started = Instant::now();
+            let shader = specialized_source(&graph);
+            let source_generation_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let started = Instant::now();
+            let specialized = pollster::block_on(GraphGpuRenderer::new_source(&device, &shader)).unwrap();
+            let specialized_compile_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let rays = (0..129).flat_map(|y| (0..129).map(move |x| camera.ray(x, y, 129, 129).unwrap())).collect::<Vec<_>>();
+            let expected = interpreter.query(&device, &queue, &graph, camera, &rays, GraphTracePolicy::default()).unwrap();
+            let actual = specialized.query(&device, &queue, &graph, camera, &rays, GraphTracePolicy::default()).unwrap();
+            let mut distance_error = 0.0_f32;
+            let mut normal_error = 0.0_f32;
+            for (index, (a, b)) in expected.iter().zip(&actual).enumerate() {
+                match (a, b) {
+                    (GraphGpuOutcome::Hit { distance: da, normal: na }, GraphGpuOutcome::Hit { distance: db, normal: nb }) => {
+                        distance_error = distance_error.max((da - db).abs());
+                        for axis in 0..3 { normal_error = normal_error.max((na[axis] - nb[axis]).abs()); }
+                    }
+                    (GraphGpuOutcome::Miss, GraphGpuOutcome::Miss) | (GraphGpuOutcome::Exhausted, GraphGpuOutcome::Exhausted) => {}
+                    (GraphGpuOutcome::Uncertain(a), GraphGpuOutcome::Uncertain(b)) if a == b => {}
+                    _ => panic!("{name} specialized status differs on ray {index}: {a:?} versus {b:?}"),
+                }
+            }
+            assert!(distance_error <= 0.005 && normal_error <= 0.05, "{name} distance/normal drift: {distance_error}/{normal_error}");
+            let mut measurements = Vec::new();
+            for (label, renderer) in [("interpreter", &interpreter), ("specialized", &specialized)] {
+                let mut gpu = Vec::new();
+                let mut image = Vec::new();
+                for run in 0..10 {
+                    let frame = renderer.render_rgba_timed(&device, &queue, &graph, camera, GraphRenderOptions {
+                        size: [1280, 720], policy: GraphTracePolicy::default(), timer: timer.as_ref(),
+                    }).unwrap();
+                    if run >= 3 && let Some(ms) = frame.gpu_compute_ms { gpu.push(ms); }
+                    if run == 9 { image = frame.rgba; }
+                }
+                gpu.sort_by(f64::total_cmp);
+                measurements.push((label, gpu.get(gpu.len()/2).copied(), image));
+            }
+            let different_pixels = measurements[0].2.chunks_exact(4).zip(measurements[1].2.chunks_exact(4)).filter(|(a,b)| a != b).count();
+            let background = &measurements[0].2[..4];
+            assert_eq!(&measurements[1].2[..4], background);
+            let changed_occupancy = measurements[0].2.chunks_exact(4).zip(measurements[1].2.chunks_exact(4))
+                .filter(|(a,b)| (*a == background) != (*b == background)).count();
+            let max_channel_difference = measurements[0].2.iter().zip(&measurements[1].2)
+                .map(|(a,b)| a.abs_diff(*b)).max().unwrap_or(0);
+            let capture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/performance-research-1-captures");
+            for (label, _, image) in &measurements {
+                save_bmp(&capture_dir.join(format!("{name}-{label}.bmp")), image, [1280, 720]);
+            }
+            println!("COMPILER_EXPERIMENT {}", serde_json::json!({
+                "scene": name, "definition_hash": graph.revision().hex(), "nodes": graph.nodes().len(),
+                "source_generation_ms": source_generation_ms, "interpreter_compile_ms": interpreter_compile_ms,
+                "specialized_compile_ms": specialized_compile_ms, "interpreter_gpu_ms_p50": measurements[0].1,
+                "specialized_gpu_ms_p50": measurements[1].1, "different_pixels": different_pixels,
+                "changed_occupancy_pixels": changed_occupancy, "max_channel_difference": max_channel_difference,
+                "max_distance_error": distance_error, "max_normal_component_error": normal_error,
+                "rays_compared": rays.len(), "adapter": adapter.get_info().name,
+            }));
+        }
+    }
 }
