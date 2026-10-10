@@ -1006,6 +1006,21 @@ impl App {
             advance(&mut self.world, &mut self.time, self.step)
         };
         result?;
+        if self.living {
+            for event in &events {
+                if let EnvironmentEventKind::MoveSource { id, position } = &event.kind {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({
+                            "kind": "living-event",
+                            "tick": event.tick,
+                            "source_id": id.value(),
+                            "position": [position.x(), position.y(), position.z()],
+                        })
+                    );
+                }
+            }
+        }
         if self.measure {
             self.step_samples
                 .push(step_started.elapsed().as_secs_f64() * 1000.0);
