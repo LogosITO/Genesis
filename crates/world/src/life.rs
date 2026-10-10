@@ -543,6 +543,17 @@ mod tests {
     }
 
     #[test]
+    fn decimal_refill_does_not_exceed_its_declared_per_tick_limit() {
+        let mut world = WorldState::new(DeterministicSeed(1));
+        let id = world
+            .spawn_finite_source(Vec3::ZERO, 1.0, 1.0, 0.2, 1.0, 0.015)
+            .unwrap();
+        world.source_mut(id).unwrap().begin_tick().unwrap();
+        assert!(world.sources()[0].reservoir().unwrap().last_replenished() <= 0.015);
+        world.validate().unwrap();
+    }
+
+    #[test]
     fn organism_and_source_capacities_reject_without_allocating_ids() {
         let mut world = WorldState::new(DeterministicSeed(1));
         let parameters = GrowthParameters::new(0.1, 0.5, 1.0, 1.0).unwrap();
@@ -865,7 +876,7 @@ impl ResourceSource {
     pub fn begin_tick(&mut self) -> Result<(), WorldError> {
         if let Some(stock) = &mut self.reservoir {
             let next = (stock.stored + stock.replenish_per_tick).min(stock.capacity);
-            let generated = next - stock.stored;
+            let generated = (next - stock.stored).min(stock.replenish_per_tick);
             let total = stock.total_replenished + generated;
             if !total.is_finite() {
                 return Err(WorldError::OutOfRange);
