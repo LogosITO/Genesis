@@ -191,6 +191,10 @@ fn gpu_nodes(graph: &Graph) -> Vec<GpuNode> {
                 links: [4, left, right, 0],
                 param: [0.0; 4],
             },
+            Node::SmoothUnion { left, right, width } => GpuNode {
+                links: [5, left, right, 0],
+                param: [width as f32, 0.0, 0.0, 0.0],
+            },
         })
         .collect()
 }

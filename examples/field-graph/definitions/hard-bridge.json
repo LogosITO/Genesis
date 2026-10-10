@@ -1,0 +1,11 @@
+{
+  "format_version": 1,
+  "id": "hard_bridge",
+  "root": "bridge",
+  "nodes": [
+    { "op": "sphere", "id": "ball", "radius": 1.0 },
+    { "op": "translate", "id": "left", "child": "ball", "offset": [-0.9, 0.0, 0.0] },
+    { "op": "translate", "id": "right", "child": "ball", "offset": [0.9, 0.0, 0.0] },
+    { "op": "union", "id": "bridge", "left": "left", "right": "right" }
+  ]
+}

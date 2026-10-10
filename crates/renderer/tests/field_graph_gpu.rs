@@ -149,6 +149,97 @@ fn world_field_query_preserves_gpu_boundary_diagnostics() {
     }
 }
 
+#[test]
+#[ignore = "requires native GPU; smooth field CPU/GPU parity and real readback"]
+fn smooth_union_gpu_samples_and_pixels_match_the_cpu_model() {
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        apply_limit_buckets: false,
+    }))
+    .unwrap();
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let renderer = pollster::block_on(GraphGpuRenderer::new(&device)).unwrap();
+    let source = include_bytes!("../../../examples/field-graph/definitions/smooth-bridge.json");
+    let smooth = compile_json(source).unwrap();
+    let hard = compile_json(include_bytes!(
+        "../../../examples/field-graph/definitions/hard-bridge.json"
+    ))
+    .unwrap();
+    let points = [
+        Vec3::ZERO,
+        v(0.0, 0.5, 0.0),
+        v(0.0, 0.8, 0.0),
+        v(0.0, 0.9, 0.0),
+        v(1.5, 0.3, 0.0),
+        v(2.5, 0.0, 0.0),
+    ];
+    let samples = renderer
+        .sample_points(&device, &queue, &smooth, camera(), &points)
+        .unwrap();
+    for (point, sample) in points.into_iter().zip(samples) {
+        let expected = smooth.sample(point).unwrap();
+        assert!(
+            (f64::from(sample.unwrap()) - expected).abs() < 0.0001,
+            "{point:?}"
+        );
+    }
+    let smooth_frame = renderer
+        .render_rgba(
+            &device,
+            &queue,
+            &smooth,
+            camera(),
+            [160, 120],
+            GraphTracePolicy::default(),
+        )
+        .unwrap();
+    let hard_frame = renderer
+        .render_rgba(
+            &device,
+            &queue,
+            &hard,
+            camera(),
+            [160, 120],
+            GraphTracePolicy::default(),
+        )
+        .unwrap();
+    assert_ne!(smooth_frame.rgba, hard_frame.rgba);
+    let mut world = WorldState::new(DeterministicSeed(92));
+    let id = world
+        .spawn_field(source, Transform::new(Vec3::ZERO, 1.0).unwrap())
+        .unwrap();
+    let ray = Ray::new(v(0.0, 0.0, -6.0), v(0.0, 0.0, 1.0), 0.001, 12.0).unwrap();
+    let world_hits = renderer
+        .query_world_fields(
+            &device,
+            &queue,
+            &world,
+            camera(),
+            &[ray],
+            GraphTracePolicy::default(),
+        )
+        .unwrap();
+    assert!(
+        matches!(world_hits[0], WorldFieldGpuOutcome::Hit { id: found, distance, .. }
+        if found == id && (f64::from(distance) - 5.20546).abs() < 0.01)
+    );
+    println!(
+        "adapter={} smooth_pixels={} differing_bytes={}",
+        adapter.get_info().name,
+        smooth_frame.rgba.len(),
+        smooth_frame
+            .rgba
+            .iter()
+            .zip(&hard_frame.rgba)
+            .filter(|(a, b)| a != b)
+            .count()
+    );
+}
+
 fn v(x: f64, y: f64, z: f64) -> Vec3 {
     Vec3::new(x, y, z).unwrap()
 }

@@ -10,6 +10,8 @@ cargo run -p field-graph-preview --locked -- --world-fixture
 cargo run -p field-graph-preview --locked -- --mixed-world-fixture
 cargo run -p field-graph-preview --locked -- examples/field-graph/definitions/shared-face.json
 cargo run -p field-graph-preview --locked -- examples/field-graph/definitions/balanced-16.json
+cargo run -p field-graph-preview --locked -- examples/field-graph/definitions/smooth-bridge.json
+cargo run -p field-graph-preview --locked -- examples/field-graph/definitions/hard-bridge.json
 cargo run -p field-graph-preview --locked -- --inspect examples/field-graph/definitions/balanced-16.json
 ```
 
@@ -42,6 +44,10 @@ their GPU captures displayed the expected joined box and 4×4 sphere grid.
 The balanced scene's centre ray lies between spheres: the older preview reports
 an ideal-model `Miss`, while the restricted solid query correctly reports
 `Indeterminate(UncertifiedAdvance)` because its bounds overlap the ray.
+`smooth-bridge.json` uses `smooth_union` to join two translated spheres with
+an editable `width`; `hard-bridge.json` uses the same inputs and hard union.
+Their GPU captures show the wider continuous smooth neck. The restricted physical query explicitly reports
+`Indeterminate(UnsupportedOperation)` for this visual field.
 `--inspect` compiles and validates a JSON definition without requesting a GPU;
 it prints the revision, node/work counts, distance semantics and outward bounds
 as JSON. Invalid input exits with an error before any preview is created.

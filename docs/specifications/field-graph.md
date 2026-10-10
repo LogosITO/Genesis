@@ -13,8 +13,9 @@ The external representation is JSON with `format_version: 1`, a logical `id`, a 
 | `translate` | `child`, `offset: [x,y,z]` | `child(p - offset)`; preserves properties. |
 | `scale` | `child`, `factor` | `factor × child(p/factor)` for positive uniform scale; preserves properties. |
 | `union` | `left`, `right` | `min(left(p), right(p))`; signed union and ideal 1-Lipschitz field, **not advertised as exact SDF**. |
+| `smooth_union` | `left`, `right`, `width` | Polynomial smooth minimum of two exact-SDF children; signed, ideal 1-Lipschitz, **not** exact SDF. |
 
-The source is at most 16 KiB. At most 32 distinct nodes, depth 12, and 64 expanded node visits per sample are accepted. Invalid references, cycles, unreachable nodes, excessive work, invalid numeric ranges, nonfinite values, and unsupported versions fail before the graph is returned. Primitive sizes and scales are in `[0.01,100]`; each offset and box half-extent component has absolute value at most 1000, with positive box extents at least 0.01. Derived bounds must fit `[-10000,10000]` on each axis. `Source` and node variants deny unknown JSON fields. SHA-256 identifies exact source bytes, including whitespace. The logical ID is not a hash or path. No source code or shader is accepted.
+The source is at most 16 KiB. At most 32 distinct nodes, depth 12, and 64 expanded node visits per sample are accepted. Invalid references, cycles, unreachable nodes, excessive work, invalid numeric ranges, nonfinite values, and unsupported versions fail before the graph is returned. Primitive sizes, scales and smooth widths are in `[0.01,100]`; each offset and box half-extent component has absolute value at most 1000, with positive box extents at least 0.01. Derived bounds must fit `[-10000,10000]` on each axis. `Source` and node variants deny unknown JSON fields. SHA-256 identifies exact source bytes, including whitespace. The logical ID is not a hash or path. No source code or shader is accepted.
 
 Example files: `examples/field-graph/definitions/twin.json` and `examples/field-graph/definitions/plinth.json`. The same executable reads both.
 
@@ -26,7 +27,7 @@ For a validated graph in ideal real arithmetic, the **occupied set** is the clos
 `S = {p ∈ R³ | F(p) ≤ 0}`. Its interior contains points with an occupied neighbourhood;
 its exterior is the interior of the complement. The physical/topological boundary is
 `∂S = closure(S) ∩ closure(R³ \ S)`. The **zero set** is `{p | F(p)=0}`. These notions are
-different. A finite union of the supported nondegenerate spheres and boxes is regular
+different. A finite hard union of the supported nondegenerate spheres and boxes is regular
 closed, so every boundary point has zero field value, but a zero point need not be a
 boundary point. `classify_sample` reports only the observed `f64` sign and a
 `BoundaryCandidate` near zero; it cannot certify interior, exterior, or `∂S`.
@@ -45,11 +46,23 @@ ties without introducing a new boundary. The format excludes degenerate primitiv
 | Translation | Preserves child contract and Lipschitz constant | Arithmetic overflow yields an error. |
 | Positive uniform scale `s F(p/s)` | Preserves exact SDF when the child is exact; preserves unit Lipschitz because `s × (distance/s) = distance` | Very small nested scales can lose `f32` precision or overflow intermediate values. |
 | Union `min(A,B)` | Signed occupancy union and 1-Lipschitz if both children are; exact SDF is **not** propagated | Branch ties have undefined gradient; internal zero faces are possible. |
+| Smooth union | Polynomial smooth minimum of two exact-SDF children; signed and ideally 1-Lipschitz, not exact SDF | The blend gradient is a convex combination of child gradients. A child singularity remains explicit. Restricted solid queries are unsupported. |
 
 `Graph::distance_semantics()` exposes `ExactSdf` or `SignedUnitLipschitz` in ideal
 arithmetic. The latter is a sign field with a distance **lower bound outside** (`F(p)
 ≤ distance(p,S)` when `F(p)>0`), not an exact signed distance. The compiler's bounds
 enclose the ideal occupied set. Neither capability grants collision authority.
+
+For `smooth_union(a,b,width)`, the ideal field is
+`min(a,b) - max(width - abs(a-b), 0)² / (4 × width)`. Its occupied set can
+extend beyond the hard union. Only exact-SDF child branches are accepted;
+nested smooth unions and hard-union children are rejected. The result is at
+least `min(a,b) - width/4`. Outside either child's AABB, that exact child
+SDF is at least the distance to its AABB. Expanding the union of child AABBs
+by an outward-rounded `width/4` on every axis therefore encloses the new
+occupied set. In the blend band, derivative weights are nonnegative and sum
+to one, preserving the ideal unit-Lipschitz bound. These arguments do not
+certify CPU or GPU floating-point evaluation.
 
 ### Region estimates and restricted entry
 
@@ -65,7 +78,8 @@ computed sign; evaluation failure returns `Unknown`.
 Foundation 0.12.2 adds **outward-rounded graph AABBs**. Primitive sphere/box bounds
 start from their stored finite binary parameters. Each translation addition and
 positive-scale multiplication rounds the lower result one `f64` representable value
-down and the upper result one up; union takes componentwise extrema. Under IEEE-754
+down and the upper result one up; hard union takes componentwise extrema,
+while smooth union adds its outward-rounded width margin. Under IEEE-754
 round-to-nearest with gradual underflow and no fast-math reassociation, this encloses
 the ideal occupied geometry described by those stored parameters. Arithmetic
 overflow rejects the graph. The compiler allows a 24-ULP admission margin at the
@@ -103,6 +117,9 @@ mere touching cannot be excluded.
 The result is not suitable for authoritative picking/contact without a certified
 floating-point policy. Existing `trace` and WGSL tracing are older zero-set preview
 queries and can classify an interior zero start differently.
+Graphs containing `smooth_union` return `Indeterminate(UnsupportedOperation)`
+with zero samples from this restricted solid query. The moving-sphere query
+also returns this status unless strict expanded bounds exclude the path.
 
 ### Experimental moving-sphere query (Foundation 0.12.4)
 
@@ -145,7 +162,7 @@ refer to the CPU `f64` model; they do not certify GPU `f32` outcomes.
 
 The coordinate system and world unit follow [coordinate-system.md](coordinate-system.md). Negative samples are inside the selected sign region, positive samples outside, and zero samples form a mathematical zero set. Union of the supported solids gives a signed union, but its sample can differ from Euclidean distance, especially inside overlaps. A pointwise minimum of 1-Lipschitz functions is 1-Lipschitz in ideal real arithmetic. Positive uniform scale with multiplied output preserves that bound. The finite AABB returned by the compiler is outward-rounded under the CPU assumptions above. This does not bound numerical errors in field samples.
 
-CPU samples use `f64` and the existing `Sphere` and `AxisAlignedBox` formulas. Gradients use their analytic implementations and propagate through transforms; a union chooses the lower sampled branch. A tie, sphere center, or box nonsmooth point reports an undefined gradient. Branch selection itself can change under rounding. Overflow returns `MathError`; no NaN is returned as a valid sample. One primitive under any supported transforms advertises ideal exact SDF; any union does not. Signedness, exact SDF, Lipschitz bound, finite bounds, and collision authority are separate properties.
+CPU samples use `f64` and the existing `Sphere` and `AxisAlignedBox` formulas. Gradients use their analytic implementations and propagate through transforms; a hard union chooses the lower sampled branch, while smooth union blends both defined gradients. A hard-union tie, sphere center, or box nonsmooth point reports an undefined gradient. Branch selection itself can change under rounding. Overflow returns `MathError`; no NaN is returned as a valid sample. One primitive under any supported transforms advertises ideal exact SDF; either union does not. Signedness, exact SDF, Lipschitz bound, finite bounds, and collision authority are separate properties.
 
 The graph intentionally excludes difference and intersection. Existing `Field::difference(A,A)` has zero samples on A's surface but no negative interior, demonstrating why an arbitrary CSG zero set cannot automatically be treated as a physical boundary.
 

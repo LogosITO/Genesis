@@ -1,7 +1,7 @@
 //! Spatial research queries for the closed solid represented by the supported graph vocabulary.
 //! Field samples remain approximate. The separate bounds exclusion uses outward-rounded `f64`.
 
-use super::{Graph, TraceOptions};
+use super::{Graph, Node, TraceOptions};
 use spatial_math::{MathError, Vec3};
 
 /// Observed sign of a finite CPU sample. This is not certified occupied-set membership.
@@ -218,6 +218,8 @@ pub struct SolidSweepOptions {
 /// Reason a physical entry cannot be selected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SolidQueryIssue {
+    /// Smooth fields are visual-only until their exterior-entry query is validated.
+    UnsupportedOperation,
     /// Start sample is negative: exiting an occupied region is unsupported.
     StartsInside,
     /// Start lies within hit tolerance of the zero set; exterior status is unverified.
@@ -369,6 +371,17 @@ fn trace_exterior_entry_with_radius(
         return Err(MathError::OutOfRange);
     }
     let direction = direction.normalized()?;
+    if graph
+        .nodes()
+        .iter()
+        .any(|node| matches!(node, Node::SmoothUnion { .. }))
+    {
+        return Ok(report(
+            SolidEntryOutcome::Indeterminate(SolidQueryIssue::UnsupportedOperation),
+            0,
+            0,
+        ));
+    }
     let mut work = 0usize;
     let mut samples = 0u32;
     let mut distance = o.near;

@@ -49,7 +49,7 @@ fn sample(point: vec3<f32>) -> f32 {
                     last = length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
                     depth -= 1u;
                 }
-                case 2u, 3u, 4u: {
+                case 2u, 3u, 4u, 5u: {
                     if (depth >= 16u || node.links.y >= config.info.y) { return 1e30; }
                     stack[slot].phase = 1u;
                     var child_point = frame.point;
@@ -62,7 +62,7 @@ fn sample(point: vec3<f32>) -> f32 {
             }
         } else if (frame.phase == 1u) {
             if (!finite(last)) { return 1e30; }
-            if (node.links.x == 4u) {
+            if (node.links.x == 4u || node.links.x == 5u) {
                 if (depth >= 16u || node.links.z >= config.info.y) { return 1e30; }
                 stack[slot].first = last;
                 stack[slot].phase = 2u;
@@ -74,7 +74,12 @@ fn sample(point: vec3<f32>) -> f32 {
             }
         } else {
             if (!finite(frame.first) || !finite(last)) { return 1e30; }
-            last = min(frame.first, last);
+            if (node.links.x == 5u) {
+                let blend = max(node.param.x - abs(frame.first - last), 0.0) / node.param.x;
+                last = min(frame.first, last) - node.param.x * blend * blend / 4.0;
+            } else {
+                last = min(frame.first, last);
+            }
             depth -= 1u;
         }
     }

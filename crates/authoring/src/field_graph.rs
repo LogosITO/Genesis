@@ -60,6 +60,12 @@ enum NodeSource {
         left: String,
         right: String,
     },
+    SmoothUnion {
+        id: String,
+        left: String,
+        right: String,
+        width: f64,
+    },
 }
 
 impl NodeSource {
@@ -69,7 +75,8 @@ impl NodeSource {
             | Self::Box { id, .. }
             | Self::Translate { id, .. }
             | Self::Scale { id, .. }
-            | Self::Union { id, .. } => id,
+            | Self::Union { id, .. }
+            | Self::SmoothUnion { id, .. } => id,
         }
     }
 }
@@ -101,6 +108,15 @@ pub enum Node {
         left: u32,
         /// Second branch.
         right: u32,
+    },
+    /// Polynomial smooth minimum of two exact-SDF children; signed and unit-Lipschitz, not exact SDF.
+    SmoothUnion {
+        /// First exact-SDF branch.
+        left: u32,
+        /// Second exact-SDF branch.
+        right: u32,
+        /// Positive smoothing width in world units.
+        width: f64,
     },
 }
 
@@ -193,6 +209,11 @@ impl Graph {
             Node::Union { left, right } => self
                 .sample_node(left as usize, point)?
                 .min(self.sample_node(right as usize, point)?),
+            Node::SmoothUnion { left, right, width } => {
+                let a = self.sample_node(left as usize, point)?;
+                let b = self.sample_node(right as usize, point)?;
+                smooth_min(a, b, width)
+            }
         };
         if value.is_finite() {
             Ok(value)
@@ -228,8 +249,35 @@ impl Graph {
                     Ok(Gradient::Undefined(GradientIssue::BranchTie))
                 }
             }
+            Node::SmoothUnion { left, right, width } => {
+                let a = self.sample_node(left as usize, point)?;
+                let b = self.sample_node(right as usize, point)?;
+                let difference = a - b;
+                if difference.abs() >= width {
+                    return self.gradient_node(if a < b { left } else { right } as usize, point);
+                }
+                let left_weight = 0.5 - difference / (2.0 * width);
+                let right_weight = 1.0 - left_weight;
+                match (
+                    self.gradient_node(left as usize, point)?,
+                    self.gradient_node(right as usize, point)?,
+                ) {
+                    (Gradient::Defined(a), Gradient::Defined(b)) => Ok(Gradient::Defined(
+                        a.checked_scale(left_weight)?
+                            .checked_add(b.checked_scale(right_weight)?)?,
+                    )),
+                    (Gradient::Undefined(issue), _) | (_, Gradient::Undefined(issue)) => {
+                        Ok(Gradient::Undefined(issue))
+                    }
+                }
+            }
         }
     }
+}
+
+fn smooth_min(a: f64, b: f64, width: f64) -> f64 {
+    let blend = (width - (a - b).abs()).max(0.0) / width;
+    a.min(b) - width * blend * blend / 4.0
 }
 
 fn name(value: &str) -> bool {
@@ -334,6 +382,13 @@ pub fn compile_json(bytes: &[u8]) -> Result<Graph, AuthoringError> {
                 left: index(left)?,
                 right: index(right)?,
             },
+            NodeSource::SmoothUnion {
+                left, right, width, ..
+            } => Node::SmoothUnion {
+                left: index(left)?,
+                right: index(right)?,
+                width: positive(*width)?,
+            },
         });
     }
     let mut state = vec![0u8; nodes.len()];
@@ -360,7 +415,7 @@ pub fn compile_json(bytes: &[u8]) -> Result<Graph, AuthoringError> {
             Node::Translate { child, .. } | Node::Scale { child, .. } => {
                 walk(nodes, child as usize, depth + 1, state, visits)?
             }
-            Node::Union { left, right } => {
+            Node::Union { left, right } | Node::SmoothUnion { left, right, .. } => {
                 walk(nodes, left as usize, depth + 1, state, visits)?;
                 walk(nodes, right as usize, depth + 1, state, visits)?;
             }
@@ -420,6 +475,25 @@ pub fn compile_json(bytes: &[u8]) -> Result<Graph, AuthoringError> {
                     Bounds {
                         min: vec_min(a.min, b.min)?,
                         max: vec_max(a.max, b.max)?,
+                    },
+                    false,
+                )
+            }
+            Node::SmoothUnion { left, right, width } => {
+                let (a, a_exact) = properties(nodes, left as usize)?;
+                let (b, b_exact) = properties(nodes, right as usize)?;
+                if !a_exact || !b_exact {
+                    return Err(AuthoringError::Invalid(
+                        "smooth union requires exact-SDF children",
+                    ));
+                }
+                let margin = (width / 4.0).next_up();
+                let lower = Vec3::new(-margin, -margin, -margin).unwrap();
+                let upper = Vec3::new(margin, margin, margin).unwrap();
+                (
+                    Bounds {
+                        min: outward_vec(vec_min(a.min, b.min)?, lower, false, false)?,
+                        max: outward_vec(vec_max(a.max, b.max)?, upper, false, true)?,
                     },
                     false,
                 )

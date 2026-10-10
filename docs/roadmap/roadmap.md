@@ -116,6 +116,15 @@ or unimplemented. These milestones are not complete.
 
 ## Next engineering priorities
 
+The current mathematical-world campaign has a mixed offscreen depth reference
+and a restricted visual `smooth_union` operation. The native viewport is still
+analytic-only; the mixed reference blocks on GPU readback and cannot be used as
+an interactive frame loop. A proposed CPU bounds prefilter was rejected after
+an `f64`/`f32` boundary regression. See the [mixed-depth record](../research/mixed-depth-reference.md)
+and [smooth-field experiment](../research/smooth-field-experiment.md).
+GPU-side mixed composition and measured buffer reuse remain priorities before
+procedural materials or an externally authored World Lab can be called complete.
+
 Integrate visual field instances into a depth-correct viewport without making
 their GPU output authoritative. Instrument field sample counts and evaluate
 conservative sparse-scene culling with paired before/after GPU captures. Improve
