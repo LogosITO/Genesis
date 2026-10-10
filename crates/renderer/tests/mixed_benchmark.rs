@@ -240,6 +240,15 @@ fn graph(nodes_requested: usize) -> Vec<u8> {
     .into_bytes()
 }
 
+fn operator_graph(index: usize) -> &'static [u8] {
+    match index {
+        0 => br#"{"format_version":1,"id":"sphere","root":"s","nodes":[{"op":"sphere","id":"s","radius":0.7}]}"#,
+        1 => br#"{"format_version":1,"id":"box","root":"b","nodes":[{"op":"box","id":"b","half_extent":[0.5,0.6,0.5]}]}"#,
+        2 => br#"{"format_version":1,"id":"smooth","root":"u","nodes":[{"op":"sphere","id":"s","radius":0.4},{"op":"translate","id":"t","child":"s","offset":[0.4,0,0]},{"op":"smooth_union","id":"u","left":"s","right":"t","width":0.2}]}"#,
+        _ => br#"{"format_version":1,"id":"union","root":"u","nodes":[{"op":"box","id":"b","half_extent":[0.3,0.3,0.3]},{"op":"scale","id":"s","child":"b","factor":1.2},{"op":"translate","id":"t","child":"s","offset":[0.4,0,0]},{"op":"union","id":"u","left":"b","right":"t"}]}"#,
+    }
+}
+
 fn stats(values: &mut [f64]) -> [f64; 2] {
     values.sort_by(f64::total_cmp);
     [
@@ -642,7 +651,13 @@ fn multi_definition_matrix() {
     let timer = GpuTimer::new(&device).unwrap();
     let camera = Camera::look_at(v(0.0, 0.0, -7.0), Vec3::ZERO, v(0.0, 1.0, 0.0), 0.9).unwrap();
     let (source_commit, source_dirty) = source_state();
-    for topology in ["shared", "heterogeneous"] {
+    for topology in [
+        "shared",
+        "heterogeneous",
+        "mixed-operators",
+        "mostly-offscreen",
+        "full-coverage",
+    ] {
         for definitions in [1, 2, 4] {
             let mut world = WorldState::new(DeterministicSeed(404));
             for index in 0..definitions {
@@ -654,22 +669,42 @@ fn multi_definition_matrix() {
                             &format!("\"radius\":{:.2}", 0.45 + index as f64 * 0.1),
                         )
                         .into_bytes()
-                } else {
+                } else if topology == "heterogeneous" {
                     graph([1, 4, 8, 16][index])
+                } else if topology == "full-coverage" && index == 0 {
+                    br#"{"format_version":1,"id":"large","root":"s","nodes":[{"op":"sphere","id":"s","radius":3.0}]}"#.to_vec()
+                } else {
+                    operator_graph(index).to_vec()
                 };
-                let x = (index as f64 - (definitions as f64 - 1.0) / 2.0) * 1.5;
+                let x = if topology == "mostly-offscreen" && index + 1 == definitions {
+                    40.0
+                } else {
+                    (index as f64 - (definitions as f64 - 1.0) / 2.0) * 1.5
+                };
                 for y in [-0.3, 0.3] {
                     world
                         .spawn_field(&source, Transform::new(v(x, y, 0.0), 1.0).unwrap())
                         .unwrap();
                 }
             }
+            if matches!(
+                topology,
+                "mixed-operators" | "mostly-offscreen" | "full-coverage"
+            ) {
+                world
+                    .spawn_sphere(
+                        Sphere::new(0.25).unwrap(),
+                        Transform::new(v(0.0, -1.0, 0.8), 1.0).unwrap(),
+                        0.0,
+                    )
+                    .unwrap();
+            }
             assert_eq!(world.field_definitions().len(), definitions);
             let renderer =
                 pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm))
                     .unwrap();
             for size in [[1280, 720], [1920, 1080], [2560, 1440]] {
-                let draw = |execution| {
+                let draw = |execution, guard| {
                     let started = Instant::now();
                     let _image = renderer
                         .draw_mixed_with_execution(
@@ -695,16 +730,16 @@ fn multi_definition_matrix() {
                             },
                             GpuFieldRenderMode {
                                 execution,
-                                spatial_guard: true,
+                                spatial_guard: guard,
                             },
                         )
                         .unwrap();
                     let cpu = started.elapsed().as_secs_f64() * 1000.0;
                     (cpu, timer.read_ms(&device, &queue).unwrap())
                 };
-                if topology == "shared" || definitions == 1 {
+                if topology == "shared" || (topology == "heterogeneous" && definitions == 1) {
                     for _ in 0..500 {
-                        draw(GpuFieldExecution::Structural);
+                        draw(GpuFieldExecution::Structural, true);
                         if renderer.compiler_stats().unwrap().active == GpuFieldPath::Structural {
                             break;
                         }
@@ -715,9 +750,9 @@ fn multi_definition_matrix() {
                         GpuFieldPath::Structural
                     );
                 }
-                if definitions == 1 {
+                if definitions == 1 && matches!(topology, "shared" | "heterogeneous") {
                     for _ in 0..500 {
-                        draw(GpuFieldExecution::Auto);
+                        draw(GpuFieldExecution::Auto, true);
                         if renderer.compiler_stats().unwrap().active == GpuFieldPath::Specialized {
                             break;
                         }
@@ -729,7 +764,7 @@ fn multi_definition_matrix() {
                     );
                 }
                 for _ in 0..500 {
-                    draw(GpuFieldExecution::Combined);
+                    draw(GpuFieldExecution::Combined, true);
                     if renderer.compiler_stats().unwrap().active == GpuFieldPath::Combined {
                         break;
                     }
@@ -741,21 +776,37 @@ fn multi_definition_matrix() {
                     "combined compilation failed: {:?}",
                     renderer.compiler_stats().unwrap().last_error
                 );
-                for (label, execution) in [
-                    ("interpreter", GpuFieldExecution::Interpreter),
-                    ("auto", GpuFieldExecution::Auto),
-                    ("structural", GpuFieldExecution::Structural),
-                    ("combined", GpuFieldExecution::Combined),
-                ] {
+                for (label, execution, guard) in [
+                    ("interpreter-direct", GpuFieldExecution::Interpreter, false),
+                    ("interpreter", GpuFieldExecution::Interpreter, true),
+                    ("auto", GpuFieldExecution::Auto, true),
+                    ("structural", GpuFieldExecution::Structural, true),
+                    ("combined", GpuFieldExecution::Combined, true),
+                ]
+                .into_iter()
+                .filter(|(label, _, _)| {
+                    matches!(topology, "shared" | "heterogeneous")
+                        || matches!(*label, "interpreter-direct" | "interpreter" | "combined")
+                }) {
                     for _ in 0..3 {
-                        draw(execution);
+                        draw(execution, guard);
                     }
                     let mut cpu = Vec::new();
                     let mut gpu = Vec::new();
+                    let mut scene_ms = Vec::new();
+                    let mut field_binding_ms = Vec::new();
+                    let mut selection_ms = Vec::new();
+                    let mut node_enqueue_ms = Vec::new();
                     for _ in 0..7 {
-                        let (c, g) = draw(execution);
+                        let (c, g) = draw(execution, guard);
                         cpu.push(c);
                         gpu.push(g);
+                        let draw_stats = renderer.last_draw_stats().unwrap();
+                        scene_ms.push(draw_stats.scene_ms);
+                        field_binding_ms.push(draw_stats.field_binding_ms);
+                        selection_ms.push(draw_stats.pipeline_selection_ms);
+                        node_enqueue_ms
+                            .push(renderer.field_cache_stats().unwrap().last_node_enqueue_ms);
                     }
                     let compiler = renderer.compiler_stats().unwrap();
                     assert_eq!(
@@ -779,10 +830,17 @@ fn multi_definition_matrix() {
                             "adapter": adapter.get_info().name, "backend": format!("{:?}", adapter.get_info().backend),
                             "topology": topology, "definitions": definitions, "instances": world.field_instances().len(),
                             "definition_hashes": world.field_definitions().iter().map(|d| d.revision().hex()).collect::<Vec<_>>(),
-                            "size": size, "mode": label, "selected": format!("{:?}", compiler.active),
+                            "size": size, "mode": label, "spatial_guard": guard, "selected": format!("{:?}", compiler.active),
                             "gpu_compute_ms": stats(&mut gpu), "cpu_draw_submit_ms": stats(&mut cpu),
+                            "cpu_scene_ms": stats(&mut scene_ms), "cpu_field_binding_ms": stats(&mut field_binding_ms),
+                            "cpu_pipeline_selection_ms": stats(&mut selection_ms), "node_enqueue_ms": stats(&mut node_enqueue_ms),
                             "requests": compiler.requests, "cached_pipelines": compiler.cached_pipelines,
-                            "source_bytes": compiler.source_bytes, "node_bytes": renderer.field_cache_stats().unwrap().node_bytes,
+                            "cache_hits": compiler.cache_hits, "compile_failures": compiler.failures,
+                            "compiler_source_ms": (compiler.active != GpuFieldPath::Interpreter).then_some(compiler.source_ms).flatten(),
+                            "compiler_pipeline_ms": (compiler.active != GpuFieldPath::Interpreter).then_some(compiler.pipeline_ms).flatten(),
+                            "source_bytes": (compiler.active != GpuFieldPath::Interpreter).then_some(compiler.source_bytes).flatten(),
+                            "node_bytes": renderer.field_cache_stats().unwrap().node_bytes,
+                            "instance_bytes": world.field_instances().len() * 80,
                             "warmup": 3, "samples": 7,
                         })
                     );
