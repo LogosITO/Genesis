@@ -2491,6 +2491,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "world-lab"
+version = "0.1.0"
+dependencies = [
+ "analytic-field",
+ "analytic-renderer",
+ "font8x8",
+ "pollster",
+ "serde",
+ "serde_json",
+ "spatial-math",
+ "wgpu",
+ "winit",
+ "world-authoring",
+ "world-state",
+]
+
+[[package]]
 name = "world-runtime"
 version = "0.2.0"
 dependencies = [

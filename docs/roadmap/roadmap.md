@@ -124,10 +124,12 @@ remains a diagnostic comparison, and the [smooth-field experiment](../research/s
 records the restricted `smooth_union` contract. A proposed CPU bounds prefilter
 was rejected after an `f64`/`f32` boundary regression.
 
-Next, measure the native pipeline separately from readback, instrument field
-work, and evaluate conservative sparse-scene culling with paired before/after
-GPU captures. Mathematical materials and an externally authored World Lab are
-still required for the integrated research workflow. Improve
+The native mixed compute pass has [local GPU timing measurements](../research/native-mixed-performance.md),
+and [mathematical materials](../specifications/materials.md) plus an
+[externally authored World Lab](../specifications/world-lab.md) now form a
+small integrated research workflow. Next, instrument field work per ray and
+evaluate conservative sparse-scene culling with paired before/after GPU
+captures. Improve
 the CPU solid-query proof before considering field-graph collisions. Verify
 the packaged native experience and numerical results on a second machine.
 

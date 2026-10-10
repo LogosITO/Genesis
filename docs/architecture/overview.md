@@ -1,6 +1,6 @@
 # Architecture overview
 
-Foundation 0.12 adds a separate bounded field-graph research path: exact-byte JSON source → validated typed nodes → CPU `f64` sampling and bounds / direct WGSL `f32` interpretation → offscreen preview. It does not feed `WorldState` or contact. See the [field-graph specification](../specifications/field-graph.md) and [local experiment](../research/foundation-012.md).
+Foundation 0.12 introduced bounded Field Graph authoring: exact-byte JSON source → validated typed nodes → CPU `f64` sampling and bounds / WGSL `f32` interpretation. Later integration added world-owned visual field instances and a native mixed viewport. Field Graphs still do not participate in physical contact. See the [field-graph specification](../specifications/field-graph.md), [native mixed viewport](../research/native-mixed-viewport.md), and [World Lab scene format](../specifications/world-lab.md).
 
 Foundation 0.11 adds bounded authored definitions and world occurrences. Exact source bytes and stable occurrence IDs live in `WorldState`; compiled segments, rendering snapshots and contact BVHs are derived. See the [authored instance contract](../specifications/authored-world-instances.md) and [ADR 0009](../adr/0009-authored-world-instances.md).
 
@@ -12,7 +12,7 @@ The source of truth is analytic parameters and rules. Sampling at a point is a q
 
 Current flow: `Vec3 / Transform` → `Sphere / AxisAlignedBox / Field` → `WorldState` → `advance` / `advance_life` → `Runtime`. `WorldState` owns ordinary spheres, growth nodes, and resource sources. `world-simulation` applies events and growth on a candidate state before atomic commit. `world-runtime` coordinates ticks, pending events, and bounded versioned saves. The renderer takes a bounded snapshot of world spheres, growth nodes, and sources, sends analytic parameters to WGSL, and computes each pixel by ray intersection. A full-screen triangle only presents the computed image; it is not world geometry. The original `hello-world` and First Light modes remain. See [renderer architecture](renderer.md).
 
-Future modules are conditional on experiments: authoritative field-graph instances, physics with compatible field contracts, a richer language for authored rules, an editor, and an FFI boundary. The separate Foundation 0.12 GPU preview supports only its bounded graph vocabulary. The runtime remains free of UI and GPU dependencies.
+Future modules are conditional on experiments: physics with compatible field contracts, a richer language for authored rules, a full editor, and an FFI boundary. The experimental World Lab is a small external-scene viewer, not a full editor. The runtime remains free of UI and GPU dependencies.
 
 ## Research status
 

@@ -140,6 +140,8 @@ fn native_mixed_compute_matrix() {
                             diagnostic: false,
                             materials: None,
                             simulation_seconds: 0.0,
+                            background: [0.05, 0.075, 0.115],
+                            light_direction: [0.5, 0.8, -0.6],
                         },
                     )
                     .unwrap();

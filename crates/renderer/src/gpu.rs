@@ -51,6 +51,8 @@ struct GpuFieldInstance {
 struct GpuMixedOptions {
     trace: [f32; 4],
     info: [u32; 4], // occurrence count, node count, visibility/diagnostics flags, iteration budget
+    background: [f32; 4],
+    light: [f32; 4],
 }
 
 #[repr(C)]
@@ -81,6 +83,8 @@ struct MixedSceneOptions<'a> {
     flags: [bool; 3],
     materials: Option<&'a MaterialSet>,
     simulation_seconds: f32,
+    background: [f32; 3],
+    light_direction: [f32; 3],
 }
 struct MixedImage {
     size: [u32; 2],
@@ -173,6 +177,10 @@ pub struct MixedDrawOptions<'a> {
     pub materials: Option<&'a MaterialSet>,
     /// Deterministic simulation time in seconds; never wall-clock time.
     pub simulation_seconds: f32,
+    /// Linear RGB background, each component in `[0,1]`.
+    pub background: [f32; 3],
+    /// Nonzero world-space directional light vector.
+    pub light_direction: [f32; 3],
 }
 
 /// Direct analytic traversal, GPU BVH traversal, or the measured-size policy.
@@ -916,6 +924,19 @@ impl GpuRenderer {
                 "invalid material simulation time",
             ));
         }
+        let light_length_squared = options.light_direction.iter().map(|x| x * x).sum::<f32>();
+        if options
+            .background
+            .iter()
+            .any(|x| !x.is_finite() || !(0.0..=1.0).contains(x))
+            || options.light_direction.iter().any(|x| !x.is_finite())
+            || !light_length_squared.is_finite()
+            || light_length_squared < 1e-12
+        {
+            return Err(RenderError::InvalidInput(
+                "invalid mixed background or light",
+            ));
+        }
         if let Some(materials) = options.materials {
             materials.validate_world(world)?;
         }
@@ -1140,6 +1161,18 @@ impl GpuRenderer {
                     | (u32::from(options.flags[2]) << 2),
                 options.policy.iterations,
             ],
+            background: [
+                options.background[0],
+                options.background[1],
+                options.background[2],
+                0.0,
+            ],
+            light: [
+                options.light_direction[0],
+                options.light_direction[1],
+                options.light_direction[2],
+                0.0,
+            ],
         };
         let options_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mixed render options"),
@@ -1234,6 +1267,8 @@ impl GpuRenderer {
                     ],
                     materials: options.materials,
                     simulation_seconds: options.simulation_seconds,
+                    background: options.background,
+                    light_direction: options.light_direction,
                 },
             ),
         )
@@ -1480,7 +1515,7 @@ mod tests {
         assert_eq!(std::mem::offset_of!(FlatNode, meta), 32);
         assert_eq!(std::mem::offset_of!(FlatNode, leaf), 48);
         assert_eq!(std::mem::size_of::<GpuFieldInstance>(), 32);
-        assert_eq!(std::mem::size_of::<GpuMixedOptions>(), 32);
+        assert_eq!(std::mem::size_of::<GpuMixedOptions>(), 64);
         for shader in [
             include_str!("../shaders/analytic.wgsl"),
             include_str!("../shaders/present.wgsl"),

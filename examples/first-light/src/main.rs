@@ -1215,6 +1215,8 @@ impl App {
                     diagnostic: self.diagnostic,
                     materials: None,
                     simulation_seconds: self.time.ticks() as f32 * STEP.as_secs_f32(),
+                    background: [0.05, 0.075, 0.115],
+                    light_direction: [0.5, 0.8, -0.6],
                 },
             )
         } else {

@@ -49,14 +49,30 @@ pub struct MaterialSample {
     pub emission: [f32; 3],
 }
 impl MaterialSample {
-    /// Experimental linear-RGB ambient + one directional Lambert light, plus emission.
+    /// Experimental linear-RGB ambient + default directional Lambert light, plus emission.
     pub fn lit(self, normal: [f32; 3]) -> Result<[f32; 3], RenderError> {
+        self.lit_with_light(normal, [0.5, 0.8, -0.6])
+    }
+
+    /// Same display approximation with a finite nonzero world-space light direction.
+    pub fn lit_with_light(
+        self,
+        normal: [f32; 3],
+        light: [f32; 3],
+    ) -> Result<[f32; 3], RenderError> {
         let length = normal.iter().map(|x| x * x).sum::<f32>();
         if normal.iter().any(|x| !x.is_finite()) || (length - 1.0).abs() > 0.01 {
             return Err(RenderError::InvalidInput("invalid material normal"));
         }
-        let light_length = (0.5f32 * 0.5 + 0.8 * 0.8 + 0.6 * 0.6).sqrt();
-        let dot = (normal[0] * 0.5 + normal[1] * 0.8 - normal[2] * 0.6) / light_length;
+        let light_length_squared = light.iter().map(|x| x * x).sum::<f32>();
+        if light.iter().any(|x| !x.is_finite())
+            || !light_length_squared.is_finite()
+            || light_length_squared < 1e-12
+        {
+            return Err(RenderError::InvalidInput("invalid material light"));
+        }
+        let dot =
+            normal.iter().zip(light).map(|(n, l)| n * l).sum::<f32>() / light_length_squared.sqrt();
         let diffuse = 0.18 + 0.82 * dot.max(0.0);
         Ok(std::array::from_fn(|i| {
             (self.base[i] * diffuse + self.emission[i]).clamp(0.0, 1.0)
@@ -264,6 +280,19 @@ mod tests {
         assert_eq!(
             constant.sample([2.0, 0.0, 0.0], 0.0).unwrap().base,
             [0.2, 0.3, 0.4]
+        );
+        let sample = constant.sample([0.0; 3], 0.0).unwrap();
+        let facing = sample
+            .lit_with_light([0.0, 0.0, 1.0], [0.0, 0.0, 1.0])
+            .unwrap();
+        let away = sample
+            .lit_with_light([0.0, 0.0, 1.0], [0.0, 0.0, -1.0])
+            .unwrap();
+        assert!(facing[0] > away[0]);
+        assert!(
+            sample
+                .lit_with_light([0.0, 0.0, 1.0], [f32::MAX; 3])
+                .is_err()
         );
         let gradient = Material::new(
             [0.0; 3],

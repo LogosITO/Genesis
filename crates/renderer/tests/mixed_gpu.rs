@@ -149,6 +149,8 @@ fn native_mixed_depth_matches_reference_at_center() {
                     diagnostic: true,
                     materials: None,
                     simulation_seconds: 0.0,
+                    background: [0.05, 0.075, 0.115],
+                    light_direction: [0.5, 0.8, -0.6],
                 },
             )
             .unwrap();
@@ -216,6 +218,8 @@ fn native_mixed_depth_matches_reference_at_center() {
                 diagnostic: true,
                 materials: None,
                 simulation_seconds: 0.0,
+                background: [0.05, 0.075, 0.115],
+                light_direction: [0.5, 0.8, -0.6],
             },
         )
         .unwrap();
@@ -256,6 +260,8 @@ fn native_mixed_depth_matches_reference_at_center() {
                 diagnostic: true,
                 materials: None,
                 simulation_seconds: 0.0,
+                background: [0.05, 0.075, 0.115],
+                light_direction: [0.5, 0.8, -0.6],
             },
         )
         .unwrap();
@@ -324,6 +330,8 @@ fn mathematical_materials_match_cpu_and_reload_without_geometry_upload() {
                     diagnostic: true,
                     materials: Some(materials),
                     simulation_seconds: 0.0,
+                    background: [0.05, 0.075, 0.115],
+                    light_direction: [0.5, 0.8, -0.6],
                 },
             )
             .unwrap();
@@ -357,6 +365,43 @@ fn mathematical_materials_match_cpu_and_reload_without_geometry_upload() {
             (f32::from(pixels[center + channel]) / 255.0 - expected[channel]).abs() < 0.025,
             "channel {channel}: GPU {:?}, CPU {expected:?}",
             &pixels[center..center + 4]
+        );
+    }
+    let light = [0.0, 0.0, -1.0];
+    let custom_image = renderer
+        .draw_mixed(
+            &device,
+            &queue,
+            &world,
+            camera,
+            MixedDrawOptions {
+                draw: DrawOptions {
+                    size,
+                    normal_debug: false,
+                    surface: None,
+                    timer: None,
+                },
+                policy: GraphTracePolicy::default(),
+                show_analytic: true,
+                show_fields: true,
+                diagnostic: true,
+                materials: Some(&materials),
+                simulation_seconds: 0.0,
+                background: [0.05, 0.075, 0.115],
+                light_direction: light,
+            },
+        )
+        .unwrap();
+    let custom_pixels = rgba(&device, &queue, &custom_image, size);
+    let custom_expected = gradient
+        .sample(point, 0.0)
+        .unwrap()
+        .lit_with_light(normal, light)
+        .unwrap();
+    for channel in 0..3 {
+        assert!(
+            (f32::from(custom_pixels[center + channel]) / 255.0 - custom_expected[channel]).abs()
+                < 0.025
         );
     }
     let before = renderer.field_cache_stats().unwrap();

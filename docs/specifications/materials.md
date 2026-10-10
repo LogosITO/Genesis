@@ -17,10 +17,13 @@ reference and WGSL evaluator use `f32`; small rounding differences near band
 transitions are expected. No physically based color management is claimed.
 
 The display model uses an ambient factor 0.18 and a directional Lambert factor
-0.82 toward normalized `(0.5,0.8,-0.6)`. Emission is added after diffuse
+0.82. Native mixed rendering accepts a validated nonzero world-space light
+direction; the default is `(0.5,0.8,-0.6)`. Emission is added after diffuse
 lighting and then clamped to the output range. It visibly brightens the
 surface; it does not illuminate neighboring objects or create indirect light.
 Diagnostic uncertainty colors override material appearance.
+The CPU reference uses `lit_with_light` for authored directions; `lit` retains
+the default direction for existing callers.
 
 `MaterialSet` assigns materials by stable `EntityId` to ordinary world spheres
 and world-owned field occurrences. A missing assignment retains the existing
@@ -33,6 +36,6 @@ The opt-in GPU test
 `mathematical_materials_match_cpu_and_reload_without_geometry_upload` checks
 CPU/GPU center pixels, invalid inputs, changed appearance, shared graph
 definitions, and unchanged graph/BVH upload counters. It writes an actual GPU
-capture under `target/mixed-captures/materials.bmp`. External JSON material
-authoring and transactional scene reload belong to the separate World Lab
-workflow; this typed API alone does not constitute that workflow.
+capture under `target/mixed-captures/materials.bmp`. World Lab loads these
+parameters from its bounded external scene format and validates them through
+`Material::new`; see the [scene contract](world-lab.md).

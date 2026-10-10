@@ -91,6 +91,15 @@ cargo run -p first-light --locked -- --mixed
 
 Use **1** for analytic visibility, **2** for field visibility, **3** for numerical diagnostics, and **T** to move a field occurrence. Camera and exit controls match First Light. See the [native mixed research record](docs/research/native-mixed-viewport.md) for tested depth behavior and limits.
 
+Explore an external mathematical scene in the standalone World Lab:
+
+```sh
+cargo run -p world-lab --locked
+cargo run -p world-lab --locked -- examples/world-lab/scenes/showcase.json
+```
+
+Edit `examples/world-lab/scenes/showcase.json` or its adjacent `bridge.json`, then press **R** to reload without recompiling. **Arrows/WASD** orbit, **+/-** zoom, **1/2** toggle analytic/field geometry, **3** shows numerical uncertainty, **N** shows normals, **C** saves an actual GPU frame as `world-lab-capture.bmp`, and **Esc** exits. Invalid reloads retain the previous scene. See the [World Lab scene contract](docs/specifications/world-lab.md).
+
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings

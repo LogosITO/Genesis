@@ -1,0 +1,24 @@
+{
+  "format_version": 1,
+  "name": "Continuous Bridges",
+  "definitions": [
+    { "name": "bridge", "path": "bridge.json" }
+  ],
+  "materials": [
+    { "name": "amber", "base": [0.90, 0.28, 0.06], "alternate": [1.0, 0.82, 0.20], "emission": [0.02, 0.0, 0.0], "pattern": { "kind": "gradient", "axis": [0.0, 1.0, 0.0], "frequency": 0.5, "phase": 0.5, "speed": 0.0 } },
+    { "name": "ribbon", "base": [0.04, 0.30, 0.75], "alternate": [0.18, 0.88, 0.93], "emission": [0.0, 0.0, 0.0], "pattern": { "kind": "bands", "axis": [1.0, 0.0, 0.0], "frequency": 1.2, "phase": 0.0, "speed": 0.0 } },
+    { "name": "glow", "base": [0.15, 0.10, 0.4], "alternate": [0.15, 0.10, 0.4], "emission": [0.45, 0.08, 0.75], "pattern": { "kind": "constant" } }
+  ],
+  "spheres": [
+    { "radius": 0.56, "translation": [-0.1, -0.12, 2.2], "scale": 1.0, "material": "amber" },
+    { "radius": 0.34, "translation": [2.6, 0.5, -0.1], "scale": 1.0, "material": "glow" }
+  ],
+  "fields": [
+    { "definition": "bridge", "translation": [-1.6, 0.0, 0.0], "scale": 0.9, "material": "ribbon" },
+    { "definition": "bridge", "translation": [1.3, -0.2, -1.3], "scale": 0.7, "material": "glow" }
+  ],
+  "camera": { "target": [0.0, 0.0, 0.0], "distance": 8.0, "yaw": 0.25, "elevation": 0.25, "fov_radians": 0.9 },
+  "render": { "show_analytic": true, "show_fields": true, "diagnostic": false, "normals": false },
+  "background": [0.025, 0.04, 0.08],
+  "light_direction": [0.5, 0.8, -0.6]
+}

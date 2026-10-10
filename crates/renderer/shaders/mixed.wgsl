@@ -12,7 +12,12 @@ struct Node { links: vec4<u32>, param: vec4<f32> }
 struct Outcome { distance_normal: vec4<f32>, info: vec4<u32> }
 struct Frame { point: vec3<f32>, first: f32, index: u32, phase: u32 }
 struct FieldInstance { position_scale: vec4<f32>, info: vec4<u32> }
-struct MixedOptions { trace: vec4<f32>, info: vec4<u32> }
+struct MixedOptions {
+    trace: vec4<f32>,
+    info: vec4<u32>,
+    background: vec4<f32>,
+    light: vec4<f32>,
+}
 struct MaterialGpu {
     base: vec4<f32>,
     alternate: vec4<f32>,
@@ -30,7 +35,7 @@ var<private> field_config: FieldConfig;
 // FIELD_EVALUATOR_INSERTION_POINT
 
 fn shade_material(index: u32, point: vec3<f32>, normal: vec3<f32>, fallback: vec3<f32>, emphasis: f32) -> vec3<f32> {
-    let light = normalize(vec3<f32>(0.5, 0.8, -0.6));
+    let light = normalize(mixed_options.light.xyz);
     let diffuse = 0.18 + 0.82 * max(dot(normal, light), 0.0);
     if (index == 0xffffffffu || index >= arrayLength(&materials)) {
         return fallback * mix(diffuse, 1.0, emphasis);
@@ -93,7 +98,7 @@ fn render_mixed(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
     }
-    var color = vec3<f32>(0.035, 0.055, 0.09) + vec3<f32>(0.03, 0.04, 0.05) * (1.0 - uv.y);
+    var color = mixed_options.background.xyz;
     if (field_hit && analytic.valid) {
         let band = 1e-4 * max(1.0, max(abs(field_distance), abs(analytic.distance)));
         if (abs(field_distance - analytic.distance) <= band) { ambiguous = true; }
