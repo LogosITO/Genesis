@@ -2,6 +2,8 @@
 
 Foundation 0.12 introduced bounded Field Graph authoring: exact-byte JSON source → validated typed nodes → CPU `f64` sampling and bounds / WGSL `f32` interpretation. Later integration added world-owned visual field instances and a native mixed viewport. Field Graphs still do not participate in physical contact. See the [field-graph specification](../specifications/field-graph.md), [native mixed viewport](../research/native-mixed-viewport.md), and [World Lab scene format](../specifications/world-lab.md).
 
+The native mixed renderer can derive a revision-scoped WGSL evaluator for a supported single-definition scene. Its device-local bounded cache and interpreter fallback do not change `WorldState`; see [Performance Research 2](../research/performance-research-2.md) for the conditional qualification and numerical limits.
+
 Foundation 0.11 adds bounded authored definitions and world occurrences. Exact source bytes and stable occurrence IDs live in `WorldState`; compiled segments, rendering snapshots and contact BVHs are derived. See the [authored instance contract](../specifications/authored-world-instances.md) and [ADR 0009](../adr/0009-authored-world-instances.md).
 
 Foundation 0.8 adds finite source reservoirs and proportional allocation among existing organisms. Source ledgers, growth topology, kinematic contact, and pending events persist in version-5 saves. The renderer only reads the resulting analytic world. See the [allocation contract](../specifications/resource-allocation.md), [ecosystem state](../specifications/ecosystem-state.md), and [contact specification](../specifications/kinematic-contact.md).

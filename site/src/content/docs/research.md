@@ -26,3 +26,5 @@ The [First Ecology experiment](../reference/research/first-ecology-experiment/) 
 The [Foundation 0.12 field-graph experiment](../reference/research/foundation-012/) records direct WGSL graph evaluation, CPU/GPU readback, two real captures, numerical edge cases, and bounded scaling measurements.
 
 [Performance Research 1](../reference/research/performance-research-1/) measures GPU field work, tests expanded ray-domain rejection in the native mixed viewport, and evaluates a test-only specialized WGSL path with real GPU parity and captures.
+
+[Performance Research 2](../reference/research/performance-research-2/) records revision-scoped shader compilation in the native mixed renderer, GPU parity and performance measurements, cache behavior, and the conditional adoption decision.
