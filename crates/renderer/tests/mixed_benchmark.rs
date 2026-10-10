@@ -728,10 +728,24 @@ fn multi_definition_matrix() {
                         GpuFieldPath::Specialized
                     );
                 }
+                for _ in 0..500 {
+                    draw(GpuFieldExecution::Combined);
+                    if renderer.compiler_stats().unwrap().active == GpuFieldPath::Combined {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                assert_eq!(
+                    renderer.compiler_stats().unwrap().active,
+                    GpuFieldPath::Combined,
+                    "combined compilation failed: {:?}",
+                    renderer.compiler_stats().unwrap().last_error
+                );
                 for (label, execution) in [
                     ("interpreter", GpuFieldExecution::Interpreter),
                     ("auto", GpuFieldExecution::Auto),
                     ("structural", GpuFieldExecution::Structural),
+                    ("combined", GpuFieldExecution::Combined),
                 ] {
                     for _ in 0..3 {
                         draw(execution);
@@ -746,7 +760,9 @@ fn multi_definition_matrix() {
                     let compiler = renderer.compiler_stats().unwrap();
                     assert_eq!(
                         compiler.active,
-                        if (topology == "shared" || definitions == 1)
+                        if execution == GpuFieldExecution::Combined {
+                            GpuFieldPath::Combined
+                        } else if (topology == "shared" || definitions == 1)
                             && execution == GpuFieldExecution::Structural
                         {
                             GpuFieldPath::Structural

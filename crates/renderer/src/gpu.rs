@@ -2,15 +2,15 @@ use crate::{
     Bvh, Camera, Ray, RenderError, Scene, SemanticTarget,
     acceleration::FlatNode,
     field_compiler::{
-        SEMANTICS_VERSION, StructuralKey, specialized_field_source, structural_field_source,
-        structural_key,
+        SEMANTICS_VERSION, StructuralKey, combined_field_source, specialized_field_source,
+        structural_field_source, structural_key,
     },
     field_graph_gpu::{GpuNode, GraphTracePolicy, gpu_nodes},
     material::MaterialSet,
 };
 use bytemuck::{Pod, Zeroable};
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     sync::{Mutex, mpsc},
     time::Instant,
 };
@@ -52,6 +52,7 @@ struct GpuFieldInstance {
     info: [u32; 4],
     bounds_min: [f32; 4],
     bounds_max: [f32; 4],
+    topology: [u32; 4], // local selector for the combined shader
 }
 
 #[repr(C)]
@@ -127,14 +128,16 @@ fn mixed_shader_source(field_source: &str) -> String {
 fn compile_mixed_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
-    graph: &Graph,
+    graphs: &[Graph],
     runtime_parameters: bool,
 ) -> Result<CompiledArtifact, String> {
     let started = Instant::now();
-    let field = if runtime_parameters {
-        structural_field_source(graph)
+    let field = if graphs.len() > 1 {
+        combined_field_source(graphs)
+    } else if runtime_parameters {
+        structural_field_source(&graphs[0])
     } else {
-        specialized_field_source(graph)
+        specialized_field_source(&graphs[0])
     }
     .ok_or_else(|| "definition exceeds finite GPU or shader source budget".to_owned())?;
     let source = mixed_shader_source(&field);
@@ -241,6 +244,8 @@ pub enum GpuFieldExecution {
     Auto,
     /// Experimentally compile node topology and read validated parameters from GPU storage.
     Structural,
+    /// Experimentally combine distinct validated topologies in one mixed shader.
+    Combined,
     /// Always use the reference interpreter.
     Interpreter,
 }
@@ -272,6 +277,8 @@ pub enum GpuFieldPath {
     Specialized,
     /// A structural shader reads current numerical parameters from the field-node buffer.
     Structural,
+    /// One shader dispatches among several validated graph topologies.
+    Combined,
 }
 
 /// Renderer-local compilation diagnostics. Pipelines never cross device ownership.
@@ -468,6 +475,10 @@ enum CompilerKey {
         schema: StructuralKey,
         semantics: u32,
     },
+    Combined {
+        schemas: Vec<StructuralKey>,
+        semantics: u32,
+    },
 }
 
 struct CompiledPipeline {
@@ -656,32 +667,57 @@ impl GpuRenderer {
             return Ok(None);
         }
         let mut selected = None;
-        let mut graph = None;
-        for instance in world.field_instances().iter().filter(|item| item.enabled()) {
-            let current = world
-                .field_graph(instance.id())
-                .ok_or(RenderError::InvalidInput("missing field graph"))?;
-            let key = match execution {
-                GpuFieldExecution::Auto => CompilerKey::Exact {
-                    revision: instance.revision(),
-                    semantics: SEMANTICS_VERSION,
-                },
-                GpuFieldExecution::Structural => {
-                    let Some(schema) = structural_key(current) else {
-                        return Ok(None);
-                    };
-                    CompilerKey::Structure {
-                        schema,
-                        semantics: SEMANTICS_VERSION,
-                    }
-                }
-                GpuFieldExecution::Interpreter => unreachable!(),
-            };
-            if selected.as_ref().is_some_and(|old| old != &key) {
+        let mut graphs = Vec::new();
+        if execution == GpuFieldExecution::Combined {
+            let mut topologies = BTreeMap::new();
+            for instance in world.field_instances().iter().filter(|item| item.enabled()) {
+                let current = world
+                    .field_graph(instance.id())
+                    .ok_or(RenderError::InvalidInput("missing field graph"))?;
+                let Some(schema) = structural_key(current) else {
+                    return Ok(None);
+                };
+                topologies.entry(schema).or_insert_with(|| current.clone());
+            }
+            if topologies.len() > 4 {
                 return Ok(None);
             }
-            selected = Some(key);
-            graph.get_or_insert_with(|| current.clone());
+            if !topologies.is_empty() {
+                selected = Some(CompilerKey::Combined {
+                    schemas: topologies.keys().cloned().collect(),
+                    semantics: SEMANTICS_VERSION,
+                });
+                graphs = topologies.into_values().collect();
+            }
+        } else {
+            for instance in world.field_instances().iter().filter(|item| item.enabled()) {
+                let current = world
+                    .field_graph(instance.id())
+                    .ok_or(RenderError::InvalidInput("missing field graph"))?;
+                let key = match execution {
+                    GpuFieldExecution::Auto => CompilerKey::Exact {
+                        revision: instance.revision(),
+                        semantics: SEMANTICS_VERSION,
+                    },
+                    GpuFieldExecution::Structural => {
+                        let Some(schema) = structural_key(current) else {
+                            return Ok(None);
+                        };
+                        CompilerKey::Structure {
+                            schema,
+                            semantics: SEMANTICS_VERSION,
+                        }
+                    }
+                    GpuFieldExecution::Interpreter | GpuFieldExecution::Combined => unreachable!(),
+                };
+                if selected.as_ref().is_some_and(|old| old != &key) {
+                    return Ok(None);
+                }
+                selected = Some(key);
+                if graphs.is_empty() {
+                    graphs.push(current.clone());
+                }
+            }
         }
         let Some(key) = selected else {
             return Ok(None);
@@ -700,13 +736,13 @@ impl GpuRenderer {
                 state.active = match key {
                     CompilerKey::Exact { .. } => GpuFieldPath::Specialized,
                     CompilerKey::Structure { .. } => GpuFieldPath::Structural,
+                    CompilerKey::Combined { .. } => GpuFieldPath::Combined,
                 };
             }
             return Ok(pipeline);
         }
         if state.pending.is_none() {
-            let graph = graph.expect("selected graph");
-            let runtime_parameters = matches!(key, CompilerKey::Structure { .. });
+            let runtime_parameters = !matches!(key, CompilerKey::Exact { .. });
             let device = device.clone();
             let layout = self.mixed_pipeline_layout.clone();
             let (sender, receiver) = mpsc::sync_channel(1);
@@ -714,7 +750,7 @@ impl GpuRenderer {
                 .name("genesis-field-compiler".into())
                 .spawn(move || {
                     let result =
-                        compile_mixed_pipeline(&device, &layout, &graph, runtime_parameters);
+                        compile_mixed_pipeline(&device, &layout, &graphs, runtime_parameters);
                     let _ = sender.send(result);
                 }) {
                 Ok(_) => {
@@ -1294,6 +1330,14 @@ impl GpuRenderer {
         let mut nodes = Vec::new();
         let mut instances = Vec::new();
         let mut definitions = Vec::new();
+        let mut topology_keys = world
+            .field_instances()
+            .iter()
+            .filter(|item| item.enabled())
+            .filter_map(|item| world.field_graph(item.id()).and_then(structural_key))
+            .collect::<Vec<_>>();
+        topology_keys.sort();
+        topology_keys.dedup();
         let mut materials = Vec::new();
         let analytic_indices: Vec<u32> = scene
             .primitives()
@@ -1378,6 +1422,14 @@ impl GpuRenderer {
                         (upper[axis] as f32 + padding(axis)).next_up()
                     }
                 }),
+                topology: [
+                    structural_key(graph)
+                        .and_then(|key| topology_keys.binary_search(&key).ok())
+                        .map_or(u32::MAX, |index| index as u32),
+                    0,
+                    0,
+                    0,
+                ],
             });
         }
         let node_count = u32::try_from(nodes.len()).map_err(|_| RenderError::TooManyObjects)?;
@@ -1945,11 +1997,12 @@ mod tests {
         assert_eq!(std::mem::offset_of!(FlatNode, max), 16);
         assert_eq!(std::mem::offset_of!(FlatNode, meta), 32);
         assert_eq!(std::mem::offset_of!(FlatNode, leaf), 48);
-        assert_eq!(std::mem::size_of::<GpuFieldInstance>(), 64);
+        assert_eq!(std::mem::size_of::<GpuFieldInstance>(), 80);
         assert_eq!(std::mem::offset_of!(GpuFieldInstance, position_scale), 0);
         assert_eq!(std::mem::offset_of!(GpuFieldInstance, info), 16);
         assert_eq!(std::mem::offset_of!(GpuFieldInstance, bounds_min), 32);
         assert_eq!(std::mem::offset_of!(GpuFieldInstance, bounds_max), 48);
+        assert_eq!(std::mem::offset_of!(GpuFieldInstance, topology), 64);
         assert_eq!(std::mem::size_of::<GpuMixedOptions>(), 64);
         for shader in [
             include_str!("../shaders/analytic.wgsl"),

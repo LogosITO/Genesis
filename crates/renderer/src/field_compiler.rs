@@ -9,7 +9,7 @@ const SAMPLE_BEGIN: &str = "// GENESIS_SAMPLE_BEGIN";
 const SAMPLE_END: &str = "// GENESIS_SAMPLE_END";
 const MAX_SHADER_BYTES: usize = 32 * 1024;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct StructuralKey {
     root: u32,
     links: Vec<[u32; 4]>,
@@ -53,6 +53,41 @@ pub(crate) fn specialized_field_source(graph: &Graph) -> Option<String> {
 /// current numerical parameters are read from the existing field-node buffer.
 pub(crate) fn structural_field_source(graph: &Graph) -> Option<String> {
     field_source(graph, true)
+}
+
+/// Emit one bounded program for distinct, validated topologies in key order.
+/// A bad local selector uses the reference interpreter instead of hiding geometry.
+pub(crate) fn combined_field_source(graphs: &[Graph]) -> Option<String> {
+    if graphs.is_empty() || graphs.len() > 4 {
+        return None;
+    }
+    let mut generated = String::new();
+    let mut previous = None;
+    let mut dispatch = String::new();
+    for (slot, graph) in graphs.iter().enumerate() {
+        let key = structural_key(graph)?;
+        if previous.as_ref().is_some_and(|old| old >= &key) {
+            return None;
+        }
+        previous = Some(key);
+        let source = structural_field_source(graph)?;
+        let fragment = source.split_once(SAMPLE_BEGIN)?.1.split_once(SAMPLE_END)?.0;
+        let functions = fragment.split_once("fn sample(")?.0;
+        generated.push_str(&functions.replace("gen_eval_", &format!("gen_{slot}_eval_")));
+        dispatch.push_str(&format!(
+            "case {slot}u: {{ return gen_{slot}_eval_{}(point); }}\n",
+            graph.root()
+        ));
+    }
+    let interpreter = SOURCE.split_once(SAMPLE_BEGIN)?.1.split_once(SAMPLE_END)?.0;
+    generated.push_str(&interpreter.replace("fn sample(", "fn interpreted_sample("));
+    generated.push_str(&format!(
+        "fn sample(point: vec3<f32>) -> f32 {{ switch field_config.info.w {{ {dispatch} default: {{ return interpreted_sample(point); }} }} }}\n"
+    ));
+    let (prefix, rest) = SOURCE.split_once(SAMPLE_BEGIN)?;
+    let (_, suffix) = rest.split_once(SAMPLE_END)?;
+    let source = format!("{prefix}{SAMPLE_BEGIN}\n{generated}{SAMPLE_END}{suffix}");
+    (source.len() <= MAX_SHADER_BYTES).then_some(source)
 }
 
 fn field_source(graph: &Graph, runtime_parameters: bool) -> Option<String> {
@@ -206,6 +241,25 @@ mod tests {
         );
         let module =
             naga::front::wgsl::parse_str(&structural_field_source(&first).unwrap()).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+    }
+
+    #[test]
+    fn combined_shader_validates_and_rejects_duplicate_topologies() {
+        let sphere = compile_json(br#"{"format_version":1,"id":"sphere","root":"s","nodes":[{"op":"sphere","id":"s","radius":0.7}]}"#).unwrap();
+        let box_graph = compile_json(br#"{"format_version":1,"id":"box","root":"b","nodes":[{"op":"box","id":"b","half_extent":[0.7,0.6,0.5]}]}"#).unwrap();
+        let mut graphs = vec![sphere.clone(), box_graph];
+        graphs.sort_by_key(|graph| structural_key(graph).unwrap());
+        let source = combined_field_source(&graphs).unwrap();
+        assert!(source.contains("return interpreted_sample(point)"));
+        assert_eq!(source, combined_field_source(&graphs).unwrap());
+        assert!(combined_field_source(&[sphere.clone(), sphere]).is_none());
+        let module = naga::front::wgsl::parse_str(&source).unwrap();
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),

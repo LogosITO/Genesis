@@ -16,6 +16,7 @@ struct FieldInstance {
     info: vec4<u32>,
     bounds_min: vec4<f32>,
     bounds_max: vec4<f32>,
+    topology: vec4<u32>,
 }
 struct MixedOptions {
     trace: vec4<f32>,
@@ -99,7 +100,7 @@ fn render_mixed(@builtin(global_invocation_id) gid: vec3<u32>) {
         for (var i = 0u; i < mixed_options.info.x; i++) {
             let instance = field_instances[i];
             let scale = instance.position_scale.w;
-            field_config.info = vec4<u32>(instance.info.x, mixed_options.info.y, mixed_options.info.w, 0u);
+            field_config.info = vec4<u32>(instance.info.x, mixed_options.info.y, mixed_options.info.w, instance.topology.x);
             field_config.trace = mixed_options.trace;
             let origin = (camera.origin.xyz - instance.position_scale.xyz) / scale;
             if ((mixed_options.info.z & 8u) != 0u && misses_field_bounds(origin, direction, camera.view.z / scale,

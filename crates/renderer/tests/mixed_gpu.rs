@@ -412,6 +412,152 @@ fn structural_parameters_reuse_pipeline_for_two_revisions() {
     assert_eq!(fallback_reference, fallback);
     assert_eq!(renderer.compiler_stats().unwrap().requests, requests);
 }
+
+#[test]
+#[ignore = "requires native GPU; heterogeneous compiler image and edit parity"]
+fn combined_topologies_preserve_mixed_image_and_fallback() {
+    let instance = test_instance();
+    let adapter =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+            .unwrap();
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let renderer =
+        pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+    let camera = Camera::look_at(v(0.0, 0.0, -5.0), Vec3::ZERO, v(0.0, 1.0, 0.0), 0.9).unwrap();
+    let size = [160, 90];
+    let sphere = br#"{"format_version":1,"id":"sphere","root":"s","nodes":[{"op":"sphere","id":"s","radius":0.7}]}"#;
+    let box_graph = br#"{"format_version":1,"id":"box","root":"b","nodes":[{"op":"box","id":"b","half_extent":[0.4,0.5,0.6]}]}"#;
+    let mut world = WorldState::new(DeterministicSeed(406));
+    let first = world
+        .spawn_field(sphere, Transform::new(v(-0.65, 0.0, 0.0), 1.0).unwrap())
+        .unwrap();
+    let second = world
+        .spawn_field(box_graph, Transform::new(v(0.65, 0.0, 0.0), 1.0).unwrap())
+        .unwrap();
+    world
+        .spawn_sphere(
+            Sphere::new(0.25).unwrap(),
+            Transform::new(v(0.0, -0.7, 0.5), 1.0).unwrap(),
+            0.0,
+        )
+        .unwrap();
+    let mut materials = MaterialSet::default();
+    materials.set_field(
+        first,
+        Material::new(
+            [0.8, 0.1, 0.1],
+            [0.0; 3],
+            [0.0; 3],
+            MaterialPattern::Constant,
+        )
+        .unwrap(),
+    );
+    materials.set_field(
+        second,
+        Material::new(
+            [0.1, 0.8, 0.1],
+            [0.0; 3],
+            [0.0; 3],
+            MaterialPattern::Constant,
+        )
+        .unwrap(),
+    );
+    let draw = |world: &WorldState, materials: &MaterialSet, execution| {
+        let image = renderer
+            .draw_mixed_with_execution(
+                &device,
+                &queue,
+                world,
+                camera,
+                MixedDrawOptions {
+                    draw: DrawOptions {
+                        size,
+                        normal_debug: false,
+                        surface: None,
+                        timer: None,
+                    },
+                    policy: GraphTracePolicy::default(),
+                    show_analytic: true,
+                    show_fields: true,
+                    diagnostic: true,
+                    materials: Some(materials),
+                    simulation_seconds: 0.0,
+                    background: [0.0; 3],
+                    light_direction: [0.5, 0.8, -0.6],
+                },
+                GpuFieldRenderMode {
+                    execution,
+                    spatial_guard: true,
+                },
+            )
+            .unwrap();
+        rgba(&device, &queue, &image, size)
+    };
+    let captures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/performance-research-4-review");
+    std::fs::create_dir_all(&captures).unwrap();
+    for (step, source) in [sphere.as_slice(), br#"{"format_version":1,"id":"sphere","root":"s","nodes":[{"op":"sphere","id":"s","radius":0.5}]}"#].iter().enumerate() {
+        if step > 0 {
+            world.replace_field(first, source).unwrap();
+        }
+        let reference = draw(&world, &materials, GpuFieldExecution::Interpreter);
+        let mut compiled = None;
+        for _ in 0..200 {
+            let candidate = draw(&world, &materials, GpuFieldExecution::Combined);
+            let state = renderer.compiler_stats().unwrap();
+            assert!(state.last_error.is_none(), "combined compiler: {:?}", state.last_error);
+            if state.active == GpuFieldPath::Combined {
+                compiled = Some(candidate);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let compiled = compiled.expect("combined shader did not become ready");
+        assert!(reference.iter().zip(&compiled).all(|(a, b)| a.abs_diff(*b) <= 1));
+        write_bmp(&captures.join(format!("combined-{step}.bmp")), &compiled, size);
+    }
+    assert_eq!(renderer.compiler_stats().unwrap().requests, 1);
+    let smooth = br#"{"format_version":1,"id":"smooth","root":"u","nodes":[{"op":"sphere","id":"a","radius":0.35},{"op":"translate","id":"b","child":"a","offset":[0.35,0,0]},{"op":"smooth_union","id":"u","left":"a","right":"b","width":0.2}]}"#;
+    let transformed = br#"{"format_version":1,"id":"transformed","root":"u","nodes":[{"op":"box","id":"b","half_extent":[0.3,0.3,0.3]},{"op":"scale","id":"s","child":"b","factor":1.2},{"op":"translate","id":"t","child":"s","offset":[0.4,0,0]},{"op":"union","id":"u","left":"b","right":"t"}]}"#;
+    for (source, x, color) in [
+        (smooth.as_slice(), -1.5, [0.1, 0.2, 0.9]),
+        (transformed.as_slice(), 1.5, [0.9, 0.7, 0.1]),
+    ] {
+        let id = world
+            .spawn_field(source, Transform::new(v(x, 0.7, 0.0), 1.0).unwrap())
+            .unwrap();
+        materials.set_field(
+            id,
+            Material::new(color, [0.0; 3], [0.0; 3], MaterialPattern::Constant).unwrap(),
+        );
+    }
+    let reference = draw(&world, &materials, GpuFieldExecution::Interpreter);
+    let mut compiled = None;
+    for _ in 0..200 {
+        let candidate = draw(&world, &materials, GpuFieldExecution::Combined);
+        let state = renderer.compiler_stats().unwrap();
+        assert!(
+            state.last_error.is_none(),
+            "combined compiler: {:?}",
+            state.last_error
+        );
+        if state.active == GpuFieldPath::Combined {
+            compiled = Some(candidate);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let compiled = compiled.expect("four-topology shader did not become ready");
+    assert!(
+        reference
+            .iter()
+            .zip(&compiled)
+            .all(|(a, b)| a.abs_diff(*b) <= 1)
+    );
+    write_bmp(&captures.join("combined-four.bmp"), &compiled, size);
+    assert_eq!(renderer.compiler_stats().unwrap().requests, 2);
+}
 use world_state::{DeterministicSeed, WorldState};
 
 fn test_instance() -> wgpu::Instance {
