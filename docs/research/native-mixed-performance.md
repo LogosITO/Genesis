@@ -64,3 +64,7 @@ Next work should instrument sphere-tracing steps per ray and test a defensible
 GPU-space conservative domain. Full native frame intervals and workload-specific
 rebuild/upload costs also need measurement. Seven samples and one adapter do not
 establish cross-machine performance or stable p95 tails.
+
+The later [Performance Research 1](performance-research-1.md) tested an expanded
+GPU-local ray domain, a static WGSL specialization experiment, and fresh
+release-profile measurements. This earlier record remains the original baseline.

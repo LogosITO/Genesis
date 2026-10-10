@@ -24,3 +24,5 @@ The [Foundation 0.10.1 provenance evaluation](../reference/research/foundation-0
 The [First Ecology experiment](../reference/research/first-ecology-experiment/) records six finite-resource scenarios, local CPU timings, replay, contact integration, and open measurement gaps.
 
 The [Foundation 0.12 field-graph experiment](../reference/research/foundation-012/) records direct WGSL graph evaluation, CPU/GPU readback, two real captures, numerical edge cases, and bounded scaling measurements.
+
+[Performance Research 1](../reference/research/performance-research-1/) measures GPU field work, tests expanded ray-domain rejection in the native mixed viewport, and evaluates a test-only specialized WGSL path with real GPU parity and captures.
