@@ -4,7 +4,9 @@ Foundation 0.12 introduced bounded Field Graph authoring: exact-byte JSON source
 
 The native mixed renderer can derive a revision-scoped WGSL evaluator for a supported single-definition scene. Its device-local bounded cache and interpreter fallback do not change `WorldState`; see [Performance Research 2](../research/performance-research-2.md) for the conditional qualification and numerical limits.
 
-An opt-in structural evaluator can reuse one GPU program across parameter revisions and definitions with identical operation links. Heterogeneous topologies still use the interpreter; see [Performance Research 3](../research/performance-research-3.md).
+An opt-in structural evaluator can reuse one GPU program across parameter revisions and definitions with identical operation links. At the time of [Performance Research 3](../research/performance-research-3.md), heterogeneous topologies still used the interpreter.
+
+An opt-in bounded combined evaluator now dispatches among up to four validated Field Graph topologies in one native mixed pass. The interpreter remains active during compilation and for incompatible programs; see [Performance Research 4](../research/performance-research-4.md). This does not change world or collision authority.
 
 Foundation 0.11 adds bounded authored definitions and world occurrences. Exact source bytes and stable occurrence IDs live in `WorldState`; compiled segments, rendering snapshots and contact BVHs are derived. See the [authored instance contract](../specifications/authored-world-instances.md) and [ADR 0009](../adr/0009-authored-world-instances.md).
 

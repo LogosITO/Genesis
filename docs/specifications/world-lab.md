@@ -64,6 +64,16 @@ separates CPU stages, surface acquisition/presentation, frame interval, and
 occasional GPU timestamp samples. See [Performance Research 3](../research/performance-research-3.md)
 for methodology and limitations.
 
+The research-only `heterogeneous-auto` and `heterogeneous-combined` profile
+scenarios add one validated box to the in-memory showcase before rendering.
+They share the same 600-frame camera, material, transform, revision, temporary
+topology, and rejected-edit sequence. The `Combined` path remains opt-in;
+these profile scenarios do not modify the scene file or persistence contract.
+
 Numerical diagnostic colors expose uncertain field tracing. Normal display
 is an approximate GPU `f32` visualization, not certified occupancy or
 implicit collision. No mesh or voxel scene representation is introduced.
+Diagnostic mode bypasses visual bounds culling so that an exhausted trace is
+shown rather than hidden by a bounds rejection. Normal guarded rendering
+remains a visual-only acceleration without a general floating-point enclosure
+proof.
