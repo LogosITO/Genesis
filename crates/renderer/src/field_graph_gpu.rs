@@ -832,7 +832,7 @@ fn read_buffer(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<Vec<u8>, 
 mod workload_tests {
     use super::*;
     use spatial_math::Vec3;
-    use world_authoring::field_graph::{Node, compile_json};
+    use world_authoring::field_graph::{TraceOptions, TraceOutcome, compile_json, trace};
 
     fn v(x: f64, y: f64, z: f64) -> Vec3 {
         Vec3::new(x, y, z).unwrap()
@@ -895,72 +895,7 @@ mod workload_tests {
     }
 
     fn specialized_source(graph: &Graph) -> String {
-        fn literal(value: f64) -> String {
-            format!("{:e}", value as f32)
-        }
-        fn vector(value: Vec3) -> String {
-            format!(
-                "vec3<f32>({}, {}, {})",
-                literal(value.x()),
-                literal(value.y()),
-                literal(value.z())
-            )
-        }
-        fn emit(index: usize, graph: &Graph, emitted: &mut [bool], output: &mut String) {
-            if emitted[index] {
-                return;
-            }
-            let node = &graph.nodes()[index];
-            match node {
-                Node::Translate { child, .. } | Node::Scale { child, .. } => {
-                    emit(*child as usize, graph, emitted, output)
-                }
-                Node::Union { left, right } | Node::SmoothUnion { left, right, .. } => {
-                    emit(*left as usize, graph, emitted, output);
-                    emit(*right as usize, graph, emitted, output);
-                }
-                _ => {}
-            }
-            emitted[index] = true;
-            let body = match node {
-                Node::Sphere(s) => format!("return length(point) - {};", literal(s.radius())),
-                Node::Box(b) => format!(
-                    "let q = abs(point) - {}; return length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);",
-                    vector(b.half_extent())
-                ),
-                Node::Translate { child, offset } => {
-                    format!("return eval_{child}(point - {});", vector(*offset))
-                }
-                Node::Scale { child, factor } => format!(
-                    "return eval_{child}(point / {}) * {};",
-                    literal(*factor),
-                    literal(*factor)
-                ),
-                Node::Union { left, right } => {
-                    format!("return min(eval_{left}(point), eval_{right}(point));")
-                }
-                Node::SmoothUnion { left, right, width } => {
-                    let width = literal(*width);
-                    format!(
-                        "let a = eval_{left}(point); let b = eval_{right}(point); let blend = max({width} - abs(a - b), 0.0) / {width}; return min(a, b) - {width} * blend * blend / 4.0;"
-                    )
-                }
-            };
-            output.push_str(&format!(
-                "fn eval_{index}(point: vec3<f32>) -> f32 {{ {body} }}\n"
-            ));
-        }
-        let shader = include_str!("../shaders/field_graph.wgsl");
-        let start = shader.find("fn sample(").unwrap();
-        let end = shader.find("fn trace(").unwrap();
-        let mut generated = String::new();
-        let mut emitted = vec![false; graph.nodes().len()];
-        emit(graph.root() as usize, graph, &mut emitted, &mut generated);
-        generated.push_str(&format!(
-            "fn sample(point: vec3<f32>) -> f32 {{ return eval_{}(point); }}\n",
-            graph.root()
-        ));
-        format!("{}{}{}", &shader[..start], generated, &shader[end..])
+        crate::field_compiler::specialized_field_source(graph).expect("supported test graph")
     }
 
     fn save_bmp(path: &std::path::Path, rgba: &[u8], size: [u32; 2]) {
@@ -994,7 +929,13 @@ mod workload_tests {
     #[test]
     #[ignore = "requires native GPU; compare validated graph specialization to the interpreter"]
     fn specialized_wgsl_feasibility() {
-        let instance = wgpu::Instance::default();
+        let instance = if std::env::var("GENESIS_TEST_GPU_BACKEND").as_deref() == Ok("dx12") {
+            let mut options = wgpu::InstanceDescriptor::new_without_display_handle();
+            options.backends = wgpu::Backends::DX12;
+            wgpu::Instance::new(options)
+        } else {
+            wgpu::Instance::default()
+        };
         let adapter =
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
                 .unwrap();
@@ -1007,6 +948,8 @@ mod workload_tests {
         let camera = Camera::look_at(v(0.0, 0.0, -6.0), Vec3::ZERO, v(0.0, 1.0, 0.0), 0.9).unwrap();
         for (name, source) in [
             ("sphere", br#"{"format_version":1,"id":"profile-sphere","root":"s","nodes":[{"op":"sphere","id":"s","radius":0.9}]}"#.as_slice()),
+            ("box", br#"{"format_version":1,"id":"compiler-box","root":"b","nodes":[{"op":"box","id":"b","half_extent":[0.7,0.5,0.9]}]}"#.as_slice()),
+            ("nested-transform", br#"{"format_version":1,"id":"compiler-nested","root":"u","nodes":[{"op":"sphere","id":"s","radius":0.65},{"op":"scale","id":"z","child":"s","factor":1.4},{"op":"translate","id":"t","child":"z","offset":[0.3,0,0]},{"op":"box","id":"b","half_extent":[0.4,0.6,0.3]},{"op":"union","id":"u","left":"t","right":"b"}]}"#.as_slice()),
             ("balanced-16", include_bytes!("../../../examples/field-graph/definitions/balanced-16.json").as_slice()),
             ("smooth-bridge", include_bytes!("../../../examples/field-graph/definitions/smooth-bridge.json").as_slice()),
         ] {
@@ -1020,15 +963,19 @@ mod workload_tests {
             let started = Instant::now();
             let specialized = pollster::block_on(GraphGpuRenderer::new_source(&device, &shader)).unwrap();
             let specialized_compile_ms = started.elapsed().as_secs_f64() * 1000.0;
-            let rays = (0..129).flat_map(|y| (0..129).map(move |x| camera.ray(x, y, 129, 129).unwrap())).collect::<Vec<_>>();
+            let rays = (0..256).flat_map(|y| (0..256).map(move |x| camera.ray(x, y, 256, 256).unwrap())).collect::<Vec<_>>();
             let expected = interpreter.query(&device, &queue, &graph, camera, &rays, GraphTracePolicy::default()).unwrap();
             let actual = specialized.query(&device, &queue, &graph, camera, &rays, GraphTracePolicy::default()).unwrap();
             let mut distance_error = 0.0_f32;
+            let mut worst_distance = (0usize, 0.0_f32, 0.0_f32);
             let mut normal_error = 0.0_f32;
             for (index, (a, b)) in expected.iter().zip(&actual).enumerate() {
                 match (a, b) {
                     (GraphGpuOutcome::Hit { distance: da, normal: na }, GraphGpuOutcome::Hit { distance: db, normal: nb }) => {
-                        distance_error = distance_error.max((da - db).abs());
+                        if (da - db).abs() > distance_error {
+                            distance_error = (da - db).abs();
+                            worst_distance = (index, *da, *db);
+                        }
                         for axis in 0..3 { normal_error = normal_error.max((na[axis] - nb[axis]).abs()); }
                     }
                     (GraphGpuOutcome::Miss, GraphGpuOutcome::Miss) | (GraphGpuOutcome::Exhausted, GraphGpuOutcome::Exhausted) => {}
@@ -1037,6 +984,26 @@ mod workload_tests {
                 }
             }
             assert!(distance_error <= 0.005 && normal_error <= 0.05, "{name} distance/normal drift: {distance_error}/{normal_error}");
+            let worst_ray = rays[worst_distance.0];
+            let (near, far) = worst_ray.interval();
+            let cpu_worst = trace(&graph, worst_ray.origin(), worst_ray.direction(), TraceOptions {
+                near, far, tolerance: f64::from(GraphTracePolicy::default().tolerance),
+                safety: f64::from(GraphTracePolicy::default().safety),
+                iterations: GraphTracePolicy::default().iterations,
+            }).unwrap();
+            let cpu_worst_distance = match cpu_worst {
+                TraceOutcome::Hit { distance } => Some(distance),
+                _ => None,
+            };
+            let points = [worst_distance.1, worst_distance.2].map(|distance| {
+                let o = worst_ray.origin();
+                let d = worst_ray.direction();
+                let t = f64::from(distance);
+                v(o.x() + d.x() * t, o.y() + d.y() * t, o.z() + d.z() * t)
+            });
+            let cpu_samples = points.map(|point| graph.sample(point).unwrap());
+            let interpreter_samples = interpreter.sample_points(&device, &queue, &graph, camera, &points).unwrap();
+            let specialized_samples = specialized.sample_points(&device, &queue, &graph, camera, &points).unwrap();
             let mut measurements = Vec::new();
             for (label, renderer) in [("interpreter", &interpreter), ("specialized", &specialized)] {
                 let mut gpu = Vec::new();
@@ -1069,8 +1036,13 @@ mod workload_tests {
                 "specialized_compile_ms": specialized_compile_ms, "interpreter_gpu_ms_p50": measurements[0].1,
                 "specialized_gpu_ms_p50": measurements[1].1, "different_pixels": different_pixels,
                 "changed_occupancy_pixels": changed_occupancy, "max_channel_difference": max_channel_difference,
-                "max_distance_error": distance_error, "max_normal_component_error": normal_error,
+                "max_distance_error": distance_error, "worst_distance_ray": worst_distance,
+                "cpu_worst_distance": cpu_worst_distance,
+                "cpu_worst_samples": cpu_samples, "interpreter_worst_samples": interpreter_samples,
+                "specialized_worst_samples": specialized_samples,
+                "max_normal_component_error": normal_error,
                 "rays_compared": rays.len(), "adapter": adapter.get_info().name,
+                "backend": format!("{:?}", adapter.get_info().backend),
             }));
         }
     }

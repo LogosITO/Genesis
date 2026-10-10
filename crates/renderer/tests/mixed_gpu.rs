@@ -1,13 +1,279 @@
 //! Native GPU evidence for the bounded mixed-depth diagnostic path.
 use analytic_field::Sphere;
 use analytic_renderer::{
-    Camera, DrawOptions, GpuRenderer, MixedDrawOptions,
+    Camera, DrawOptions, GpuFieldExecution, GpuFieldPath, GpuFieldRenderMode, GpuRenderer,
+    MixedDrawOptions,
     field_graph_gpu::{GraphGpuRenderer, GraphTracePolicy, WorldFieldGpuOutcome},
     material::{Material, MaterialPattern, MaterialSet},
     mixed::{MixedRenderOptions, MixedSource, render_mixed_rgba},
 };
 use spatial_math::{Transform, Vec3};
-use std::sync::mpsc;
+use std::{sync::mpsc, time::Duration};
+
+#[test]
+#[ignore = "requires native GPU; verify native specialization, cache and live revision fallback"]
+fn native_compiler_revision_lifecycle() {
+    let instance = if std::env::var("GENESIS_TEST_GPU_BACKEND").as_deref() == Ok("dx12") {
+        let mut options = wgpu::InstanceDescriptor::new_without_display_handle();
+        options.backends = wgpu::Backends::DX12;
+        if let Ok(dxc_path) = std::env::var("GENESIS_TEST_DXC_PATH") {
+            options.backend_options.dx12.shader_compiler =
+                wgpu::Dx12Compiler::DynamicDxc { dxc_path };
+        }
+        wgpu::Instance::new(options)
+    } else {
+        wgpu::Instance::default()
+    };
+    let adapter =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+            .unwrap();
+    println!("NATIVE_COMPILER_BACKEND {:?}", adapter.get_info());
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let renderer =
+        pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+    let camera = Camera::look_at(v(0.0, 0.0, -6.0), Vec3::ZERO, v(0.0, 1.0, 0.0), 0.9).unwrap();
+    let size = [640, 360];
+    let source = include_bytes!("../../../examples/field-graph/definitions/balanced-16.json");
+    let revised = br#"{"format_version":1,"id":"revised","root":"s","nodes":[{"op":"sphere","id":"s","radius":0.7}]}"#;
+    let mut world = WorldState::new(DeterministicSeed(207));
+    let first = world.spawn_field(source, Transform::identity()).unwrap();
+    let second = world
+        .spawn_field(source, Transform::new(v(1.2, 0.0, 0.0), 1.0).unwrap())
+        .unwrap();
+    world
+        .spawn_sphere(
+            Sphere::new(0.3).unwrap(),
+            Transform::new(v(-1.4, 0.0, 0.0), 1.0).unwrap(),
+            0.0,
+        )
+        .unwrap();
+    let mut materials = MaterialSet::default();
+    let draw = |world: &WorldState, camera: Camera, materials: &MaterialSet, execution, guard| {
+        let image = renderer
+            .draw_mixed_with_execution(
+                &device,
+                &queue,
+                world,
+                camera,
+                MixedDrawOptions {
+                    draw: DrawOptions {
+                        size,
+                        normal_debug: false,
+                        surface: None,
+                        timer: None,
+                    },
+                    policy: GraphTracePolicy::default(),
+                    show_analytic: true,
+                    show_fields: true,
+                    diagnostic: true,
+                    materials: Some(materials),
+                    simulation_seconds: 0.0,
+                    background: [0.05, 0.075, 0.115],
+                    light_direction: [0.5, 0.8, -0.6],
+                },
+                GpuFieldRenderMode {
+                    execution,
+                    spatial_guard: guard,
+                },
+            )
+            .unwrap();
+        rgba(&device, &queue, &image, size)
+    };
+    let reference = draw(
+        &world,
+        camera,
+        &materials,
+        GpuFieldExecution::Interpreter,
+        true,
+    );
+    let first_auto = draw(&world, camera, &materials, GpuFieldExecution::Auto, true);
+    assert_eq!(
+        renderer.compiler_stats().unwrap().active,
+        GpuFieldPath::Interpreter
+    );
+    assert_eq!(reference, first_auto);
+    let wait_ready = |world: &WorldState, materials: &MaterialSet| {
+        for _ in 0..500 {
+            let image = draw(world, camera, materials, GpuFieldExecution::Auto, true);
+            let stats = renderer.compiler_stats().unwrap();
+            if stats.active == GpuFieldPath::Specialized {
+                return image;
+            }
+            assert!(
+                stats.last_error.is_none(),
+                "compiler failed: {:?}",
+                stats.last_error
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("native compiler did not become ready in 5 seconds");
+    };
+    let compiled = wait_ready(&world, &materials);
+    let captures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/performance-research-2-captures");
+    std::fs::create_dir_all(&captures).unwrap();
+    write_bmp(&captures.join("native-interpreter.bmp"), &reference, size);
+    write_bmp(&captures.join("native-specialized.bmp"), &compiled, size);
+    let max_diff = reference
+        .iter()
+        .zip(&compiled)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap();
+    assert!(
+        max_diff <= 1,
+        "native interpreter/compiler color drift: {max_diff}"
+    );
+    let direct = draw(
+        &world,
+        camera,
+        &materials,
+        GpuFieldExecution::Interpreter,
+        false,
+    );
+    let compiled_direct = draw(&world, camera, &materials, GpuFieldExecution::Auto, false);
+    assert!(
+        direct
+            .iter()
+            .zip(&compiled_direct)
+            .all(|(a, b)| a.abs_diff(*b) <= 1)
+    );
+    assert_eq!(
+        direct, reference,
+        "visual bounds guard changed the supported scene"
+    );
+    let requests = renderer.compiler_stats().unwrap().requests;
+    let moved_camera =
+        Camera::look_at(v(0.4, 0.0, -6.0), Vec3::ZERO, v(0.0, 1.0, 0.0), 0.9).unwrap();
+    draw(
+        &world,
+        moved_camera,
+        &materials,
+        GpuFieldExecution::Auto,
+        true,
+    );
+    materials.set_field(
+        first,
+        Material::new(
+            [0.8, 0.2, 0.1],
+            [0.0; 3],
+            [0.0; 3],
+            MaterialPattern::Constant,
+        )
+        .unwrap(),
+    );
+    draw(&world, camera, &materials, GpuFieldExecution::Auto, true);
+    world
+        .set_field_transform(second, Transform::new(v(1.3, 0.0, 0.0), 1.0).unwrap())
+        .unwrap();
+    draw(&world, camera, &materials, GpuFieldExecution::Auto, true);
+    assert_eq!(renderer.compiler_stats().unwrap().requests, requests);
+    world.replace_field(first, revised).unwrap();
+    draw(&world, camera, &materials, GpuFieldExecution::Auto, true);
+    assert_eq!(
+        renderer.compiler_stats().unwrap().active,
+        GpuFieldPath::Interpreter
+    );
+    assert_eq!(renderer.compiler_stats().unwrap().requests, requests);
+    world.replace_field(second, revised).unwrap();
+    let revised_reference = draw(
+        &world,
+        camera,
+        &materials,
+        GpuFieldExecution::Interpreter,
+        true,
+    );
+    let revised_compiled = wait_ready(&world, &materials);
+    assert!(
+        revised_reference
+            .iter()
+            .zip(&revised_compiled)
+            .all(|(a, b)| a.abs_diff(*b) <= 1)
+    );
+    assert_eq!(renderer.compiler_stats().unwrap().requests, requests + 1);
+    assert!(world.replace_field(first, b"invalid graph").is_err());
+    draw(&world, camera, &materials, GpuFieldExecution::Auto, true);
+    assert_eq!(
+        renderer.compiler_stats().unwrap().active,
+        GpuFieldPath::Specialized
+    );
+    let rapid_c = br#"{"format_version":1,"id":"rapid-c","root":"s","nodes":[{"op":"sphere","id":"s","radius":0.6}]}"#;
+    let rapid_d = br#"{"format_version":1,"id":"rapid-d","root":"s","nodes":[{"op":"sphere","id":"s","radius":0.5}]}"#;
+    for source in [rapid_c.as_slice(), rapid_d.as_slice()] {
+        world.replace_field(first, source).unwrap();
+        world.replace_field(second, source).unwrap();
+        draw(&world, camera, &materials, GpuFieldExecution::Auto, true);
+        assert_eq!(
+            renderer.compiler_stats().unwrap().active,
+            GpuFieldPath::Interpreter
+        );
+    }
+    let final_reference = draw(
+        &world,
+        camera,
+        &materials,
+        GpuFieldExecution::Interpreter,
+        true,
+    );
+    let final_compiled = wait_ready(&world, &materials);
+    assert!(
+        final_reference
+            .iter()
+            .zip(&final_compiled)
+            .all(|(a, b)| a.abs_diff(*b) <= 1)
+    );
+    let requests_after_edits = renderer.compiler_stats().unwrap().requests;
+    world.replace_field(first, source).unwrap();
+    world.replace_field(second, source).unwrap();
+    draw(&world, camera, &materials, GpuFieldExecution::Auto, true);
+    assert_eq!(
+        renderer.compiler_stats().unwrap().active,
+        GpuFieldPath::Specialized
+    );
+    assert_eq!(
+        renderer.compiler_stats().unwrap().requests,
+        requests_after_edits
+    );
+    let mut tiny_world = WorldState::new(DeterministicSeed(208));
+    tiny_world
+        .spawn_field(revised, Transform::new(Vec3::ZERO, 0.01).unwrap())
+        .unwrap();
+    let tiny_camera =
+        Camera::look_at(v(0.0, 0.0, -0.06), Vec3::ZERO, v(0.0, 1.0, 0.0), 0.9).unwrap();
+    let no_materials = MaterialSet::default();
+    let tiny_reference = draw(
+        &tiny_world,
+        tiny_camera,
+        &no_materials,
+        GpuFieldExecution::Interpreter,
+        false,
+    );
+    let mut tiny_compiled = Vec::new();
+    for _ in 0..200 {
+        tiny_compiled = draw(
+            &tiny_world,
+            tiny_camera,
+            &no_materials,
+            GpuFieldExecution::Auto,
+            true,
+        );
+        if renderer.compiler_stats().unwrap().active == GpuFieldPath::Specialized {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        renderer.compiler_stats().unwrap().active,
+        GpuFieldPath::Specialized
+    );
+    assert!(
+        tiny_reference
+            .iter()
+            .zip(&tiny_compiled)
+            .all(|(a, b)| a.abs_diff(*b) <= 1)
+    );
+}
 use world_state::{DeterministicSeed, WorldState};
 
 fn v(x: f64, y: f64, z: f64) -> Vec3 {
@@ -148,8 +414,8 @@ fn bounded_mixed_viewport_matches_direct_field_queries() {
                 GraphTracePolicy::default(),
             )
             .unwrap();
-        let image = renderer
-            .draw_mixed(
+        let draw_case = || {
+            renderer.draw_mixed(
                 &device,
                 &queue,
                 &world,
@@ -171,7 +437,19 @@ fn bounded_mixed_viewport_matches_direct_field_queries() {
                     light_direction: [0.5, 0.8, -0.6],
                 },
             )
-            .unwrap();
+        };
+        let mut image = draw_case().unwrap();
+        for _ in 0..200 {
+            if renderer.compiler_stats().unwrap().active == GpuFieldPath::Specialized {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            image = draw_case().unwrap();
+        }
+        assert_eq!(
+            renderer.compiler_stats().unwrap().active,
+            GpuFieldPath::Specialized
+        );
         let pixels = rgba(&device, &queue, &image, size);
         let mut compared = 0usize;
         for (index, (outcome, pixel)) in direct.iter().zip(pixels.chunks_exact(4)).enumerate() {
@@ -241,6 +519,10 @@ fn bounded_mixed_viewport_matches_direct_field_queries() {
                 },
             )
             .unwrap();
+        assert_eq!(
+            renderer.compiler_stats().unwrap().active,
+            GpuFieldPath::Specialized
+        );
         let lit = rgba(&device, &queue, &image, [1, 1])[..3] != [0, 0, 0];
         match direct[0] {
             WorldFieldGpuOutcome::Hit { .. } => assert!(lit, "near-tangent hit lost at y={y}"),

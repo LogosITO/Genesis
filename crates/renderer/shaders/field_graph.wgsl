@@ -16,26 +16,28 @@ struct Ray { origin_near: vec4<f32>, direction_far: vec4<f32> }
 struct Outcome { distance_normal: vec4<f32>, info: vec4<u32> }
 struct Frame { point: vec3<f32>, first: f32, index: u32, phase: u32 }
 
-@group(0) @binding(0) var<uniform> config: Config;
-@group(0) @binding(1) var<storage, read> nodes: array<Node>;
+@group(0) @binding(0) var<uniform> field_config: Config;
+@group(0) @binding(1) var<storage, read> field_nodes: array<Node>;
 @group(0) @binding(2) var image: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(3) var<storage, read> rays: array<Ray>;
 @group(0) @binding(4) var<storage, read_write> outcomes: array<Outcome>;
 
+// GENESIS_EVALUATOR_BEGIN
 fn finite(v: f32) -> bool { return abs(v) < 1e20; }
 
+// GENESIS_SAMPLE_BEGIN
 fn sample(point: vec3<f32>) -> f32 {
     var stack: array<Frame, 16>;
     var depth = 1u;
     var visits = 0u;
     var last = 1e30;
-    stack[0] = Frame(point, 0.0, config.info.x, 0u);
+    stack[0] = Frame(point, 0.0, field_config.info.x, 0u);
     for (var work = 0u; work < 256u; work++) {
         if (depth == 0u) { return last; }
         let slot = depth - 1u;
         let frame = stack[slot];
-        if (frame.index >= config.info.y || frame.index >= arrayLength(&nodes)) { return 1e30; }
-        let node = nodes[frame.index];
+        if (frame.index >= field_config.info.y || frame.index >= arrayLength(&field_nodes)) { return 1e30; }
+        let node = field_nodes[frame.index];
         if (frame.phase == 0u) {
             visits += 1u;
             if (visits > 64u) { return 1e30; }
@@ -50,7 +52,7 @@ fn sample(point: vec3<f32>) -> f32 {
                     depth -= 1u;
                 }
                 case 2u, 3u, 4u, 5u: {
-                    if (depth >= 16u || node.links.y >= config.info.y) { return 1e30; }
+                    if (depth >= 16u || node.links.y >= field_config.info.y) { return 1e30; }
                     stack[slot].phase = 1u;
                     var child_point = frame.point;
                     if (node.links.x == 2u) { child_point -= node.param.xyz; }
@@ -63,7 +65,7 @@ fn sample(point: vec3<f32>) -> f32 {
         } else if (frame.phase == 1u) {
             if (!finite(last)) { return 1e30; }
             if (node.links.x == 4u || node.links.x == 5u) {
-                if (depth >= 16u || node.links.z >= config.info.y) { return 1e30; }
+                if (depth >= 16u || node.links.z >= field_config.info.y) { return 1e30; }
                 stack[slot].first = last;
                 stack[slot].phase = 2u;
                 stack[depth] = Frame(frame.point, 0.0, node.links.z, 0u);
@@ -85,16 +87,17 @@ fn sample(point: vec3<f32>) -> f32 {
     }
     return 1e30;
 }
+// GENESIS_SAMPLE_END
 
-fn trace(origin: vec3<f32>, direction: vec3<f32>, near: f32, far: f32) -> Outcome {
+fn field_trace(origin: vec3<f32>, direction: vec3<f32>, near: f32, far: f32) -> Outcome {
     var distance = near;
-    for (var step = 0u; step < config.info.z; step++) {
+    for (var step = 0u; step < field_config.info.z; step++) {
         let value = sample(origin + direction * distance);
         if (!finite(value)) { return Outcome(vec4<f32>(0.0), vec4<u32>(2u, step, 1u, 0u)); }
         if (value < 0.0) { return Outcome(vec4<f32>(0.0), vec4<u32>(2u, step, 2u, 0u)); }
-        if (value <= config.trace.x) {
+        if (value <= field_config.trace.x) {
             let p = origin + direction * distance;
-            let e = config.trace.z;
+            let e = field_config.trace.z;
             // shortcut: finite differences are display-only; add analytic derivatives before contact-grade normals.
             let gradient = vec3<f32>(
                 sample(p + vec3<f32>(e,0.0,0.0)) - sample(p - vec3<f32>(e,0.0,0.0)),
@@ -105,20 +108,21 @@ fn trace(origin: vec3<f32>, direction: vec3<f32>, near: f32, far: f32) -> Outcom
             }
             return Outcome(vec4<f32>(normalize(gradient), distance), vec4<u32>(1u, step, 0u, 0u));
         }
-        let next = distance + value * config.trace.y;
+        let next = distance + value * field_config.trace.y;
         if (!finite(next) || next <= distance) { return Outcome(vec4<f32>(0.0), vec4<u32>(2u, step, 4u, 0u)); }
         if (next > far) { return Outcome(vec4<f32>(0.0), vec4<u32>(0u, step, 0u, 0u)); }
         distance = next;
     }
-    return Outcome(vec4<f32>(0.0), vec4<u32>(3u, config.info.z, 0u, 0u));
+    return Outcome(vec4<f32>(0.0), vec4<u32>(3u, field_config.info.z, 0u, 0u));
 }
 
+// GENESIS_EVALUATOR_END
 @compute @workgroup_size(8, 8)
 fn render(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= u32(config.view.x) || gid.y >= u32(config.view.y)) { return; }
-    let uv = (vec2<f32>(gid.xy) + vec2<f32>(0.5)) / config.view.xy;
-    let direction = normalize(config.forward.xyz + (uv.x * 2.0 - 1.0) * config.right.xyz + (1.0 - uv.y * 2.0) * config.up.xyz);
-    let result = trace(config.origin.xyz, direction, config.view.z, config.view.w);
+    if (gid.x >= u32(field_config.view.x) || gid.y >= u32(field_config.view.y)) { return; }
+    let uv = (vec2<f32>(gid.xy) + vec2<f32>(0.5)) / field_config.view.xy;
+    let direction = normalize(field_config.forward.xyz + (uv.x * 2.0 - 1.0) * field_config.right.xyz + (1.0 - uv.y * 2.0) * field_config.up.xyz);
+    let result = field_trace(field_config.origin.xyz, direction, field_config.view.z, field_config.view.w);
     var color = vec3<f32>(0.035, 0.055, 0.09);
     if (result.info.x == 1u) {
         let light = normalize(vec3<f32>(0.5, 0.8, -0.6));
@@ -133,7 +137,7 @@ fn render(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn query(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= arrayLength(&rays)) { return; }
     let ray = rays[gid.x];
-    outcomes[gid.x] = trace(ray.origin_near.xyz, normalize(ray.direction_far.xyz), ray.origin_near.w, ray.direction_far.w);
+    outcomes[gid.x] = field_trace(ray.origin_near.xyz, normalize(ray.direction_far.xyz), ray.origin_near.w, ray.direction_far.w);
 }
 
 @compute @workgroup_size(64)

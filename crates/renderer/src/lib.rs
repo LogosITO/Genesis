@@ -2,14 +2,16 @@
 //! this crate converts a snapshot to bounded `f32` GPU data and never stores a mesh.
 
 mod acceleration;
+mod field_compiler;
 pub mod field_graph_gpu;
 mod gpu;
 pub mod material;
 pub mod mixed;
 pub use acceleration::{Bvh, PrimitiveBounds};
 pub use gpu::{
-    DrawOptions, GpuAccelerationStats, GpuFieldCacheStats, GpuRenderer, GpuResult, GpuTimer,
-    GpuTraversal, GpuUploadStats, MixedDrawOptions,
+    DrawOptions, GpuAccelerationStats, GpuCompilerStats, GpuFieldCacheStats, GpuFieldExecution,
+    GpuFieldPath, GpuFieldRenderMode, GpuRenderer, GpuResult, GpuTimer, GpuTraversal,
+    GpuUploadStats, MixedDrawOptions,
 };
 
 use analytic_field::{AxisAlignedBox, Capsule, Sphere};

@@ -4,7 +4,8 @@ mod hud;
 mod scene;
 
 use analytic_renderer::{
-    DrawOptions, GpuRenderer, GpuTimer, MixedDrawOptions, field_graph_gpu::GraphTracePolicy,
+    DrawOptions, GpuFieldPath, GpuRenderer, GpuTimer, MixedDrawOptions,
+    field_graph_gpu::GraphTracePolicy,
 };
 use scene::LabScene;
 use std::{
@@ -317,6 +318,13 @@ impl App {
                 self.gpu_ms = timer.read_ms(&graphics.device, &graphics.queue).ok();
             }
         }
+        let compiler = graphics.renderer.compiler_stats();
+        let field_path = match compiler.as_ref() {
+            Some(state) if state.active == GpuFieldPath::Specialized => "COMPILED",
+            Some(state) if state.pending => "INTERPRETER/COMPILING",
+            Some(state) if state.last_error.is_some() => "INTERPRETER/COMPILE ERROR",
+            _ => "INTERPRETER",
+        };
         let lines = [
             format!("{} | GENESIS WORLD LAB", self.scene.name),
             format!(
@@ -328,12 +336,13 @@ impl App {
                 size.height
             ),
             format!(
-                "A {} F {} DIAG {} NORMAL {} | GPU {}",
+                "A {} F {} DIAG {} NORMAL {} | GPU {} | FIELD {}",
                 self.show_analytic as u8,
                 self.show_fields as u8,
                 self.diagnostic as u8,
                 self.normals as u8,
-                self.gpu_ms.map_or("N/A".into(), |x| format!("{x:.2}MS"))
+                self.gpu_ms.map_or("N/A".into(), |x| format!("{x:.2}MS")),
+                field_path,
             ),
             self.status.clone(),
             "ARROWS OR WASD ORBIT | +/- ZOOM | 1/2/3/N | R RELOAD | C CAPTURE | ESC".into(),
@@ -632,6 +641,17 @@ mod tests {
         };
         let first = folder.join("before.bmp");
         draw(&before, &first);
+        for _ in 0..200 {
+            if renderer.compiler_stats().unwrap().active == GpuFieldPath::Specialized {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            draw(&before, &first);
+        }
+        assert_eq!(
+            renderer.compiler_stats().unwrap().active,
+            GpuFieldPath::Specialized
+        );
         let uploads = renderer.field_cache_stats().unwrap().node_uploads;
         let changed = std::fs::read_to_string(&graph)
             .unwrap()
@@ -644,10 +664,32 @@ mod tests {
         );
         let second = folder.join("after.bmp");
         draw(&after, &second);
+        assert_eq!(
+            renderer.compiler_stats().unwrap().active,
+            GpuFieldPath::Interpreter
+        );
+        for _ in 0..200 {
+            if renderer.compiler_stats().unwrap().active == GpuFieldPath::Specialized {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            draw(&after, &second);
+        }
+        assert_eq!(
+            renderer.compiler_stats().unwrap().active,
+            GpuFieldPath::Specialized
+        );
         assert!(renderer.field_cache_stats().unwrap().node_uploads > uploads);
         assert_ne!(
             std::fs::read(first).unwrap(),
-            std::fs::read(second).unwrap()
+            std::fs::read(&second).unwrap()
+        );
+        std::fs::write(&graph, b"invalid graph").unwrap();
+        assert!(LabScene::load(&path).is_err());
+        draw(&after, &second);
+        assert_eq!(
+            renderer.compiler_stats().unwrap().active,
+            GpuFieldPath::Specialized
         );
         std::fs::remove_dir_all(folder).unwrap();
     }

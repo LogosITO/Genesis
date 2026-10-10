@@ -1,15 +1,18 @@
 use crate::{
     Bvh, Camera, Ray, RenderError, Scene, SemanticTarget,
     acceleration::FlatNode,
+    field_compiler::{SEMANTICS_VERSION, specialized_field_source},
     field_graph_gpu::{GpuNode, GraphTracePolicy, gpu_nodes},
     material::MaterialSet,
 };
 use bytemuck::{Pod, Zeroable};
 use std::{
+    collections::VecDeque,
     sync::{Mutex, mpsc},
     time::Instant,
 };
 use wgpu::util::DeviceExt;
+use world_authoring::{DefinitionRevision, field_graph::Graph};
 use world_state::WorldState;
 
 #[repr(C)]
@@ -80,6 +83,7 @@ struct FieldBuffers {
     material_uploads: u64,
 }
 
+#[derive(Clone, Copy)]
 struct MixedSceneOptions<'a> {
     policy: GraphTracePolicy,
     flags: [bool; 3],
@@ -87,6 +91,7 @@ struct MixedSceneOptions<'a> {
     simulation_seconds: f32,
     background: [f32; 3],
     light_direction: [f32; 3],
+    render_mode: GpuFieldRenderMode,
 }
 struct MixedImage {
     size: [u32; 2],
@@ -98,26 +103,61 @@ enum DrawMode<'a> {
     Mixed(&'a WorldState, MixedSceneOptions<'a>),
 }
 
-fn mixed_shader_source() -> String {
+fn mixed_shader_source(field_source: &str) -> String {
     let analytic = include_str!("../shaders/analytic.wgsl")
         .split_once("@compute @workgroup_size(8, 8)")
         .expect("analytic render entry")
         .0;
-    let field = include_str!("../shaders/field_graph.wgsl")
-        .split_once("fn finite")
+    let field = field_source
+        .split_once("// GENESIS_EVALUATOR_BEGIN")
         .expect("field evaluator")
         .1
-        .split_once("@compute @workgroup_size(8, 8)")
+        .split_once("// GENESIS_EVALUATOR_END")
         .expect("field render entry")
         .0;
-    let field = format!("fn finite{field}")
-        .replace("config.", "field_config.")
-        .replace("nodes[", "field_nodes[")
-        .replace("&nodes", "&field_nodes")
-        .replace("fn trace(", "fn field_trace(");
     let mixed =
-        include_str!("../shaders/mixed.wgsl").replace("// FIELD_EVALUATOR_INSERTION_POINT", &field);
+        include_str!("../shaders/mixed.wgsl").replace("// FIELD_EVALUATOR_INSERTION_POINT", field);
     format!("{analytic}\n{mixed}")
+}
+
+fn compile_mixed_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    graph: &Graph,
+) -> Result<CompiledArtifact, String> {
+    let started = Instant::now();
+    let field = specialized_field_source(graph)
+        .ok_or_else(|| "definition exceeds finite GPU or shader source budget".to_owned())?;
+    let source = mixed_shader_source(&field);
+    let source_bytes = source.len();
+    let source_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let started = Instant::now();
+    let oom_scope = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+    let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("specialized native mathematical field"),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("specialized mixed mathematical geometry"),
+        layout: Some(layout),
+        module: &module,
+        entry_point: Some("render_mixed"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let validation = pollster::block_on(validation_scope.pop());
+    let oom = pollster::block_on(oom_scope.pop());
+    if let Some(error) = validation.or(oom) {
+        Err(error.to_string())
+    } else {
+        Ok(CompiledArtifact {
+            pipeline,
+            source_ms,
+            pipeline_ms: started.elapsed().as_secs_f64() * 1000.0,
+            source_bytes,
+        })
+    }
 }
 
 fn material_index(material: crate::material::Material, materials: &mut Vec<GpuMaterial>) -> u32 {
@@ -183,6 +223,67 @@ pub struct MixedDrawOptions<'a> {
     pub background: [f32; 3],
     /// Nonzero world-space directional light vector.
     pub light_direction: [f32; 3],
+}
+
+/// Select the native Field Graph interpreter or allow revision-scoped specialization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GpuFieldExecution {
+    /// Interpret until a validated specialized pipeline for the current definition is ready.
+    Auto,
+    /// Always use the reference interpreter.
+    Interpreter,
+}
+
+/// Native mixed-field execution and visual bounds controls.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GpuFieldRenderMode {
+    /// Select automatic revision specialization or the reference interpreter.
+    pub execution: GpuFieldExecution,
+    /// Skip field tracing for rays outside the expanded visual field bounds.
+    pub spatial_guard: bool,
+}
+
+impl Default for GpuFieldRenderMode {
+    fn default() -> Self {
+        Self {
+            execution: GpuFieldExecution::Auto,
+            spatial_guard: true,
+        }
+    }
+}
+
+/// Actual field execution selected for the most recent mixed draw.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GpuFieldPath {
+    /// No compiled pipeline was selected.
+    Interpreter,
+    /// One exact definition revision was compiled and selected.
+    Specialized,
+}
+
+/// Renderer-local compilation diagnostics. Pipelines never cross device ownership.
+#[derive(Clone, Debug)]
+pub struct GpuCompilerStats {
+    /// Path used by the most recent mixed draw.
+    pub active: GpuFieldPath,
+    /// Successful pipeline entries currently resident.
+    pub cached_pipelines: usize,
+    /// One compilation may be in flight.
+    pub pending: bool,
+    /// Number of worker compilation requests.
+    pub requests: u64,
+    /// Number of ready-cache selections.
+    pub cache_hits: u64,
+    /// Number of failed compilation attempts.
+    pub failures: u64,
+    /// Last compiler failure, if any.
+    pub last_error: Option<String>,
+    /// Source generation time of the most recently selected successful pipeline.
+    pub source_ms: Option<f64>,
+    /// Shader validation and pipeline creation time for that pipeline, on the worker thread.
+    pub pipeline_ms: Option<f64>,
+    /// Generated mixed WGSL source bytes of that pipeline.
+    pub source_bytes: Option<usize>,
 }
 
 /// Direct analytic traversal, GPU BVH traversal, or the measured-size policy.
@@ -324,10 +425,12 @@ fn camera_data(
 
 /// Compute renderer and optional full-screen image presentation pipeline.
 pub struct GpuRenderer {
+    device: wgpu::Device,
     compute_layout: wgpu::BindGroupLayout,
     render_pipeline: wgpu::ComputePipeline,
     query_pipeline: wgpu::ComputePipeline,
     mixed_layout: wgpu::BindGroupLayout,
+    mixed_pipeline_layout: wgpu::PipelineLayout,
     mixed_pipeline: wgpu::ComputePipeline,
     present_layout: wgpu::BindGroupLayout,
     present_pipeline: wgpu::RenderPipeline,
@@ -336,6 +439,77 @@ pub struct GpuRenderer {
     primitives: Mutex<Option<PrimitiveBuffer>>,
     fields: Mutex<Option<FieldBuffers>>,
     mixed_image: Mutex<Option<MixedImage>>,
+    compiler: Mutex<CompilerCache>,
+}
+
+const MAX_COMPILED_PIPELINES: usize = 4;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompilerKey {
+    revision: DefinitionRevision,
+    semantics: u32,
+}
+
+struct CompiledPipeline {
+    key: CompilerKey,
+    result: Result<CompiledArtifact, String>,
+}
+
+struct CompiledArtifact {
+    pipeline: wgpu::ComputePipeline,
+    source_ms: f64,
+    pipeline_ms: f64,
+    source_bytes: usize,
+}
+
+struct PendingCompilation {
+    key: CompilerKey,
+    receiver: mpsc::Receiver<Result<CompiledArtifact, String>>,
+}
+
+struct CompilerCache {
+    entries: VecDeque<CompiledPipeline>,
+    pending: Option<PendingCompilation>,
+    active: GpuFieldPath,
+    requests: u64,
+    cache_hits: u64,
+    failures: u64,
+    last_error: Option<String>,
+    source_ms: Option<f64>,
+    pipeline_ms: Option<f64>,
+    source_bytes: Option<usize>,
+}
+
+impl Default for CompilerCache {
+    fn default() -> Self {
+        Self {
+            entries: VecDeque::new(),
+            pending: None,
+            active: GpuFieldPath::Interpreter,
+            requests: 0,
+            cache_hits: 0,
+            failures: 0,
+            last_error: None,
+            source_ms: None,
+            pipeline_ms: None,
+            source_bytes: None,
+        }
+    }
+}
+
+impl CompilerCache {
+    fn insert(&mut self, key: CompilerKey, result: Result<CompiledArtifact, String>) {
+        if let Err(error) = &result {
+            self.failures = self.failures.saturating_add(1);
+            self.last_error = Some(error.clone());
+        } else {
+            self.last_error = None;
+        }
+        self.entries.push_back(CompiledPipeline { key, result });
+        if self.entries.len() > MAX_COMPILED_PIPELINES {
+            self.entries.pop_front();
+        }
+    }
 }
 struct PrimitiveBuffer {
     buffer: wgpu::Buffer,
@@ -387,6 +561,114 @@ pub struct GpuUploadStats {
     pub bvh_build_ms: f64,
 }
 impl GpuRenderer {
+    /// Inspect bounded, renderer-local mathematical shader compilation.
+    pub fn compiler_stats(&self) -> Option<GpuCompilerStats> {
+        let state = self.compiler.lock().ok()?;
+        Some(GpuCompilerStats {
+            active: state.active,
+            cached_pipelines: state
+                .entries
+                .iter()
+                .filter(|entry| entry.result.is_ok())
+                .count(),
+            pending: state.pending.is_some(),
+            requests: state.requests,
+            cache_hits: state.cache_hits,
+            failures: state.failures,
+            last_error: state.last_error.clone(),
+            source_ms: state.source_ms,
+            pipeline_ms: state.pipeline_ms,
+            source_bytes: state.source_bytes,
+        })
+    }
+
+    fn compiled_pipeline(
+        &self,
+        device: &wgpu::Device,
+        world: &WorldState,
+        enabled: bool,
+    ) -> Result<Option<wgpu::ComputePipeline>, RenderError> {
+        if device != &self.device {
+            return Err(RenderError::InvalidInput("renderer device changed"));
+        }
+        let mut state = self
+            .compiler
+            .lock()
+            .map_err(|_| RenderError::Gpu("compiler cache lock poisoned".into()))?;
+        state.active = GpuFieldPath::Interpreter;
+        let finished =
+            state
+                .pending
+                .as_ref()
+                .and_then(|pending| match pending.receiver.try_recv() {
+                    Ok(result) => Some(Ok(result)),
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        Some(Err("compilation worker disconnected".to_owned()))
+                    }
+                    Err(mpsc::TryRecvError::Empty) => None,
+                });
+        if let Some(finished) = finished {
+            let pending = state.pending.take().expect("completed pending request");
+            state.insert(pending.key, finished.unwrap_or_else(Err));
+        }
+        if !enabled {
+            return Ok(None);
+        }
+        let mut selected = None;
+        for instance in world.field_instances().iter().filter(|item| item.enabled()) {
+            if selected.is_some_and(|revision| revision != instance.revision()) {
+                return Ok(None);
+            }
+            selected = Some(instance.revision());
+        }
+        let Some(revision) = selected else {
+            return Ok(None);
+        };
+        let key = CompilerKey {
+            revision,
+            semantics: SEMANTICS_VERSION,
+        };
+        if let Some(index) = state.entries.iter().position(|entry| entry.key == key) {
+            let entry = state.entries.remove(index).expect("found entry");
+            let pipeline = entry.result.as_ref().ok().map(|artifact| {
+                state.source_ms = Some(artifact.source_ms);
+                state.pipeline_ms = Some(artifact.pipeline_ms);
+                state.source_bytes = Some(artifact.source_bytes);
+                artifact.pipeline.clone()
+            });
+            state.entries.push_back(entry);
+            if pipeline.is_some() {
+                state.cache_hits = state.cache_hits.saturating_add(1);
+                state.active = GpuFieldPath::Specialized;
+            }
+            return Ok(pipeline);
+        }
+        if state.pending.is_none() {
+            let graph = world
+                .field_instances()
+                .iter()
+                .find(|item| item.enabled() && item.revision() == revision)
+                .and_then(|item| world.field_graph(item.id()))
+                .ok_or(RenderError::InvalidInput("missing field graph"))?
+                .clone();
+            let device = device.clone();
+            let layout = self.mixed_pipeline_layout.clone();
+            let (sender, receiver) = mpsc::sync_channel(1);
+            match std::thread::Builder::new()
+                .name("genesis-field-compiler".into())
+                .spawn(move || {
+                    let result = compile_mixed_pipeline(&device, &layout, &graph);
+                    let _ = sender.send(result);
+                }) {
+                Ok(_) => {
+                    state.requests = state.requests.saturating_add(1);
+                    state.pending = Some(PendingCompilation { key, receiver });
+                }
+                Err(error) => state.insert(key, Err(error.to_string())),
+            }
+        }
+        Ok(None)
+    }
     /// Inspect whether presentation-only edits avoided graph node uploads.
     pub fn field_cache_stats(&self) -> Option<GpuFieldCacheStats> {
         let cached = self.fields.lock().ok()?;
@@ -564,7 +846,9 @@ impl GpuRenderer {
         });
         let mixed_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("native mixed analytic and field rendering"),
-            source: wgpu::ShaderSource::Wgsl(mixed_shader_source().into()),
+            source: wgpu::ShaderSource::Wgsl(
+                mixed_shader_source(include_str!("../shaders/field_graph.wgsl")).into(),
+            ),
         });
         let mixed_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -637,10 +921,12 @@ impl GpuRenderer {
             usage: wgpu::BufferUsages::STORAGE,
         });
         Ok(Self {
+            device: device.clone(),
             compute_layout,
             render_pipeline,
             query_pipeline,
             mixed_layout,
+            mixed_pipeline_layout,
             mixed_pipeline,
             present_layout,
             present_pipeline,
@@ -649,6 +935,7 @@ impl GpuRenderer {
             primitives: Mutex::new(None),
             fields: Mutex::new(None),
             mixed_image: Mutex::new(None),
+            compiler: Mutex::new(CompilerCache::default()),
         })
     }
 
@@ -1181,7 +1468,8 @@ impl GpuRenderer {
                 node_count,
                 u32::from(options.flags[0])
                     | (u32::from(options.flags[1]) << 1)
-                    | (u32::from(options.flags[2]) << 2),
+                    | (u32::from(options.flags[2]) << 2)
+                    | (u32::from(options.render_mode.spatial_guard) << 3),
                 options.policy.iterations,
             ],
             background: [
@@ -1272,6 +1560,27 @@ impl GpuRenderer {
         camera: Camera,
         options: MixedDrawOptions<'_>,
     ) -> Result<wgpu::Texture, RenderError> {
+        self.draw_mixed_with_execution(
+            device,
+            queue,
+            world,
+            camera,
+            options,
+            GpuFieldRenderMode::default(),
+        )
+    }
+
+    /// Explicit execution and visual bounds policy for differential testing.
+    /// Compilation is requested on one worker; this call does not wait for its completion.
+    pub fn draw_mixed_with_execution(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        world: &WorldState,
+        camera: Camera,
+        options: MixedDrawOptions<'_>,
+        render_mode: GpuFieldRenderMode,
+    ) -> Result<wgpu::Texture, RenderError> {
         let scene = Scene::from_world(world)?;
         self.draw_internal(
             device,
@@ -1292,6 +1601,7 @@ impl GpuRenderer {
                     simulation_seconds: options.simulation_seconds,
                     background: options.background,
                     light_direction: options.light_direction,
+                    render_mode,
                 },
             ),
         )
@@ -1357,6 +1667,14 @@ impl GpuRenderer {
                 Some(self.mixed_binding(device, queue, world, scene, mixed_options)?)
             }
         };
+        let compiled_pipeline = match mode {
+            DrawMode::Mixed(world, settings) => self.compiled_pipeline(
+                device,
+                world,
+                settings.flags[1] && settings.render_mode.execution == GpuFieldExecution::Auto,
+            )?,
+            DrawMode::Analytic(..) => None,
+        };
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("analytic frame"),
         });
@@ -1371,7 +1689,7 @@ impl GpuRenderer {
                 timestamp_writes: timestamps,
             });
             pass.set_pipeline(if field_group.is_some() {
-                &self.mixed_pipeline
+                compiled_pipeline.as_ref().unwrap_or(&self.mixed_pipeline)
             } else {
                 &self.render_pipeline
             });
@@ -1546,7 +1864,7 @@ mod tests {
         for shader in [
             include_str!("../shaders/analytic.wgsl"),
             include_str!("../shaders/present.wgsl"),
-            &mixed_shader_source(),
+            &mixed_shader_source(include_str!("../shaders/field_graph.wgsl")),
         ] {
             let module = naga::front::wgsl::parse_str(shader).unwrap();
             naga::valid::Validator::new(
@@ -1556,5 +1874,43 @@ mod tests {
             .validate(&module)
             .unwrap();
         }
+        let graph = world_authoring::field_graph::compile_json(include_bytes!(
+            "../../../examples/field-graph/definitions/balanced-16.json"
+        ))
+        .unwrap();
+        let field = specialized_field_source(&graph).unwrap();
+        let source = mixed_shader_source(&field);
+        let module = naga::front::wgsl::parse_str(&source).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+    }
+
+    #[test]
+    fn compiled_cache_is_bounded_and_revision_scoped() {
+        let mut cache = CompilerCache::default();
+        for index in 0..=MAX_COMPILED_PIPELINES {
+            let key = CompilerKey {
+                revision: DefinitionRevision::of(&[index as u8]),
+                semantics: SEMANTICS_VERSION,
+            };
+            cache.insert(key, Err("test failure".into()));
+        }
+        assert_eq!(cache.entries.len(), MAX_COMPILED_PIPELINES);
+        assert_eq!(cache.failures, (MAX_COMPILED_PIPELINES + 1) as u64);
+        assert_eq!(
+            cache.entries.front().unwrap().key.revision,
+            DefinitionRevision::of(&[1])
+        );
+        assert_ne!(
+            cache.entries.front().unwrap().key,
+            CompilerKey {
+                revision: DefinitionRevision::of(&[1]),
+                semantics: SEMANTICS_VERSION + 1,
+            }
+        );
     }
 }
