@@ -1213,6 +1213,8 @@ impl App {
                     show_analytic: self.show_analytic,
                     show_fields: self.show_fields,
                     diagnostic: self.diagnostic,
+                    materials: None,
+                    simulation_seconds: self.time.ticks() as f32 * STEP.as_secs_f32(),
                 },
             )
         } else {

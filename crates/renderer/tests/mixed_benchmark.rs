@@ -138,6 +138,8 @@ fn native_mixed_compute_matrix() {
                             show_analytic: true,
                             show_fields: true,
                             diagnostic: false,
+                            materials: None,
+                            simulation_seconds: 0.0,
                         },
                     )
                     .unwrap();

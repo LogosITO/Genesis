@@ -4,11 +4,12 @@
 mod acceleration;
 pub mod field_graph_gpu;
 mod gpu;
+pub mod material;
 pub mod mixed;
 pub use acceleration::{Bvh, PrimitiveBounds};
 pub use gpu::{
-    DrawOptions, GpuAccelerationStats, GpuRenderer, GpuResult, GpuTimer, GpuTraversal,
-    GpuUploadStats, MixedDrawOptions,
+    DrawOptions, GpuAccelerationStats, GpuFieldCacheStats, GpuRenderer, GpuResult, GpuTimer,
+    GpuTraversal, GpuUploadStats, MixedDrawOptions,
 };
 
 use analytic_field::{AxisAlignedBox, Capsule, Sphere};

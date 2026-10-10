@@ -13,12 +13,42 @@ struct Outcome { distance_normal: vec4<f32>, info: vec4<u32> }
 struct Frame { point: vec3<f32>, first: f32, index: u32, phase: u32 }
 struct FieldInstance { position_scale: vec4<f32>, info: vec4<u32> }
 struct MixedOptions { trace: vec4<f32>, info: vec4<u32> }
+struct MaterialGpu {
+    base: vec4<f32>,
+    alternate: vec4<f32>,
+    emission: vec4<f32>,
+    axis_speed: vec4<f32>,
+    params: vec4<f32>,
+}
 @group(1) @binding(0) var<storage, read> field_nodes: array<Node>;
 @group(1) @binding(1) var<storage, read> field_instances: array<FieldInstance>;
 @group(1) @binding(2) var<uniform> mixed_options: MixedOptions;
+@group(1) @binding(3) var<storage, read> materials: array<MaterialGpu>;
+@group(1) @binding(4) var<storage, read> analytic_material_indices: array<u32>;
 var<private> field_config: FieldConfig;
 
 // FIELD_EVALUATOR_INSERTION_POINT
+
+fn shade_material(index: u32, point: vec3<f32>, normal: vec3<f32>, fallback: vec3<f32>, emphasis: f32) -> vec3<f32> {
+    let light = normalize(vec3<f32>(0.5, 0.8, -0.6));
+    let diffuse = 0.18 + 0.82 * max(dot(normal, light), 0.0);
+    if (index == 0xffffffffu || index >= arrayLength(&materials)) {
+        return fallback * mix(diffuse, 1.0, emphasis);
+    }
+    let material = materials[index];
+    var base = material.base.xyz;
+    let mode = material.params.z;
+    if (mode > 0.5) {
+        let coordinate = dot(point, material.axis_speed.xyz) * material.params.x
+            + material.params.y + mixed_options.trace.w * material.axis_speed.w;
+        if (mode < 1.5) {
+            base = mix(base, material.alternate.xyz, clamp(coordinate, 0.0, 1.0));
+        } else {
+            base = select(base, material.alternate.xyz, fract(coordinate) >= 0.5);
+        }
+    }
+    return clamp(base * diffuse + material.emission.xyz, vec3<f32>(0.0), vec3<f32>(1.0));
+}
 
 @compute @workgroup_size(8, 8)
 fn render_mixed(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -31,6 +61,7 @@ fn render_mixed(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     var field_distance = camera.view.w;
     var field_normal = vec3<f32>(0.0);
+    var field_material = 0xffffffffu;
     var field_hit = false;
     var uncertain = false;
     var exhausted = false;
@@ -55,6 +86,7 @@ fn render_mixed(@builtin(global_invocation_id) gid: vec3<u32>) {
                     if (!field_hit || distance < field_distance) {
                         field_distance = distance;
                         field_normal = result.distance_normal.xyz;
+                        field_material = instance.info.w;
                         field_hit = true;
                     }
                 }
@@ -68,14 +100,14 @@ fn render_mixed(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let use_field = field_hit && (!analytic.valid || field_distance < analytic.distance);
     if (analytic.valid && !use_field) {
-        let base = objects[analytic.primitive_index].color.xyz;
-        let light = normalize(vec3<f32>(0.5, 0.8, -0.6));
-        let diffuse = 0.18 + 0.82 * max(dot(analytic.normal, light), 0.0);
-        color = base * mix(diffuse, 1.0, objects[analytic.primitive_index].color.w);
+        let primitive = objects[analytic.primitive_index];
+        color = shade_material(analytic_material_indices[analytic.primitive_index],
+            camera.origin.xyz + direction * analytic.distance, analytic.normal,
+            primitive.color.xyz, primitive.color.w);
         if (camera.settings.x > 0.5) { color = analytic.normal * 0.5 + vec3<f32>(0.5); }
     } else if (use_field) {
-        let light = normalize(vec3<f32>(0.5, 0.8, -0.6));
-        color = vec3<f32>(0.1, 0.65, 0.8) * (0.18 + 0.82 * max(dot(field_normal, light), 0.0));
+        color = shade_material(field_material, camera.origin.xyz + direction * field_distance,
+            field_normal, vec3<f32>(0.1, 0.65, 0.8), 0.0);
         if (camera.settings.x > 0.5) { color = field_normal * 0.5 + vec3<f32>(0.5); }
     }
     if (uncertain || exhausted || ambiguous) {

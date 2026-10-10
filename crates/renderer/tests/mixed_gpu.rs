@@ -3,6 +3,7 @@ use analytic_field::Sphere;
 use analytic_renderer::{
     Camera, DrawOptions, GpuRenderer, MixedDrawOptions,
     field_graph_gpu::{GraphGpuRenderer, GraphTracePolicy},
+    material::{Material, MaterialPattern, MaterialSet},
     mixed::{MixedRenderOptions, MixedSource, render_mixed_rgba},
 };
 use spatial_math::{Transform, Vec3};
@@ -146,6 +147,8 @@ fn native_mixed_depth_matches_reference_at_center() {
                     show_analytic: true,
                     show_fields: true,
                     diagnostic: true,
+                    materials: None,
+                    simulation_seconds: 0.0,
                 },
             )
             .unwrap();
@@ -211,6 +214,8 @@ fn native_mixed_depth_matches_reference_at_center() {
                 show_analytic: false,
                 show_fields: true,
                 diagnostic: true,
+                materials: None,
+                simulation_seconds: 0.0,
             },
         )
         .unwrap();
@@ -249,6 +254,8 @@ fn native_mixed_depth_matches_reference_at_center() {
                 show_analytic: true,
                 show_fields: true,
                 diagnostic: true,
+                materials: None,
+                simulation_seconds: 0.0,
             },
         )
         .unwrap();
@@ -264,6 +271,190 @@ fn native_mixed_depth_matches_reference_at_center() {
     assert!(
         diagnostic[0] > diagnostic[1] * 3 && diagnostic[0] > diagnostic[2] * 3,
         "inside-start uncertainty must remain visible: {diagnostic:?}"
+    );
+}
+
+#[test]
+#[ignore = "requires native GPU; CPU/WGSL material parity and actual captures"]
+fn mathematical_materials_match_cpu_and_reload_without_geometry_upload() {
+    let instance = wgpu::Instance::default();
+    let adapter =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+            .unwrap();
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let renderer =
+        pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+    let camera = Camera::look_at(v(0.0, 0.0, -6.0), Vec3::ZERO, v(0.0, 1.0, 0.0), 0.8).unwrap();
+    let source = br#"{"format_version":1,"id":"material-sphere","root":"s","nodes":[{"op":"sphere","id":"s","radius":0.9}]}"#;
+    let mut world = WorldState::new(DeterministicSeed(36));
+    let field = world.spawn_field(source, Transform::identity()).unwrap();
+    let mut materials = MaterialSet::default();
+    let gradient = Material::new(
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0; 3],
+        MaterialPattern::Gradient {
+            axis: [1.0, 0.0, 0.0],
+            frequency: 1.0,
+            phase: 0.5,
+            speed: 0.0,
+        },
+    )
+    .unwrap();
+    materials.set_field(field, gradient);
+    let size = [65, 65];
+    let draw = |world: &WorldState, materials: &MaterialSet, camera: Camera, size: [u32; 2]| {
+        let image = renderer
+            .draw_mixed(
+                &device,
+                &queue,
+                world,
+                camera,
+                MixedDrawOptions {
+                    draw: DrawOptions {
+                        size,
+                        normal_debug: false,
+                        surface: None,
+                        timer: None,
+                    },
+                    policy: GraphTracePolicy::default(),
+                    show_analytic: true,
+                    show_fields: true,
+                    diagnostic: true,
+                    materials: Some(materials),
+                    simulation_seconds: 0.0,
+                },
+            )
+            .unwrap();
+        rgba(&device, &queue, &image, size)
+    };
+    let center = (32 + 32 * size[0]) as usize * 4;
+    let pixels = draw(&world, &materials, camera, size);
+    let ray = camera.ray(32, 32, size[0], size[1]).unwrap();
+    let hit = analytic_renderer::field_graph_gpu::GraphGpuRenderer::new(&device);
+    let field_renderer = pollster::block_on(hit).unwrap();
+    let field_hit = field_renderer
+        .query_world_fields(
+            &device,
+            &queue,
+            &world,
+            camera,
+            &[ray],
+            GraphTracePolicy::default(),
+        )
+        .unwrap()[0];
+    let (distance, normal) = match field_hit {
+        analytic_renderer::field_graph_gpu::WorldFieldGpuOutcome::Hit {
+            distance, normal, ..
+        } => (distance, normal),
+        other => panic!("expected field hit: {other:?}"),
+    };
+    let point = [0.0, 0.0, -6.0 + distance];
+    let expected = gradient.sample(point, 0.0).unwrap().lit(normal).unwrap();
+    for channel in 0..3 {
+        assert!(
+            (f32::from(pixels[center + channel]) / 255.0 - expected[channel]).abs() < 0.025,
+            "channel {channel}: GPU {:?}, CPU {expected:?}",
+            &pixels[center..center + 4]
+        );
+    }
+    let before = renderer.field_cache_stats().unwrap();
+    let bands = Material::new(
+        [0.05, 0.05, 0.05],
+        [0.0, 0.0, 1.0],
+        [0.0; 3],
+        MaterialPattern::Bands {
+            axis: [1.0, 0.0, 0.0],
+            frequency: 1.0,
+            phase: 0.6,
+            speed: 0.0,
+        },
+    )
+    .unwrap();
+    materials.set_field(field, bands);
+    let bands_pixels = draw(&world, &materials, camera, size);
+    assert_ne!(pixels[center..center + 4], bands_pixels[center..center + 4]);
+    let after = renderer.field_cache_stats().unwrap();
+    assert_eq!(before.node_uploads, after.node_uploads);
+    assert_eq!(before.node_bytes, after.node_bytes);
+    assert!(after.material_uploads > before.material_uploads);
+    let emissive = Material::new(
+        [0.02, 0.02, 0.08],
+        [0.0; 3],
+        [0.8, 0.1, 0.0],
+        MaterialPattern::Constant,
+    )
+    .unwrap();
+    materials.set_field(field, emissive);
+    let emissive_pixels = draw(&world, &materials, camera, size);
+    assert!(emissive_pixels[center] > bands_pixels[center] + 80);
+    let second = world
+        .spawn_field(source, Transform::new(v(2.0, 0.0, 0.0), 1.0).unwrap())
+        .unwrap();
+    materials.set_field(second, bands);
+    assert_eq!(world.field_definitions().len(), 1);
+    let sphere = world
+        .spawn_sphere(
+            Sphere::new(0.75).unwrap(),
+            Transform::new(v(-2.0, 0.0, 0.0), 1.0).unwrap(),
+            0.0,
+        )
+        .unwrap();
+    materials.set_sphere(sphere, gradient);
+    let capture_size = [512, 288];
+    let capture_camera =
+        Camera::look_at(v(0.0, 0.0, -6.0), Vec3::ZERO, v(0.0, 1.0, 0.0), 1.0).unwrap();
+    let image = draw(&world, &materials, capture_camera, capture_size);
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/mixed-captures/materials.bmp");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    write_bmp(&path, &image, capture_size);
+    let analytic_camera =
+        Camera::look_at(v(-2.0, 0.0, -6.0), v(-2.0, 0.0, 0.0), v(0.0, 1.0, 0.0), 0.8).unwrap();
+    let analytic_pixels = draw(&world, &materials, analytic_camera, size);
+    let ray = analytic_camera.ray(32, 32, 65, 65).unwrap();
+    let hit = renderer
+        .query(
+            &device,
+            &queue,
+            &analytic_renderer::Scene::from_world(&world).unwrap(),
+            &[ray],
+        )
+        .unwrap()[0]
+        .unwrap();
+    let point = [-2.0, 0.0, -6.0 + hit.distance];
+    let expected = gradient
+        .sample(point, 0.0)
+        .unwrap()
+        .lit(hit.normal)
+        .unwrap();
+    for channel in 0..3 {
+        assert!(
+            (f32::from(analytic_pixels[center + channel]) / 255.0 - expected[channel]).abs()
+                < 0.025,
+            "analytic channel {channel}: GPU {:?}, CPU {expected:?}",
+            &analytic_pixels[center..center + 4]
+        );
+    }
+    for x in [8.0, 9.0, 10.0, 11.0] {
+        world
+            .spawn_sphere(
+                Sphere::new(0.3).unwrap(),
+                Transform::new(v(x, 0.0, 0.0), 1.0).unwrap(),
+                0.0,
+            )
+            .unwrap();
+    }
+    draw(&world, &materials, camera, size);
+    let bvh_before = renderer.acceleration_stats().unwrap().rebuilds;
+    let nodes_before = renderer.field_cache_stats().unwrap().node_uploads;
+    materials.set_sphere(sphere, emissive);
+    draw(&world, &materials, camera, size);
+    assert_eq!(renderer.acceleration_stats().unwrap().rebuilds, bvh_before);
+    assert_eq!(
+        renderer.field_cache_stats().unwrap().node_uploads,
+        nodes_before
     );
 }
 
