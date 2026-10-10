@@ -2,13 +2,169 @@
 use analytic_field::Sphere;
 use analytic_renderer::{
     Camera, DrawOptions, GpuFieldExecution, GpuFieldPath, GpuFieldRenderMode, GpuRenderer,
-    MixedDrawOptions,
+    MixedDrawOptions, MixedGpuIdentity,
     field_graph_gpu::{GraphGpuRenderer, GraphTracePolicy, WorldFieldGpuOutcome},
     material::{Material, MaterialPattern, MaterialSet},
     mixed::{MixedRenderOptions, MixedSource, render_mixed_rgba},
 };
 use spatial_math::{Transform, Vec3};
 use std::{sync::mpsc, time::Duration};
+use world_authoring::field_graph::{ParameterBinding, ParameterComponent};
+
+#[test]
+#[ignore = "requires native GPU; read native mixed identity, distance and status"]
+fn native_mixed_diagnostic_selects_nearest_mathematical_object() {
+    let adapter = pollster::block_on(
+        test_instance().request_adapter(&wgpu::RequestAdapterOptions::default()),
+    )
+    .unwrap();
+    eprintln!("mixed_diagnostic_adapter={:?}", adapter.get_info());
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let renderer =
+        pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+    let mut world = WorldState::new(DeterministicSeed(411));
+    let source = br#"{"format_version":1,"id":"diagnostic-sphere","root":"s","nodes":[{"op":"sphere","id":"s","radius":1.0}]}"#;
+    let field = world.spawn_field(source, Transform::identity()).unwrap();
+    let camera = Camera::look_at(v(0.0, 0.0, -4.0), Vec3::ZERO, v(0.0, 1.0, 0.0), 0.9).unwrap();
+    let diagnose = |world: &WorldState, camera: Camera| {
+        renderer
+            .diagnose_mixed_camera(
+                &device,
+                &queue,
+                world,
+                camera,
+                MixedDrawOptions {
+                    draw: DrawOptions {
+                        size: [1, 1],
+                        normal_debug: false,
+                        surface: None,
+                        timer: None,
+                    },
+                    policy: GraphTracePolicy::default(),
+                    show_analytic: true,
+                    show_fields: true,
+                    diagnostic: true,
+                    materials: None,
+                    simulation_seconds: 0.0,
+                    background: [0.0; 3],
+                    light_direction: [0.0, 1.0, 0.0],
+                },
+                GpuFieldRenderMode {
+                    execution: GpuFieldExecution::Interpreter,
+                    spatial_guard: true,
+                },
+            )
+            .unwrap()[0]
+    };
+    let implicit = diagnose(&world, camera);
+    assert!(implicit.hit && implicit.field && !implicit.uncertain && !implicit.exhausted);
+    assert_eq!(
+        implicit.identity,
+        Some(MixedGpuIdentity::FieldInstance(field.value()))
+    );
+    assert_eq!(
+        implicit.definition,
+        Some(world.field_instances()[0].revision())
+    );
+    assert!(
+        (implicit.distance.unwrap() - 3.0).abs() < 0.003,
+        "{implicit:?}"
+    );
+    world
+        .spawn_sphere(
+            Sphere::new(0.5).unwrap(),
+            Transform::new(v(0.0, 0.0, -2.0), 1.0).unwrap(),
+            0.0,
+        )
+        .unwrap();
+    let analytic = diagnose(&world, camera);
+    assert!(analytic.hit && !analytic.field && !analytic.uncertain && !analytic.exhausted);
+    assert_eq!(
+        analytic.identity,
+        Some(MixedGpuIdentity::AnalyticPrimitive(0))
+    );
+    assert_eq!(analytic.definition, None);
+    assert!(
+        (analytic.distance.unwrap() - 1.5).abs() < 0.001,
+        "{analytic:?}"
+    );
+    let inside_camera =
+        Camera::look_at(Vec3::ZERO, v(0.0, 0.0, 1.0), v(0.0, 1.0, 0.0), 0.9).unwrap();
+    let mut only_field = WorldState::new(DeterministicSeed(412));
+    only_field
+        .spawn_field(source, Transform::identity())
+        .unwrap();
+    let inside = diagnose(&only_field, inside_camera);
+    assert!(
+        !inside.hit && inside.uncertain && !inside.exhausted,
+        "{inside:?}"
+    );
+    let box_source = br#"{"format_version":1,"id":"diagnostic-box","root":"b","nodes":[{"op":"box","id":"b","half_extent":[0.4,0.5,0.3]}]}"#;
+    let mut box_world = WorldState::new(DeterministicSeed(413));
+    let box_id = box_world
+        .spawn_field(box_source, Transform::new(v(1.0, 0.0, 0.0), 2.0).unwrap())
+        .unwrap();
+    let box_camera =
+        Camera::look_at(v(1.0, 0.0, -4.0), v(1.0, 0.0, 0.0), v(0.0, 1.0, 0.0), 0.9).unwrap();
+    let box_hit = diagnose(&box_world, box_camera);
+    assert_eq!(
+        box_hit.identity,
+        Some(MixedGpuIdentity::FieldInstance(box_id.value()))
+    );
+    assert!(!box_hit.uncertain && !box_hit.exhausted, "{box_hit:?}");
+    assert!(
+        (box_hit.distance.unwrap() - 3.4).abs() < 0.003,
+        "{box_hit:?}"
+    );
+    let normal = box_hit.normal.unwrap();
+    assert!(normal[2] < -0.99, "{box_hit:?}");
+    let source = br#"{"format_version":1,"id":"two-occurrences","root":"s","nodes":[{"op":"sphere","id":"s","radius":0.5}]}"#;
+    let mut shared_world = WorldState::new(DeterministicSeed(414));
+    let left = shared_world
+        .spawn_field(source, Transform::new(v(-1.0, 0.0, 0.0), 1.0).unwrap())
+        .unwrap();
+    let right = shared_world
+        .spawn_field(source, Transform::new(v(1.0, 0.0, 0.0), 1.0).unwrap())
+        .unwrap();
+    let rule = world_state::ParameterRule {
+        binding: ParameterBinding {
+            node: "s".into(),
+            component: ParameterComponent::SphereRadius,
+        },
+        uptake: 1.0,
+        gain_per_unit: 0.5,
+        maximum: 1.0,
+        positive_site: true,
+        feedback: true,
+    };
+    shared_world
+        .enable_field_parameters(left, vec![rule.clone()])
+        .unwrap();
+    shared_world
+        .enable_field_parameters(right, vec![rule])
+        .unwrap();
+    shared_world.grow_field_parameters(right, &[0.5]).unwrap();
+    let left_camera =
+        Camera::look_at(v(-1.0, 0.0, -4.0), v(-1.0, 0.0, 0.0), v(0.0, 1.0, 0.0), 0.9).unwrap();
+    let right_camera =
+        Camera::look_at(v(1.0, 0.0, -4.0), v(1.0, 0.0, 0.0), v(0.0, 1.0, 0.0), 0.9).unwrap();
+    let first = diagnose(&shared_world, left_camera);
+    let second = diagnose(&shared_world, right_camera);
+    assert_eq!(
+        first.identity,
+        Some(MixedGpuIdentity::FieldInstance(left.value()))
+    );
+    assert_eq!(
+        second.identity,
+        Some(MixedGpuIdentity::FieldInstance(right.value()))
+    );
+    assert!((first.distance.unwrap() - 3.5).abs() < 0.003, "{first:?}");
+    assert!(
+        (second.distance.unwrap() - 3.25).abs() < 0.003,
+        "{second:?}"
+    );
+}
 
 #[test]
 #[ignore = "requires native GPU; verify native specialization, cache and live revision fallback"]

@@ -196,6 +196,50 @@ pub struct GpuResult {
     pub normal: [f32; 3],
 }
 
+/// One actual native mixed-shader pixel result. The `f32` depth and normal are approximate.
+#[derive(Clone, Copy, Debug)]
+pub struct MixedGpuResult {
+    /// Camera-derived world ray for this pixel; the GPU uses its f32 projection.
+    pub ray: Ray,
+    /// Selected execution path for this dispatch.
+    pub path: GpuFieldPath,
+    /// Selected hit, if any.
+    pub hit: bool,
+    /// True when an implicit field won the mixed-depth comparison.
+    pub field: bool,
+    /// Any field evaluator returned an indeterminate result on this ray.
+    pub uncertain: bool,
+    /// Any field evaluator exhausted its iteration budget on this ray.
+    pub exhausted: bool,
+    /// Competing hits were within the shader's depth ambiguity band.
+    pub ambiguous: bool,
+    /// At least one field occurrence was skipped by the visual bounds guard.
+    pub bounds_culled: bool,
+    /// Field instance ID or frame-local analytic primitive ID; `None` on a miss.
+    pub identity: Option<MixedGpuIdentity>,
+    /// Exact authored definition revision for a selected field instance.
+    pub definition: Option<DefinitionRevision>,
+    /// Selected material index in the frame-local material buffer, if assigned.
+    pub material: Option<u32>,
+    /// World-space distance along the camera ray, when a hit was selected.
+    pub distance: Option<f32>,
+    /// Approximate hit position derived from the camera ray and returned distance.
+    pub position: Option<spatial_math::Vec3>,
+    /// Selected outward normal, when a hit was selected.
+    pub normal: Option<[f32; 3]>,
+    /// Maximum field iterations observed over tested instances, capped at 65535.
+    pub field_iterations: u16,
+}
+
+/// Mixed shader identity domains are deliberately distinct.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MixedGpuIdentity {
+    /// Analytic primitive index in the current `Scene::from_world` snapshot.
+    AnalyticPrimitive(u32),
+    /// Stable world-owned implicit field occurrence.
+    FieldInstance(u64),
+}
+
 /// One sampled compute-pass duration, available only with `TIMESTAMP_QUERY`.
 pub struct GpuTimer {
     pub(crate) queries: wgpu::QuerySet,
@@ -671,7 +715,7 @@ impl GpuRenderer {
             && world
                 .field_instances()
                 .iter()
-                .any(|item| item.morphology().is_some())
+                .any(|item| item.morphology().is_some() || item.parameters().is_some())
         {
             return Ok(None);
         }
@@ -1142,13 +1186,14 @@ impl GpuRenderer {
     }
     fn binding(
         &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        gpu: (&wgpu::Device, &wgpu::Queue),
         scene: &Scene,
         mut camera: GpuCamera,
         image: &wgpu::TextureView,
         rays: &[GpuRay],
+        output: Option<&wgpu::Buffer>,
     ) -> Result<(wgpu::BindGroup, wgpu::Buffer), RenderError> {
+        let (device, queue) = gpu;
         let record_bytes = std::mem::size_of::<GpuPrimitive>() as u64;
         let requested_bytes = u64::try_from(scene.primitives().len().max(1))
             .ok()
@@ -1258,11 +1303,13 @@ impl GpuRenderer {
             },
             usage: wgpu::BufferUsages::STORAGE,
         });
-        let result_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("query results"),
-            size: (rays.len().max(1) * std::mem::size_of::<GpuHit>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
+        let result_buffer = output.cloned().unwrap_or_else(|| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("query results"),
+                size: (rays.len().max(1) * std::mem::size_of::<GpuHit>()) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            })
         });
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("analytic resources"),
@@ -1308,6 +1355,7 @@ impl GpuRenderer {
         world: &WorldState,
         scene: &Scene,
         options: MixedSceneOptions<'_>,
+        record_diagnostics: bool,
     ) -> Result<wgpu::BindGroup, RenderError> {
         options.policy.validate()?;
         if !options.simulation_seconds.is_finite()
@@ -1368,7 +1416,7 @@ impl GpuRenderer {
             let graph = world
                 .field_graph(instance.id())
                 .ok_or(RenderError::InvalidInput("missing field graph"))?;
-            let shared = if instance.morphology().is_none() {
+            let shared = if instance.morphology().is_none() && instance.parameters().is_none() {
                 definitions
                     .iter()
                     .find(|(revision, _)| *revision == instance.revision())
@@ -1393,7 +1441,7 @@ impl GpuRenderer {
                     }
                 }
                 nodes.extend(graph_nodes);
-                if instance.morphology().is_none() {
+                if instance.morphology().is_none() && instance.parameters().is_none() {
                     definitions.push((instance.revision(), offset));
                 }
                 offset
@@ -1599,7 +1647,8 @@ impl GpuRenderer {
                 u32::from(options.flags[0])
                     | (u32::from(options.flags[1]) << 1)
                     | (u32::from(options.flags[2]) << 2)
-                    | (u32::from(options.render_mode.spatial_guard) << 3),
+                    | (u32::from(options.render_mode.spatial_guard) << 3)
+                    | (u32::from(record_diagnostics) << 4),
                 options.policy.iterations,
             ],
             background: [
@@ -1671,12 +1720,12 @@ impl GpuRenderer {
         options: DrawOptions<'_>,
     ) -> Result<wgpu::Texture, RenderError> {
         self.draw_internal(
-            device,
-            queue,
+            (device, queue),
             scene,
             camera,
             options,
             DrawMode::Analytic(traversal),
+            None,
         )
     }
 
@@ -1715,8 +1764,7 @@ impl GpuRenderer {
         let scene = Scene::from_world(world)?;
         let scene_ms = scene_started.elapsed().as_secs_f64() * 1000.0;
         self.draw_internal(
-            device,
-            queue,
+            (device, queue),
             &scene,
             camera,
             options.draw,
@@ -1737,18 +1785,173 @@ impl GpuRenderer {
                 },
                 scene_ms,
             ),
+            None,
         )
+    }
+
+    /// Opt-in bounded readback of the actual native mixed shader's selected hit per pixel.
+    /// The returned order is row-major. This dispatch uses the normal interpreter/compiler
+    /// selection and never allocates a full-frame diagnostic buffer during ordinary draws.
+    pub fn diagnose_mixed_camera(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        world: &WorldState,
+        camera: Camera,
+        options: MixedDrawOptions<'_>,
+        render_mode: GpuFieldRenderMode,
+    ) -> Result<Vec<MixedGpuResult>, RenderError> {
+        let [width, height] = options.draw.size;
+        let count = width
+            .checked_mul(height)
+            .ok_or(RenderError::TooManyObjects)?;
+        if count == 0 || count > 16_384 {
+            return Err(RenderError::InvalidInput(
+                "diagnostic viewport exceeds 16384 pixels",
+            ));
+        }
+        let rays = (0..count)
+            .map(|index| camera.ray(index % width, index / width, width, height))
+            .collect::<Result<Vec<_>, _>>()?;
+        let size = u64::from(count) * std::mem::size_of::<GpuHit>() as u64;
+        if size > device.limits().max_storage_buffer_binding_size
+            || size > device.limits().max_buffer_size
+        {
+            return Err(RenderError::AccelerationCapacity {
+                requested_bytes: size,
+                allowed_bytes: device
+                    .limits()
+                    .max_storage_buffer_binding_size
+                    .min(device.limits().max_buffer_size),
+            });
+        }
+        let output = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mixed diagnostic hits"),
+            size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mixed diagnostic readback"),
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let scene = Scene::from_world(world)?;
+        self.draw_internal(
+            (device, queue),
+            &scene,
+            camera,
+            options.draw,
+            DrawMode::Mixed(
+                world,
+                MixedSceneOptions {
+                    policy: options.policy,
+                    flags: [
+                        options.show_analytic,
+                        options.show_fields,
+                        options.diagnostic,
+                    ],
+                    materials: options.materials,
+                    simulation_seconds: options.simulation_seconds,
+                    background: options.background,
+                    light_direction: options.light_direction,
+                    render_mode,
+                },
+                0.0,
+            ),
+            Some(&output),
+        )?;
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mixed diagnostic copy"),
+        });
+        encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, size);
+        queue.submit([encoder.finish()]);
+        let path = self
+            .compiler_stats()
+            .ok_or(RenderError::Gpu("compiler cache lock poisoned".into()))?
+            .active;
+        let slice = readback.slice(..);
+        let (tx, rx) = mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|error| RenderError::Gpu(error.to_string()))?;
+        rx.recv()
+            .map_err(|error| RenderError::Gpu(error.to_string()))?
+            .map_err(|error| RenderError::Gpu(error.to_string()))?;
+        let mapped = slice
+            .get_mapped_range()
+            .map_err(|error| RenderError::Gpu(error.to_string()))?;
+        debug_assert_eq!(mapped.len(), size as usize);
+        let results = bytemuck::cast_slice::<u8, GpuHit>(&mapped)
+            .iter()
+            .zip(rays)
+            .map(|(value, ray)| {
+                let flags = value.meta[0];
+                let hit = flags & 1 != 0;
+                let field = flags & 2 != 0;
+                let id = u64::from(value.meta[1]) | (u64::from(value.meta[2]) << 32);
+                let position = hit
+                    .then(|| {
+                        ray.direction()
+                            .checked_scale(f64::from(value.distance_normal[3]))
+                            .and_then(|offset| ray.origin().checked_add(offset))
+                            .ok()
+                    })
+                    .flatten();
+                MixedGpuResult {
+                    ray,
+                    path,
+                    hit,
+                    field,
+                    uncertain: flags & 4 != 0,
+                    exhausted: flags & 8 != 0,
+                    ambiguous: flags & 16 != 0,
+                    bounds_culled: flags & 64 != 0,
+                    identity: hit.then_some(if field {
+                        MixedGpuIdentity::FieldInstance(id)
+                    } else {
+                        MixedGpuIdentity::AnalyticPrimitive(value.meta[1])
+                    }),
+                    definition: if hit && field {
+                        world
+                            .field_instances()
+                            .iter()
+                            .find(|instance| instance.id().value() == id)
+                            .map(|instance| instance.revision())
+                    } else {
+                        None
+                    },
+                    material: (hit && value.meta[3] != u32::MAX).then_some(value.meta[3]),
+                    distance: hit.then_some(value.distance_normal[3]),
+                    position,
+                    normal: hit.then_some([
+                        value.distance_normal[0],
+                        value.distance_normal[1],
+                        value.distance_normal[2],
+                    ]),
+                    field_iterations: (flags >> 16) as u16,
+                }
+            })
+            .collect();
+        drop(mapped);
+        readback.unmap();
+        Ok(results)
     }
 
     fn draw_internal(
         &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        gpu: (&wgpu::Device, &wgpu::Queue),
         scene: &Scene,
         camera: Camera,
         options: DrawOptions<'_>,
         mode: DrawMode<'_>,
+        diagnostic_output: Option<&wgpu::Buffer>,
     ) -> Result<wgpu::Texture, RenderError> {
+        let (device, queue) = gpu;
         let scene_ms = match mode {
             DrawMode::Analytic(..) => 0.0,
             DrawMode::Mixed(_, _, ms) => ms,
@@ -1782,8 +1985,7 @@ impl GpuRenderer {
         let image_view = image.create_view(&wgpu::TextureViewDescriptor::default());
         let stage_started = Instant::now();
         let (group, _) = self.binding(
-            device,
-            queue,
+            (device, queue),
             scene,
             camera_data(
                 camera,
@@ -1798,14 +2000,20 @@ impl GpuRenderer {
             ),
             &image_view,
             &[],
+            diagnostic_output,
         )?;
         let analytic_binding_ms = stage_started.elapsed().as_secs_f64() * 1000.0;
         let stage_started = Instant::now();
         let field_group = match mode {
             DrawMode::Analytic(..) => None,
-            DrawMode::Mixed(world, mixed_options, _) => {
-                Some(self.mixed_binding(device, queue, world, scene, mixed_options)?)
-            }
+            DrawMode::Mixed(world, mixed_options, _) => Some(self.mixed_binding(
+                device,
+                queue,
+                world,
+                scene,
+                mixed_options,
+                diagnostic_output.is_some(),
+            )?),
         };
         let field_binding_ms = stage_started.elapsed().as_secs_f64() * 1000.0;
         let stage_started = Instant::now();
@@ -1931,8 +2139,14 @@ impl GpuRenderer {
         let mut query_camera = GpuCamera::zeroed();
         query_camera.scene[0] = scene.primitives().len() as u32;
         query_camera.scene[3] = traversal.code();
-        let (group, result_buffer) =
-            self.binding(device, queue, scene, query_camera, &image_view, &input)?;
+        let (group, result_buffer) = self.binding(
+            (device, queue),
+            scene,
+            query_camera,
+            &image_view,
+            &input,
+            None,
+        )?;
         let size = (rays.len() * std::mem::size_of::<GpuHit>()) as u64;
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("query readback"),

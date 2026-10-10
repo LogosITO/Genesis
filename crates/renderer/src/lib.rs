@@ -11,7 +11,7 @@ pub use acceleration::{Bvh, PrimitiveBounds};
 pub use gpu::{
     DrawOptions, GpuAccelerationStats, GpuCompilerStats, GpuFieldCacheStats, GpuFieldExecution,
     GpuFieldPath, GpuFieldRenderMode, GpuRenderer, GpuResult, GpuTimer, GpuTraversal,
-    GpuUploadStats, MixedDrawOptions,
+    GpuUploadStats, MixedDrawOptions, MixedGpuIdentity, MixedGpuResult,
 };
 
 use analytic_field::{AxisAlignedBox, Capsule, Sphere};

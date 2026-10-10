@@ -92,10 +92,13 @@ fn render_mixed(@builtin(global_invocation_id) gid: vec3<u32>) {
     var field_distance = camera.view.w;
     var field_normal = vec3<f32>(0.0);
     var field_material = 0xffffffffu;
+    var field_identity = vec2<u32>(0xffffffffu);
+    var field_iterations = 0u;
     var field_hit = false;
     var uncertain = false;
     var exhausted = false;
     var ambiguous = false;
+    var bounds_culled = false;
     if ((mixed_options.info.z & 2u) != 0u) {
         for (var i = 0u; i < mixed_options.info.x; i++) {
             let instance = field_instances[i];
@@ -104,8 +107,9 @@ fn render_mixed(@builtin(global_invocation_id) gid: vec3<u32>) {
             field_config.trace = mixed_options.trace;
             let origin = (camera.origin.xyz - instance.position_scale.xyz) / scale;
             if ((mixed_options.info.z & 8u) != 0u && (mixed_options.info.z & 4u) == 0u && misses_field_bounds(origin, direction, camera.view.z / scale,
-                camera.view.w / scale, instance.bounds_min.xyz, instance.bounds_max.xyz)) { continue; }
+                camera.view.w / scale, instance.bounds_min.xyz, instance.bounds_max.xyz)) { bounds_culled = true; continue; }
             let result = field_trace(origin, direction, camera.view.z / scale, camera.view.w / scale);
+            field_iterations = max(field_iterations, result.info.y);
             if (result.info.x == 2u) { uncertain = true; }
             if (result.info.x == 3u) { exhausted = true; }
             if (result.info.x == 1u) {
@@ -119,6 +123,7 @@ fn render_mixed(@builtin(global_invocation_id) gid: vec3<u32>) {
                         field_distance = distance;
                         field_normal = result.distance_normal.xyz;
                         field_material = instance.info.w;
+                        field_identity = instance.info.yz;
                         field_hit = true;
                     }
                 }
@@ -131,6 +136,20 @@ fn render_mixed(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (abs(field_distance - analytic.distance) <= band) { ambiguous = true; }
     }
     let use_field = field_hit && (!analytic.valid || field_distance < analytic.distance);
+    if ((mixed_options.info.z & 16u) != 0u) {
+        let selected = use_field || analytic.valid;
+        let distance = select(analytic.distance, field_distance, use_field);
+        let normal = select(analytic.normal, field_normal, use_field);
+        let identity = select(vec2<u32>(analytic.id, 0u), field_identity, use_field);
+        let material = select(select(0xffffffffu, analytic_material_indices[analytic.primitive_index], analytic.valid), field_material, use_field);
+        let flags = u32(selected) | (u32(use_field) << 1u) | (u32(uncertain) << 2u)
+            | (u32(exhausted) << 3u) | (u32(ambiguous) << 4u)
+            | (u32(selected) << 5u) | (u32(bounds_culled) << 6u)
+            | (min(field_iterations, 65535u) << 16u);
+        let index = gid.y * u32(camera.view.x) + gid.x;
+        query_hits[index].distance_normal = vec4<f32>(select(vec3<f32>(0.0), normal, selected), select(0.0, distance, selected));
+        query_hits[index].identity = vec4<u32>(flags, identity.x, identity.y, material);
+    }
     if (analytic.valid && !use_field) {
         let primitive = objects[analytic.primitive_index];
         color = shade_material(analytic_material_indices[analytic.primitive_index],
