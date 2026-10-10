@@ -4,12 +4,17 @@ mod hud;
 mod scene;
 
 use analytic_renderer::{
-    DrawOptions, GpuFieldPath, GpuRenderer, GpuTimer, MixedDrawOptions,
+    DrawOptions, GpuFieldExecution, GpuFieldPath, GpuFieldRenderMode, GpuRenderer, GpuTimer,
+    MixedDrawOptions,
     field_graph_gpu::GraphTracePolicy,
+    material::{Material, MaterialPattern},
 };
 use scene::LabScene;
+use spatial_math::{Transform, Vec3};
 use std::{
     error::Error,
+    fs::File,
+    io::{BufWriter, Write},
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -128,12 +133,57 @@ struct App {
     gpu_ms: Option<f64>,
     frames: u64,
     last_timer: Instant,
+    profile: Option<FrameProfile>,
+    profile_execution: Option<GpuFieldExecution>,
+    profile_phase: &'static str,
+    event_ms: f64,
+}
+
+struct FrameProfile {
+    output: BufWriter<File>,
+    frame_limit: u64,
+    last_redraw: Option<Instant>,
 }
 
 impl App {
     fn new(path: PathBuf) -> Result<Self, Box<dyn Error>> {
         let scene = LabScene::load(&path)?;
         let capture_once = std::env::var_os("GENESIS_WORLD_LAB_CAPTURE_ONCE").map(PathBuf::from);
+        let profile = std::env::var_os("GENESIS_WORLD_LAB_PROFILE")
+            .map(|path| -> Result<FrameProfile, Box<dyn Error>> {
+                let frame_limit = std::env::var("GENESIS_WORLD_LAB_PROFILE_FRAMES")
+                    .ok()
+                    .map_or(Ok(600), |value| value.parse::<u64>())?;
+                if !(32..=10_000).contains(&frame_limit) {
+                    return Err("profile frame limit must be 32..=10000".into());
+                }
+                Ok(FrameProfile {
+                    output: BufWriter::new(File::create(path)?),
+                    frame_limit,
+                    last_redraw: None,
+                })
+            })
+            .transpose()?;
+        let profile_execution = match std::env::var("GENESIS_WORLD_LAB_PROFILE_SCENARIO")
+            .ok()
+            .as_deref()
+        {
+            None => None,
+            Some("auto") => Some(GpuFieldExecution::Auto),
+            Some("structural") => Some(GpuFieldExecution::Structural),
+            Some(_) => return Err("profile scenario must be auto or structural".into()),
+        };
+        if profile_execution.is_some()
+            && (profile.is_none()
+                || scene.world.field_instances().len() != 2
+                || scene.world.field_definitions().len() != 1
+                || scene.world.field_definitions()[0].source()
+                    != include_bytes!("../scenes/bridge.json"))
+        {
+            return Err(
+                "profile scenario requires the unmodified showcase scene and profile output".into(),
+            );
+        }
         Ok(Self {
             yaw: scene.yaw,
             elevation: scene.elevation,
@@ -152,6 +202,10 @@ impl App {
             gpu_ms: None,
             frames: 0,
             last_timer: Instant::now(),
+            profile,
+            profile_execution,
+            profile_phase: "static",
+            event_ms: 0.0,
             scene,
         })
     }
@@ -211,7 +265,93 @@ impl App {
         }
     }
 
+    fn profile_tick(&mut self) -> Result<(), Box<dyn Error>> {
+        if self.profile_execution.is_none() {
+            return Ok(());
+        }
+        let frame = self.frames;
+        let first = self.scene.world.field_instances()[0].id();
+        self.profile_phase = match frame {
+            0..100 => "static",
+            100..200 => {
+                self.yaw += 0.008;
+                "camera"
+            }
+            200..300 => {
+                let color = if frame.is_multiple_of(2) {
+                    [0.1, 0.7, 0.9]
+                } else {
+                    [0.9, 0.3, 0.1]
+                };
+                self.scene.materials.set_field(
+                    first,
+                    Material::new(color, color, [0.0; 3], MaterialPattern::Constant)?,
+                );
+                "material"
+            }
+            300..400 => {
+                let x = -1.6 + ((frame - 300) as f64 * 0.05).sin() * 0.2;
+                self.scene
+                    .world
+                    .set_field_transform(first, Transform::new(Vec3::new(x, 0.0, 0.0)?, 0.9)?)?;
+                "transform"
+            }
+            400..550 => {
+                let interval = if frame < 500 { 5 } else { 25 };
+                if frame.is_multiple_of(interval) {
+                    let radius = 0.65 + (frame - 400) as f64 * 0.002;
+                    let mut source: serde_json::Value =
+                        serde_json::from_slice(include_bytes!("../scenes/bridge.json"))?;
+                    source["nodes"][0]["radius"] = serde_json::json!(radius);
+                    let source = serde_json::to_vec(&source)?;
+                    for id in self
+                        .scene
+                        .world
+                        .field_instances()
+                        .iter()
+                        .map(|item| item.id())
+                        .collect::<Vec<_>>()
+                    {
+                        self.scene.world.replace_field(id, &source)?;
+                    }
+                }
+                if frame < 500 {
+                    "rapid_revision"
+                } else {
+                    "slow_revision"
+                }
+            }
+            _ => {
+                if frame == 550 {
+                    let revision = self.scene.world.field_instances()[0].revision();
+                    if self
+                        .scene
+                        .world
+                        .replace_field(first, b"invalid profile edit")
+                        .is_ok()
+                        || self.scene.world.field_instances()[0].revision() != revision
+                    {
+                        return Err("invalid profile edit changed the world".into());
+                    }
+                }
+                "invalid_edit_rollback"
+            }
+        };
+        Ok(())
+    }
+
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
+        let redraw_started = Instant::now();
+        let interval_ms = self.profile.as_mut().and_then(|profile| {
+            let previous = profile.last_redraw.replace(redraw_started);
+            previous.map(|time| redraw_started.duration_since(time).as_secs_f64() * 1000.0)
+        });
+        if let Err(error) = self.profile_tick() {
+            self.failure = Some(format!("profile scenario failed: {error}"));
+            event_loop.exit();
+            return;
+        }
+        let profile_update_ms = redraw_started.elapsed().as_secs_f64() * 1000.0;
         let Some(graphics) = self.graphics.as_mut() else {
             return;
         };
@@ -231,6 +371,7 @@ impl App {
                 return;
             }
         };
+        let acquire_started = Instant::now();
         let frame = match graphics.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -246,11 +387,13 @@ impl App {
                 return;
             }
         };
+        let acquire_ms = acquire_started.elapsed().as_secs_f64() * 1000.0;
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let sample_timer = self.last_timer.elapsed() >= Duration::from_secs(2);
-        let rendered = graphics.renderer.draw_mixed(
+        let draw_started = Instant::now();
+        let rendered = graphics.renderer.draw_mixed_with_execution(
             &graphics.device,
             &graphics.queue,
             &self.scene.world,
@@ -275,6 +418,10 @@ impl App {
                 background: self.scene.background,
                 light_direction: self.scene.light_direction,
             },
+            GpuFieldRenderMode {
+                execution: self.profile_execution.unwrap_or(GpuFieldExecution::Auto),
+                spatial_guard: true,
+            },
         );
         let image = match rendered {
             Ok(image) => image,
@@ -285,6 +432,7 @@ impl App {
                 return;
             }
         };
+        let draw_ms = draw_started.elapsed().as_secs_f64() * 1000.0;
         if self.capture {
             self.capture = false;
             let output = self
@@ -312,15 +460,22 @@ impl App {
                 }
             }
         }
+        let readback_started = Instant::now();
         if sample_timer {
             self.last_timer = Instant::now();
             if let Some(timer) = &graphics.timer {
                 self.gpu_ms = timer.read_ms(&graphics.device, &graphics.queue).ok();
             }
         }
+        let gpu_readback_ms = if sample_timer {
+            readback_started.elapsed().as_secs_f64() * 1000.0
+        } else {
+            0.0
+        };
         let compiler = graphics.renderer.compiler_stats();
         let field_path = match compiler.as_ref() {
             Some(state) if state.active == GpuFieldPath::Specialized => "COMPILED",
+            Some(state) if state.active == GpuFieldPath::Structural => "STRUCTURAL",
             Some(state) if state.pending => "INTERPRETER/COMPILING",
             Some(state) if state.last_error.is_some() => "INTERPRETER/COMPILE ERROR",
             _ => "INTERPRETER",
@@ -347,11 +502,48 @@ impl App {
             self.status.clone(),
             "ARROWS OR WASD ORBIT | +/- ZOOM | 1/2/3/N | R RELOAD | C CAPTURE | ESC".into(),
         ];
+        let hud_started = Instant::now();
         graphics
             .hud
             .draw(&graphics.device, &graphics.queue, &view, &lines);
+        let hud_ms = hud_started.elapsed().as_secs_f64() * 1000.0;
+        let present_started = Instant::now();
         graphics.queue.present(frame);
+        let present_ms = present_started.elapsed().as_secs_f64() * 1000.0;
         self.frames += 1;
+        if let Some(profile) = self.profile.as_mut() {
+            let compiler = graphics.renderer.compiler_stats();
+            let draw = graphics.renderer.last_draw_stats();
+            let fields = graphics.renderer.field_cache_stats();
+            let record = serde_json::json!({
+                "frame": self.frames, "interval_ms": interval_ms,
+                "phase": self.profile_phase, "profile_update_ms": profile_update_ms,
+                "event_ms": std::mem::take(&mut self.event_ms),
+                "acquire_ms": acquire_ms, "draw_ms": draw_ms,
+                "world_snapshot_ms": draw.map(|x| x.scene_ms),
+                "analytic_binding_ms": draw.map(|x| x.analytic_binding_ms),
+                "field_binding_ms": draw.map(|x| x.field_binding_ms),
+                "pipeline_selection_ms": draw.map(|x| x.pipeline_selection_ms),
+                "encode_submit_ms": draw.map(|x| x.encode_submit_ms),
+                "field_node_enqueue_ms": fields.map(|x| x.last_node_enqueue_ms),
+                "hud_ms": hud_ms, "present_ms": present_ms,
+                "gpu_timestamp_sample_ms": sample_timer.then_some(self.gpu_ms).flatten(),
+                "gpu_timestamp_readback_ms": gpu_readback_ms,
+                "compiler_mode": field_path, "compiler_pending": compiler.as_ref().is_some_and(|x| x.pending),
+                "compiler_requests": compiler.as_ref().map(|x| x.requests),
+                "present_mode": format!("{:?}", graphics.config.present_mode),
+            });
+            if let Err(error) = writeln!(profile.output, "{record}") {
+                self.failure = Some(format!("frame profile write failed: {error}"));
+                event_loop.exit();
+            }
+            if self.frames >= profile.frame_limit {
+                if let Err(error) = profile.output.flush() {
+                    self.failure = Some(format!("frame profile flush failed: {error}"));
+                }
+                event_loop.exit();
+            }
+        }
         if self.capture_once.is_some() {
             event_loop.exit();
         }
@@ -387,6 +579,8 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        let event_started = Instant::now();
+        let redraw = matches!(&event, WindowEvent::RedrawRequested);
         if self
             .graphics
             .as_ref()
@@ -433,6 +627,9 @@ impl ApplicationHandler for App {
                 }
             }
             _ => {}
+        }
+        if !redraw {
+            self.event_ms += event_started.elapsed().as_secs_f64() * 1000.0;
         }
     }
 
@@ -552,6 +749,34 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn profile_scenario_changes_authoritative_revision_and_rejects_invalid_edit() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scenes/showcase.json");
+        let mut app = App::new(path).unwrap();
+        app.profile_execution = Some(GpuFieldExecution::Structural);
+        let first = app.scene.world.field_instances()[0].id();
+        let initial_revision = app.scene.world.field_instances()[0].revision();
+        app.frames = 200;
+        app.profile_tick().unwrap();
+        app.frames = 300;
+        app.profile_tick().unwrap();
+        app.frames = 400;
+        app.profile_tick().unwrap();
+        let changed_revision = app.scene.world.field_instances()[0].revision();
+        assert_ne!(initial_revision, changed_revision);
+        assert_eq!(
+            app.scene.world.field_instances()[1].revision(),
+            changed_revision
+        );
+        assert!(app.scene.world.field_graph(first).is_some());
+        app.frames = 550;
+        app.profile_tick().unwrap();
+        assert_eq!(
+            app.scene.world.field_instances()[0].revision(),
+            changed_revision
+        );
+        assert_eq!(app.profile_phase, "invalid_edit_rollback");
+    }
     #[test]
     fn external_edit_reload_and_rejection_preserve_scene() {
         let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
