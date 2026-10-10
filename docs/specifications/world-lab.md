@@ -46,6 +46,13 @@ GPU image to the current directory. For reproducible one-frame capture on an
 available desktop GPU, set `GENESIS_WORLD_LAB_CAPTURE_ONCE` to an output BMP
 path and run the same command; the Lab exits after the captured frame.
 
+The opt-in hardware regression
+`cargo test -p world-lab external_graph_edit_changes_actual_gpu_image --locked -- --ignored`
+edits an external graph in a temporary scene, renders both revisions through
+the mixed GPU path, reads back real BMP images, and requires a visible byte
+change plus a refreshed graph-node upload. It leaves the source showcase
+untouched.
+
 Numerical diagnostic colors expose uncertain field tracing. Normal display
 is an approximate GPU `f32` visualization, not certified occupancy or
 implicit collision. No mesh or voxel scene representation is introduced.

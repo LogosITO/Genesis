@@ -576,4 +576,79 @@ mod tests {
         assert!(app.status.starts_with("RELOAD ERROR"));
         std::fs::remove_dir_all(folder).unwrap();
     }
+
+    #[test]
+    #[ignore = "requires native GPU; external graph edit and real mixed-image readback"]
+    fn external_graph_edit_changes_actual_gpu_image() {
+        let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../../target/world-lab-gpu-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&folder).unwrap();
+        let original = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scenes");
+        let path = folder.join("showcase.json");
+        let graph = folder.join("bridge.json");
+        std::fs::copy(original.join("showcase.json"), &path).unwrap();
+        std::fs::copy(original.join("bridge.json"), &graph).unwrap();
+        let before = LabScene::load(&path).unwrap();
+        let instance = wgpu::Instance::default();
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .unwrap();
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        let renderer =
+            pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+        let size = [256, 144];
+        let draw = |scene: &LabScene, output: &std::path::Path| {
+            let camera = scene
+                .camera(scene.yaw, scene.elevation, scene.distance)
+                .unwrap();
+            let image = renderer
+                .draw_mixed(
+                    &device,
+                    &queue,
+                    &scene.world,
+                    camera,
+                    MixedDrawOptions {
+                        draw: DrawOptions {
+                            size,
+                            normal_debug: false,
+                            surface: None,
+                            timer: None,
+                        },
+                        policy: GraphTracePolicy::default(),
+                        show_analytic: true,
+                        show_fields: true,
+                        diagnostic: false,
+                        materials: Some(&scene.materials),
+                        simulation_seconds: 0.0,
+                        background: scene.background,
+                        light_direction: scene.light_direction,
+                    },
+                )
+                .unwrap();
+            capture_bmp(&device, &queue, &image, size, output).unwrap();
+        };
+        let first = folder.join("before.bmp");
+        draw(&before, &first);
+        let uploads = renderer.field_cache_stats().unwrap().node_uploads;
+        let changed = std::fs::read_to_string(&graph)
+            .unwrap()
+            .replace("\"radius\": 0.8", "\"radius\": 1.1");
+        std::fs::write(&graph, changed).unwrap();
+        let after = LabScene::load(&path).unwrap();
+        assert_ne!(
+            before.world.field_definitions()[0].revision(),
+            after.world.field_definitions()[0].revision()
+        );
+        let second = folder.join("after.bmp");
+        draw(&after, &second);
+        assert!(renderer.field_cache_stats().unwrap().node_uploads > uploads);
+        assert_ne!(
+            std::fs::read(first).unwrap(),
+            std::fs::read(second).unwrap()
+        );
+        std::fs::remove_dir_all(folder).unwrap();
+    }
 }
