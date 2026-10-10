@@ -29,12 +29,19 @@ field pixels, 552 visible rear-field pixels, 8 exhausted pixels and zero
 uncertain/ambiguous pixels. The image is derived from GPU intersections, with
 CPU lighting and composition. No mesh or voxel geometry was introduced.
 
-Seven release-profile command runs measured **213.61 ms median** and
-**274.10 ms p95** full blocking time for the 256×256 fixture on this machine.
-Each call uploads graph data and performs repeated small GPU submissions and
-readbacks; these timings combine CPU, GPU, synchronization and PPM output.
-They are not GPU compute timestamps or native frame intervals. A single
-debug-profile call took 267.28 ms. This design is a correctness reference and
+Seven release-profile command runs with 4096-ray chunks measured **213.61 ms
+median** and **274.10 ms p95** full blocking time for the 256×256 fixture on
+this machine. The later 65,536-ray bounded batch reduced submissions and
+readbacks; seven release runs measured **152.40 ms median** and **156.23 ms
+p95** (`129.33, 146.84, 156.23, 150.41, 153.12, 152.40, 154.64` ms). These
+are separate local runs, not controlled paired GPU timestamps. The resulting
+256×256 RGB image was byte-identical to the previously inspected capture; its
+5,816 analytic, 6,784 front-field, 552 rear-field and 8 exhausted pixels also
+matched. An opt-in 4097-ray test compared one call with the previous chunking
+and exercised rejection at 65,537 rays. Input and output storage sizes are
+checked against adapter limits before allocation. Each call still uploads
+graph data; timings combine CPU, GPU, synchronization and PPM output. They are
+not GPU compute timestamps or native frame intervals. Even the improved path
 is unsuitable for the interactive viewport as implemented.
 
 Unresolved work: real GPU-side depth/status composition, buffer reuse, shared

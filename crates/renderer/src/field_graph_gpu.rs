@@ -7,6 +7,8 @@ use wgpu::util::DeviceExt;
 use world_authoring::field_graph::{Graph, Node};
 use world_state::{EntityId, WorldState};
 
+const MAX_QUERY_RAYS: usize = 65_536;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct GpuConfig {
@@ -569,7 +571,7 @@ impl GraphGpuRenderer {
         if rays.is_empty() {
             return Ok(Vec::new());
         }
-        if rays.len() > 4096 {
+        if rays.len() > MAX_QUERY_RAYS {
             return Err(RenderError::InvalidInput("too many field query rays"));
         }
         let data: Vec<GpuRay> = rays
@@ -622,7 +624,7 @@ impl GraphGpuRenderer {
         world
             .validate()
             .map_err(|_| RenderError::InvalidInput("invalid world"))?;
-        if rays.len() > 4096 {
+        if rays.len() > MAX_QUERY_RAYS {
             return Err(RenderError::InvalidInput("too many field query rays"));
         }
         let mut nearest = vec![WorldFieldGpuOutcome::Miss; rays.len()];
@@ -746,8 +748,19 @@ impl GraphGpuRenderer {
         if data.is_empty() {
             return Ok(Vec::new());
         }
-        if data.len() > 4096 {
+        if data.len() > MAX_QUERY_RAYS {
             return Err(RenderError::InvalidInput("too many field query inputs"));
+        }
+        let input_bytes = std::mem::size_of_val(data) as u64;
+        let output_bytes = (data.len() * std::mem::size_of::<GpuOutcome>()) as u64;
+        if input_bytes > device.limits().max_storage_buffer_binding_size
+            || input_bytes > device.limits().max_buffer_size
+            || output_bytes > device.limits().max_storage_buffer_binding_size
+            || output_bytes > device.limits().max_buffer_size
+        {
+            return Err(RenderError::InvalidInput(
+                "field query exceeds adapter buffer limit",
+            ));
         }
         let image = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("field query dummy"),
@@ -765,14 +778,7 @@ impl GraphGpuRenderer {
         });
         let view = image.create_view(&wgpu::TextureViewDescriptor::default());
         let (group, output) = self.group(device, graph, config, &view, data)?;
-        let size = (data.len() * std::mem::size_of::<GpuOutcome>()) as u64;
-        if size > device.limits().max_buffer_size
-            || size > device.limits().max_storage_buffer_binding_size
-        {
-            return Err(RenderError::InvalidInput(
-                "field query exceeds adapter buffer limit",
-            ));
-        }
+        let size = output_bytes;
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("field query readback"),
             size,

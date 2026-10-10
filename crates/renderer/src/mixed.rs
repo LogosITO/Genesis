@@ -147,8 +147,8 @@ pub fn render_mixed_rgba(
     let scene = Scene::from_world(world)?;
     let mut rgba = Vec::with_capacity(size[0] as usize * size[1] as usize * 4);
     let mut sources = Vec::with_capacity(size[0] as usize * size[1] as usize);
-    for start in (0..size[0] * size[1]).step_by(4096) {
-        let end = (start + 4096).min(size[0] * size[1]);
+    for start in (0..size[0] * size[1]).step_by(65_536) {
+        let end = (start + 65_536).min(size[0] * size[1]);
         let rays = (start..end)
             .map(|index| camera.ray(index % size[0], index / size[0], size[0], size[1]))
             .collect::<Result<Vec<_>, _>>()?;

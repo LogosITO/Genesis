@@ -150,6 +150,68 @@ fn world_field_query_preserves_gpu_boundary_diagnostics() {
 }
 
 #[test]
+#[ignore = "requires native GPU; compare a query beyond the old 4096-ray batch limit"]
+fn world_field_large_query_preserves_chunked_outcomes() {
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        apply_limit_buckets: false,
+    }))
+    .unwrap();
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let renderer = pollster::block_on(GraphGpuRenderer::new(&device)).unwrap();
+    let mut world = WorldState::new(DeterministicSeed(93));
+    world
+        .spawn_field(
+            include_bytes!("../../../examples/field-graph/definitions/smooth-bridge.json"),
+            Transform::new(Vec3::ZERO, 1.0).unwrap(),
+        )
+        .unwrap();
+    let rays: Vec<_> = (0..4097)
+        .map(|index| {
+            Ray::new(
+                v(0.0, (index % 3) as f64 * 0.6, -6.0),
+                v(0.0, 0.0, 1.0),
+                0.001,
+                12.0,
+            )
+            .unwrap()
+        })
+        .collect();
+    let query = |rays: &[Ray]| {
+        renderer
+            .query_world_fields(
+                &device,
+                &queue,
+                &world,
+                camera(),
+                rays,
+                GraphTracePolicy::default(),
+            )
+            .unwrap()
+    };
+    let full = query(&rays);
+    let chunked: Vec<_> = rays.chunks(4096).flat_map(query).collect();
+    assert_eq!(format!("{full:?}"), format!("{chunked:?}"));
+    let oversized = vec![rays[0]; 65_537];
+    assert!(
+        renderer
+            .query_world_fields(
+                &device,
+                &queue,
+                &world,
+                camera(),
+                &oversized,
+                GraphTracePolicy::default()
+            )
+            .is_err()
+    );
+}
+
+#[test]
 #[ignore = "requires native GPU; smooth field CPU/GPU parity and real readback"]
 fn smooth_union_gpu_samples_and_pixels_match_the_cpu_model() {
     let instance = wgpu::Instance::default();
