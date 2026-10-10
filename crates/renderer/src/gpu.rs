@@ -237,7 +237,7 @@ pub struct MixedDrawOptions<'a> {
     pub light_direction: [f32; 3],
 }
 
-/// Select the native Field Graph interpreter or allow revision-scoped specialization.
+/// Select the native Field Graph interpreter or a bounded compiled evaluator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GpuFieldExecution {
     /// Interpret until a validated specialized pipeline for the current definition is ready.

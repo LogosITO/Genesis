@@ -781,12 +781,16 @@ fn multi_definition_matrix() {
                     ("interpreter", GpuFieldExecution::Interpreter, true),
                     ("auto", GpuFieldExecution::Auto, true),
                     ("structural", GpuFieldExecution::Structural, true),
+                    ("combined-direct", GpuFieldExecution::Combined, false),
                     ("combined", GpuFieldExecution::Combined, true),
                 ]
                 .into_iter()
                 .filter(|(label, _, _)| {
                     matches!(topology, "shared" | "heterogeneous")
-                        || matches!(*label, "interpreter-direct" | "interpreter" | "combined")
+                        || matches!(
+                            *label,
+                            "interpreter-direct" | "interpreter" | "combined-direct" | "combined"
+                        )
                 }) {
                     for _ in 0..3 {
                         draw(execution, guard);

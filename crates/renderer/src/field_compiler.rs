@@ -73,6 +73,7 @@ pub(crate) fn combined_field_source(graphs: &[Graph]) -> Option<String> {
         let source = structural_field_source(graph)?;
         let fragment = source.split_once(SAMPLE_BEGIN)?.1.split_once(SAMPLE_END)?.0;
         let functions = fragment.split_once("fn sample(")?.0;
+        // shortcut: reuse our generated function text; share the emitter if its format changes.
         generated.push_str(&functions.replace("gen_eval_", &format!("gen_{slot}_eval_")));
         dispatch.push_str(&format!(
             "case {slot}u: {{ return gen_{slot}_eval_{}(point); }}\n",
