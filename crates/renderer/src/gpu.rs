@@ -666,6 +666,15 @@ impl GpuRenderer {
         if execution == GpuFieldExecution::Interpreter {
             return Ok(None);
         }
+        // Exact programs inline numbers from an immutable revision; dynamic values require storage-backed compilation.
+        if execution == GpuFieldExecution::Auto
+            && world
+                .field_instances()
+                .iter()
+                .any(|item| item.morphology().is_some())
+        {
+            return Ok(None);
+        }
         let mut selected = None;
         let mut graphs = Vec::new();
         if execution == GpuFieldExecution::Combined {
@@ -1359,10 +1368,14 @@ impl GpuRenderer {
             let graph = world
                 .field_graph(instance.id())
                 .ok_or(RenderError::InvalidInput("missing field graph"))?;
-            let offset = if let Some((_, offset)) = definitions
-                .iter()
-                .find(|(revision, _)| *revision == instance.revision())
-            {
+            let shared = if instance.morphology().is_none() {
+                definitions
+                    .iter()
+                    .find(|(revision, _)| *revision == instance.revision())
+            } else {
+                None
+            };
+            let offset = if let Some((_, offset)) = shared {
                 *offset
             } else {
                 let offset = u32::try_from(nodes.len()).map_err(|_| RenderError::TooManyObjects)?;
@@ -1380,7 +1393,9 @@ impl GpuRenderer {
                     }
                 }
                 nodes.extend(graph_nodes);
-                definitions.push((instance.revision(), offset));
+                if instance.morphology().is_none() {
+                    definitions.push((instance.revision(), offset));
+                }
                 offset
             };
             let t = instance.transform();

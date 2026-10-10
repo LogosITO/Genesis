@@ -17,7 +17,8 @@ use authored::{new_instance, transformed};
 pub use body::{BodyContact, ColliderId, KinematicBody, MAX_BODY_SPEED};
 use field::transformed_bounds;
 pub use field::{
-    FieldDefinition, FieldGrowth, FieldInstance, MAX_FIELD_DEFINITIONS, MAX_FIELD_INSTANCES,
+    FieldDefinition, FieldGrowth, FieldInstance, FieldMorphology, MAX_FIELD_DEFINITIONS,
+    MAX_FIELD_INSTANCES,
 };
 pub use life::{
     CONNECTION_RADIUS_RATIO, FiniteReservoir, GrowthNode, GrowthParameters, MAX_NODE_IDS,
@@ -199,6 +200,9 @@ impl WorldState {
     /// Graph referenced by an occurrence; visual diagnostics only.
     pub fn field_graph(&self, id: EntityId) -> Option<&world_authoring::field_graph::Graph> {
         let instance = self.field_instance(id)?;
+        if let Some(graph) = instance.runtime_graph() {
+            return Some(graph);
+        }
         self.field_definitions
             .iter()
             .find(|item| item.revision() == instance.revision())?
@@ -263,7 +267,8 @@ impl WorldState {
             .position(|item| item.id() == id)
             .ok_or(WorldError::UnknownEntity)?;
         let revision = DefinitionRevision::of(source);
-        if self.field_instances[index].growth().is_some()
+        if (self.field_instances[index].growth().is_some()
+            || self.field_instances[index].morphology().is_some())
             && revision != self.field_instances[index].revision()
         {
             return Err(WorldError::InvalidStructure);
@@ -318,7 +323,8 @@ impl WorldState {
             .position(|item| item.id() == id)
             .ok_or(WorldError::UnknownEntity)?;
         let graph = self.field_graph(id).ok_or(WorldError::InvalidStructure)?;
-        if self.field_instances[index].growth().is_some()
+        if (self.field_instances[index].growth().is_some()
+            || self.field_instances[index].morphology().is_some())
             && transform.scale() != self.field_instances[index].transform().scale()
         {
             return Err(WorldError::InvalidStructure);
@@ -365,6 +371,93 @@ impl WorldState {
         )?;
         self.field_instances[index] = proposed;
         Ok(())
+    }
+    /// Enables two independently fed radii on the fixed two-lobe graph schema.
+    pub fn enable_field_morphology(
+        &mut self,
+        id: EntityId,
+        uptake: [f64; 2],
+        radius_per_unit: [f64; 2],
+        max_radii: [f64; 2],
+        feedback: bool,
+    ) -> Result<(), WorldError> {
+        let index = self
+            .field_instances
+            .iter()
+            .position(|item| item.id() == id)
+            .ok_or(WorldError::UnknownEntity)?;
+        let source = self
+            .field_definitions
+            .iter()
+            .find(|item| item.revision() == self.field_instances[index].revision())
+            .and_then(FieldDefinition::graph)
+            .ok_or(WorldError::InvalidStructure)?;
+        let initial = source
+            .two_lobe_radii()
+            .ok_or(WorldError::InvalidStructure)?;
+        let morphology =
+            FieldMorphology::new(initial, uptake, radius_per_unit, max_radii, feedback)?;
+        let mut proposed = self.field_instances[index].clone();
+        proposed.enable_morphology(morphology, source)?;
+        transformed_bounds(
+            proposed
+                .runtime_graph()
+                .ok_or(WorldError::InvalidStructure)?,
+            proposed.transform(),
+        )?;
+        self.field_instances[index] = proposed;
+        Ok(())
+    }
+    /// Applies already-accounted allocations for the two stable lobe sites.
+    pub fn grow_field_morphology(
+        &mut self,
+        id: EntityId,
+        amounts: [f64; 2],
+    ) -> Result<(), WorldError> {
+        let index = self
+            .field_instances
+            .iter()
+            .position(|item| item.id() == id)
+            .ok_or(WorldError::UnknownEntity)?;
+        let source = self
+            .field_definitions
+            .iter()
+            .find(|item| item.revision() == self.field_instances[index].revision())
+            .and_then(FieldDefinition::graph)
+            .ok_or(WorldError::InvalidStructure)?;
+        let mut proposed = self.field_instances[index].clone();
+        proposed.grow_morphology(amounts, source)?;
+        transformed_bounds(
+            proposed
+                .runtime_graph()
+                .ok_or(WorldError::InvalidStructure)?,
+            proposed.transform(),
+        )?;
+        self.field_instances[index] = proposed;
+        Ok(())
+    }
+    /// World-space outer sample site for a lobe. The ablation fixes its radius at the initial value.
+    pub fn field_morph_site(&self, id: EntityId, lobe: usize) -> Result<Vec3, WorldError> {
+        if lobe > 1 {
+            return Err(WorldError::OutOfRange);
+        }
+        let instance = self.field_instance(id).ok_or(WorldError::UnknownEntity)?;
+        let morphology = instance.morphology().ok_or(WorldError::InvalidStructure)?;
+        let radius = if morphology.feedback() {
+            morphology.radii()[lobe]
+        } else {
+            morphology.initial_radii()[lobe]
+        };
+        let local = self
+            .field_graph(id)
+            .ok_or(WorldError::InvalidStructure)?
+            .two_lobe_outer_site(lobe, radius)
+            .map_err(|_| WorldError::InvalidStructure)?;
+        instance
+            .transform()
+            .translation()
+            .checked_add(local.checked_scale(instance.transform().scale())?)
+            .map_err(Into::into)
     }
     /// Toggles visual participation without changing the graph source.
     pub fn set_field_enabled(&mut self, id: EntityId, enabled: bool) -> Result<(), WorldError> {
@@ -628,6 +721,15 @@ impl WorldState {
         for definition in &mut self.field_definitions {
             definition.rebuild()?;
         }
+        for instance in &mut self.field_instances {
+            let source = self
+                .field_definitions
+                .iter()
+                .find(|item| item.revision() == instance.revision())
+                .and_then(FieldDefinition::graph)
+                .ok_or(WorldError::InvalidStructure)?;
+            instance.rebuild_runtime_graph(source)?;
+        }
         Ok(())
     }
     /// Creates one kinematic body with a world-stable ID.
@@ -871,6 +973,23 @@ impl WorldState {
             transformed_bounds(graph, instance.transform())?;
             if let Some(growth) = instance.growth() {
                 growth.validate(instance.transform().scale())?;
+            }
+            if let Some(morphology) = instance.morphology() {
+                if instance.growth().is_some() {
+                    return Err(WorldError::InvalidStructure);
+                }
+                morphology.validate()?;
+                let source = self
+                    .field_definitions
+                    .iter()
+                    .find(|item| item.revision() == instance.revision())
+                    .and_then(FieldDefinition::graph)
+                    .ok_or(WorldError::InvalidStructure)?;
+                if source.two_lobe_radii() != Some(morphology.initial_radii())
+                    || instance.runtime_graph().is_none()
+                {
+                    return Err(WorldError::InvalidStructure);
+                }
             }
         }
         for entity in &self.entities {

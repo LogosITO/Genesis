@@ -10,6 +10,7 @@ struct Allocation {
     ratios: Vec<Vec<f64>>,
     totals: Vec<f64>,
     field_ids: Vec<EntityId>,
+    morph_ids: Vec<EntityId>,
 }
 
 // Each source allocates once across organisms. Demands are each organism's largest eligible
@@ -86,6 +87,36 @@ fn allocate_finite(
         }
         raw.push(requests);
     }
+    let morph_ids = world
+        .field_instances()
+        .iter()
+        .filter(|field| field.morphology().is_some())
+        .map(|field| field.id())
+        .collect::<Vec<_>>();
+    for id in &morph_ids {
+        let morphology = world
+            .field_instance(*id)
+            .and_then(|field| field.morphology())
+            .expect("morphology");
+        for lobe in 0..2 {
+            let site = world
+                .field_morph_site(*id, lobe)
+                .map_err(SimulationError::World)?;
+            let requests = sources
+                .iter()
+                .map(|source| {
+                    source
+                        .sample(site)
+                        .map(|sample| sample * morphology.uptake()[lobe] * step.seconds())
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(SimulationError::World)?;
+            if requests.iter().any(|value| !value.is_finite()) {
+                return Err(SimulationError::Math(spatial_math::MathError::NonFinite));
+            }
+            raw.push(requests);
+        }
+    }
     let mut demands = raw.clone();
     for (oi, organism) in world.organisms().iter().enumerate() {
         let sum: f64 = raw[oi].iter().sum();
@@ -111,6 +142,27 @@ fn allocate_finite(
         let scale = if sum > headroom { headroom / sum } else { 1.0 };
         for demand in &mut demands[row] {
             *demand *= scale;
+        }
+    }
+    let morph_offset = world.organisms().len() + field_ids.len();
+    for (field_index, id) in morph_ids.iter().enumerate() {
+        let morphology = world
+            .field_instance(*id)
+            .and_then(|field| field.morphology())
+            .expect("morphology");
+        for lobe in 0..2 {
+            let row = morph_offset + 2 * field_index + lobe;
+            let sum: f64 = raw[row].iter().sum();
+            if !sum.is_finite() {
+                return Err(SimulationError::Math(spatial_math::MathError::NonFinite));
+            }
+            let headroom = ((morphology.max_radii()[lobe] - morphology.radii()[lobe])
+                / morphology.radius_per_unit()[lobe])
+                .max(0.0);
+            let scale = if sum > headroom { headroom / sum } else { 1.0 };
+            for demand in &mut demands[row] {
+                *demand *= scale;
+            }
         }
     }
     let mut ratios = demands.clone();
@@ -145,6 +197,7 @@ fn allocate_finite(
         ratios,
         totals,
         field_ids,
+        morph_ids,
     }))
 }
 
@@ -356,6 +409,18 @@ pub fn advance_life_cached(
         for (index, id) in allocation.field_ids.iter().enumerate() {
             proposed
                 .grow_field_allocated(*id, allocation.totals[proposed.organisms().len() + index])
+                .map_err(SimulationError::World)?;
+        }
+        let offset = proposed.organisms().len() + allocation.field_ids.len();
+        for (index, id) in allocation.morph_ids.iter().enumerate() {
+            proposed
+                .grow_field_morphology(
+                    *id,
+                    [
+                        allocation.totals[offset + 2 * index],
+                        allocation.totals[offset + 2 * index + 1],
+                    ],
+                )
                 .map_err(SimulationError::World)?;
         }
     }

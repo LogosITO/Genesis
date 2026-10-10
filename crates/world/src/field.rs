@@ -28,6 +28,106 @@ pub struct FieldGrowth {
     total_allocated: f64,
     last_allocated: f64,
 }
+
+/// Two independently fed sphere radii in the fixed two-lobe graph schema.
+/// Lobe indices 0 and 1 are stable; sites may follow their outer surfaces.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FieldMorphology {
+    initial_radii: [f64; 2],
+    radii: [f64; 2],
+    max_radii: [f64; 2],
+    uptake: [f64; 2],
+    radius_per_unit: [f64; 2],
+    total_allocated: [f64; 2],
+    last_allocated: [f64; 2],
+    feedback: bool,
+}
+impl FieldMorphology {
+    pub(crate) fn new(
+        initial_radii: [f64; 2],
+        uptake: [f64; 2],
+        radius_per_unit: [f64; 2],
+        max_radii: [f64; 2],
+        feedback: bool,
+    ) -> Result<Self, WorldError> {
+        let state = Self {
+            initial_radii,
+            radii: initial_radii,
+            max_radii,
+            uptake,
+            radius_per_unit,
+            total_allocated: [0.0; 2],
+            last_allocated: [0.0; 2],
+            feedback,
+        };
+        state.validate()?;
+        Ok(state)
+    }
+    /// Current validated local-space radii.
+    pub fn radii(&self) -> [f64; 2] {
+        self.radii
+    }
+    /// Initial local-space radii, also used by the no-feedback ablation.
+    pub fn initial_radii(&self) -> [f64; 2] {
+        self.initial_radii
+    }
+    /// Per-lobe resource demand multipliers.
+    pub fn uptake(&self) -> [f64; 2] {
+        self.uptake
+    }
+    /// Radius gained per allocated source unit.
+    pub fn radius_per_unit(&self) -> [f64; 2] {
+        self.radius_per_unit
+    }
+    /// Upper local-space radius limits.
+    pub fn max_radii(&self) -> [f64; 2] {
+        self.max_radii
+    }
+    /// Cumulative allocations for each stable lobe.
+    pub fn total_allocated(&self) -> [f64; 2] {
+        self.total_allocated
+    }
+    /// Last completed tick's allocations for each stable lobe.
+    pub fn last_allocated(&self) -> [f64; 2] {
+        self.last_allocated
+    }
+    /// Whether environmental sampling follows the current lobe surfaces.
+    pub fn feedback(&self) -> bool {
+        self.feedback
+    }
+    pub(crate) fn validate(&self) -> Result<(), WorldError> {
+        for i in 0..2 {
+            let values = [
+                self.initial_radii[i],
+                self.radii[i],
+                self.max_radii[i],
+                self.uptake[i],
+                self.radius_per_unit[i],
+                self.total_allocated[i],
+                self.last_allocated[i],
+            ];
+            if values.iter().any(|v| !v.is_finite())
+                || !(0.1..=2.0).contains(&self.initial_radii[i])
+                || !(self.initial_radii[i]..=2.0).contains(&self.max_radii[i])
+                || !(0.0..=100.0).contains(&self.uptake[i])
+                || !(0.001..=10.0).contains(&self.radius_per_unit[i])
+                || self.total_allocated[i] < 0.0
+                || self.total_allocated[i]
+                    > (self.max_radii[i] - self.initial_radii[i]) / self.radius_per_unit[i] + 1e-9
+                || !(0.0..=self.total_allocated[i]).contains(&self.last_allocated[i])
+                || (self.radii[i]
+                    - (self.initial_radii[i] + self.total_allocated[i] * self.radius_per_unit[i])
+                        .min(self.max_radii[i]))
+                .abs()
+                    > 1e-10
+            {
+                return Err(WorldError::InvalidStructure);
+            }
+        }
+        Ok(())
+    }
+}
 impl FieldGrowth {
     /// Validates a bounded conversion from resource units to uniform field scale.
     pub fn new(
@@ -152,7 +252,7 @@ impl FieldDefinition {
 }
 
 /// Stable visual occurrence. It has no gameplay collision capability.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldInstance {
     id: EntityId,
@@ -162,6 +262,21 @@ pub struct FieldInstance {
     generation: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     growth: Option<FieldGrowth>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    morphology: Option<FieldMorphology>,
+    #[serde(skip)]
+    runtime_graph: Option<Arc<Graph>>,
+}
+impl PartialEq for FieldInstance {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.revision == other.revision
+            && self.transform == other.transform
+            && self.enabled == other.enabled
+            && self.generation == other.generation
+            && self.growth == other.growth
+            && self.morphology == other.morphology
+    }
 }
 impl FieldInstance {
     /// World-stable ID, never reused after removal.
@@ -188,6 +303,13 @@ impl FieldInstance {
     pub fn growth(&self) -> Option<&FieldGrowth> {
         self.growth.as_ref()
     }
+    /// Optional bounded two-lobe morphology; visual only.
+    pub fn morphology(&self) -> Option<&FieldMorphology> {
+        self.morphology.as_ref()
+    }
+    pub(crate) fn runtime_graph(&self) -> Option<&Graph> {
+        self.runtime_graph.as_deref()
+    }
     pub(crate) fn new(id: EntityId, revision: DefinitionRevision, transform: Transform) -> Self {
         Self {
             id,
@@ -196,6 +318,8 @@ impl FieldInstance {
             enabled: true,
             generation: 0,
             growth: None,
+            morphology: None,
+            runtime_graph: None,
         }
     }
     pub(crate) fn set_revision(&mut self, revision: DefinitionRevision) -> Result<(), WorldError> {
@@ -229,7 +353,10 @@ impl FieldInstance {
         Ok(())
     }
     pub(crate) fn enable_growth(&mut self, growth: FieldGrowth) -> Result<(), WorldError> {
-        if self.growth.is_some() || growth.initial_scale != self.transform.scale() {
+        if self.growth.is_some()
+            || self.morphology.is_some()
+            || growth.initial_scale != self.transform.scale()
+        {
             return Err(WorldError::InvalidStructure);
         }
         self.generation = self
@@ -237,6 +364,75 @@ impl FieldInstance {
             .checked_add(1)
             .ok_or(WorldError::IdExhausted)?;
         self.growth = Some(growth);
+        Ok(())
+    }
+    pub(crate) fn enable_morphology(
+        &mut self,
+        morphology: FieldMorphology,
+        source: &Graph,
+    ) -> Result<(), WorldError> {
+        if self.growth.is_some() || self.morphology.is_some() {
+            return Err(WorldError::InvalidStructure);
+        }
+        let graph = source
+            .with_two_lobe_radii(morphology.radii())
+            .map_err(|_| WorldError::InvalidStructure)?;
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(WorldError::IdExhausted)?;
+        self.runtime_graph = Some(Arc::new(graph));
+        self.morphology = Some(morphology);
+        Ok(())
+    }
+    pub(crate) fn grow_morphology(
+        &mut self,
+        amounts: [f64; 2],
+        source: &Graph,
+    ) -> Result<(), WorldError> {
+        let morphology = self
+            .morphology
+            .as_mut()
+            .ok_or(WorldError::InvalidStructure)?;
+        let prior_radii = morphology.radii;
+        for (i, amount) in amounts.into_iter().enumerate() {
+            let remaining = ((morphology.max_radii[i] - morphology.radii[i])
+                / morphology.radius_per_unit[i])
+                .max(0.0);
+            if !amount.is_finite() || amount < 0.0 || amount > remaining + 1e-12 {
+                return Err(WorldError::OutOfRange);
+            }
+            morphology.total_allocated[i] += amount;
+            morphology.last_allocated[i] = amount;
+            morphology.radii[i] = (morphology.initial_radii[i]
+                + morphology.total_allocated[i] * morphology.radius_per_unit[i])
+                .min(morphology.max_radii[i]);
+        }
+        morphology.validate()?;
+        if morphology.radii != prior_radii {
+            let graph = source
+                .with_two_lobe_radii(morphology.radii())
+                .map_err(|_| WorldError::InvalidStructure)?;
+            self.generation = self
+                .generation
+                .checked_add(1)
+                .ok_or(WorldError::IdExhausted)?;
+            self.runtime_graph = Some(Arc::new(graph));
+        }
+        Ok(())
+    }
+    pub(crate) fn rebuild_runtime_graph(&mut self, source: &Graph) -> Result<(), WorldError> {
+        self.runtime_graph = match &self.morphology {
+            Some(morphology) => {
+                morphology.validate()?;
+                Some(Arc::new(
+                    source
+                        .with_two_lobe_radii(morphology.radii())
+                        .map_err(|_| WorldError::InvalidStructure)?,
+                ))
+            }
+            None => None,
+        };
         Ok(())
     }
     pub(crate) fn grow_allocated(&mut self, amount: f64) -> Result<(), WorldError> {

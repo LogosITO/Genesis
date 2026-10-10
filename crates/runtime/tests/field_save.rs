@@ -5,6 +5,7 @@ use world_simulation::SimulationStep;
 use world_state::{DeterministicSeed, WorldState};
 
 const TWIN: &[u8] = include_bytes!("../../../examples/field-graph/definitions/twin.json");
+const MORPH: &[u8] = include_bytes!("../../../examples/field-graph/definitions/morph-lobes.json");
 
 #[test]
 fn field_world_round_trip_and_tamper_rejection() {
@@ -83,4 +84,33 @@ fn dynamic_field_requires_v8_and_survives_repeated_save_load() {
     let before = runtime.clone();
     assert!(runtime.load_into(&corrupt).is_err());
     assert_eq!(runtime, before);
+}
+
+#[test]
+fn two_lobe_morphology_requires_v9_and_rebuilds_exact_source() {
+    let mut world = WorldState::new(DeterministicSeed(86));
+    let id = world.spawn_field(MORPH, Transform::identity()).unwrap();
+    world
+        .enable_field_morphology(id, [1.0, 0.8], [0.2, 0.3], [1.2, 1.2], true)
+        .unwrap();
+    world.grow_field_morphology(id, [0.5, 0.25]).unwrap();
+    let runtime = Runtime::new(world, SimulationStep::new(0.1).unwrap());
+    let saved = runtime.save_bytes().unwrap();
+    let mut json: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(json["format_version"], 9);
+    let mut loaded = Runtime::load_bytes(&saved).unwrap();
+    assert_eq!(loaded, runtime);
+    assert_eq!(loaded.world().field_definitions()[0].source(), MORPH);
+    for _ in 0..3 {
+        loaded = Runtime::load_bytes(&loaded.save_bytes().unwrap()).unwrap();
+    }
+    assert_eq!(loaded, runtime);
+    json["format_version"] = 8.into();
+    assert!(Runtime::load_bytes(&serde_json::to_vec(&json).unwrap()).is_err());
+    json["format_version"] = 9.into();
+    json["runtime"]["world"]["field_instances"][0]["morphology"]["radii"][0] = (-1.0).into();
+    let corrupt = serde_json::to_vec(&json).unwrap();
+    let before = loaded.clone();
+    assert!(loaded.load_into(&corrupt).is_err());
+    assert_eq!(loaded, before);
 }

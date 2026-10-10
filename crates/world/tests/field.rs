@@ -3,6 +3,7 @@ use spatial_math::{Transform, Vec3};
 use world_state::{DeterministicSeed, MAX_FIELD_INSTANCES, WorldError, WorldState};
 
 const TWIN: &[u8] = include_bytes!("../../../examples/field-graph/definitions/twin.json");
+const MORPH: &[u8] = include_bytes!("../../../examples/field-graph/definitions/morph-lobes.json");
 const PLINTH: &[u8] = include_bytes!("../../../examples/field-graph/definitions/plinth.json");
 
 fn v(x: f64, y: f64, z: f64) -> Vec3 {
@@ -148,5 +149,31 @@ fn resource_growth_changes_field_scale_without_rewriting_definition() {
     );
     assert!(world.enable_field_growth(id, 1.0, 0.4, 0.8).is_err());
     assert_eq!(world, valid);
+    world.validate().unwrap();
+}
+
+#[test]
+fn two_lobe_morphology_updates_cpu_field_bounds_and_sites_atomically() {
+    let mut world = WorldState::new(DeterministicSeed(85));
+    let id = world.spawn_field(MORPH, Transform::identity()).unwrap();
+    let source = world.field_definitions()[0].source().to_vec();
+    let revision = world.field_instance(id).unwrap().revision();
+    world
+        .enable_field_morphology(id, [1.0, 0.5], [0.2, 0.4], [1.2, 1.2], true)
+        .unwrap();
+    let before = world.field_bounds(id).unwrap();
+    let site = world.field_morph_site(id, 0).unwrap();
+    world.grow_field_morphology(id, [0.5, 0.25]).unwrap();
+    let morphology = world.field_instance(id).unwrap().morphology().unwrap();
+    assert_eq!(morphology.radii(), [0.6, 0.6]);
+    assert!(world.field_bounds(id).unwrap().min.x() < before.min.x());
+    assert!(world.field_morph_site(id, 0).unwrap().x() < site.x());
+    assert_eq!(world.field_instance(id).unwrap().revision(), revision);
+    assert_eq!(world.field_definitions()[0].source(), source);
+    let stable = world.clone();
+    assert!(world.grow_field_morphology(id, [f64::NAN, 0.0]).is_err());
+    assert!(world.grow_field_morphology(id, [10.0, 0.0]).is_err());
+    assert!(world.replace_field(id, TWIN).is_err());
+    assert_eq!(world, stable);
     world.validate().unwrap();
 }

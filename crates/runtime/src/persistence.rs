@@ -11,7 +11,7 @@ use std::{
 
 /// Maximum encoded save size, in bytes.
 pub const MAX_SAVE_BYTES: usize = 2 * 1024 * 1024;
-const FORMAT_VERSION: u32 = 8;
+const FORMAT_VERSION: u32 = 9;
 
 /// Save and load failure; a failed load leaves an existing runtime unchanged.
 #[derive(Debug)]
@@ -52,7 +52,7 @@ struct SaveFile {
 }
 
 impl Runtime {
-    /// Encodes version 8 when dynamic fields exist; legacy worlds retain version-7 bytes.
+    /// Encodes v9 for two-lobe morphology, v8 for uniform growth, or v7 otherwise.
     /// JSON is for inspection, not a stable public API.
     pub fn save_bytes(&self) -> Result<Vec<u8>, PersistenceError> {
         self.validate()?;
@@ -61,9 +61,16 @@ impl Runtime {
                 .world
                 .field_instances()
                 .iter()
-                .any(|instance| instance.growth().is_some())
+                .any(|instance| instance.morphology().is_some())
             {
                 FORMAT_VERSION
+            } else if self
+                .world
+                .field_instances()
+                .iter()
+                .any(|instance| instance.growth().is_some())
+            {
+                8
             } else {
                 7
             },
@@ -122,6 +129,18 @@ impl Runtime {
         {
             return Err(PersistenceError::InvalidState(
                 "dynamic field growth requires v8",
+            ));
+        }
+        if save.format_version < 9
+            && save
+                .runtime
+                .world
+                .field_instances()
+                .iter()
+                .any(|instance| instance.morphology().is_some())
+        {
+            return Err(PersistenceError::InvalidState(
+                "two-lobe morphology requires v9",
             ));
         }
         if save.format_version < 3 {

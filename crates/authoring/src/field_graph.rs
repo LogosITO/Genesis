@@ -227,6 +227,79 @@ impl Graph {
         self.gradient_node(self.root as usize, point)
     }
 
+    /// Derives numerical parameters for the bounded two-sphere union schema.
+    /// The exact source revision and operation topology are retained.
+    pub fn with_two_lobe_radii(&self, radii: [f64; 2]) -> Result<Self, AuthoringError> {
+        if radii
+            .iter()
+            .any(|r| !r.is_finite() || !(0.1..=2.0).contains(r))
+            || self.two_lobe_radii().is_none()
+        {
+            return Err(AuthoringError::Invalid("two-lobe parameter schema"));
+        }
+        let mut graph = self.clone();
+        graph.nodes[0] = Node::Sphere(
+            Sphere::new(radii[0]).map_err(|_| AuthoringError::Invalid("left radius"))?,
+        );
+        graph.nodes[2] = Node::Sphere(
+            Sphere::new(radii[1]).map_err(|_| AuthoringError::Invalid("right radius"))?,
+        );
+        let [
+            Node::Translate { offset: left, .. },
+            Node::Translate { offset: right, .. },
+        ] = [&graph.nodes[1], &graph.nodes[3]]
+        else {
+            unreachable!("schema checked above")
+        };
+        let l = Vec3::new(radii[0], radii[0], radii[0]).unwrap();
+        let r = Vec3::new(radii[1], radii[1], radii[1]).unwrap();
+        graph.bounds = Bounds {
+            min: vec_min(
+                outward_vec(l.negated(), *left, false, false)?,
+                outward_vec(r.negated(), *right, false, false)?,
+            )?,
+            max: vec_max(
+                outward_vec(l, *left, false, true)?,
+                outward_vec(r, *right, false, true)?,
+            )?,
+        };
+        Ok(graph)
+    }
+
+    /// Radii for the fixed two-sphere union schema, if the graph matches it.
+    pub fn two_lobe_radii(&self) -> Option<[f64; 2]> {
+        match self.nodes.as_slice() {
+            [
+                Node::Sphere(a),
+                Node::Translate { child: 0, .. },
+                Node::Sphere(b),
+                Node::Translate { child: 2, .. },
+                Node::Union { left: 1, right: 3 },
+            ] if self.root == 4 => Some([a.radius(), b.radius()]),
+            _ => None,
+        }
+    }
+    /// Local point at the outward x-axis of a lobe; a bounded sampling site,
+    /// not a certified closest point on an arbitrary implicit surface.
+    pub fn two_lobe_outer_site(&self, lobe: usize, radius: f64) -> Result<Vec3, AuthoringError> {
+        if self.two_lobe_radii().is_none()
+            || lobe > 1
+            || !radius.is_finite()
+            || !(0.1..=2.0).contains(&radius)
+        {
+            return Err(AuthoringError::Invalid("two-lobe sample site"));
+        }
+        let Node::Translate { offset, .. } = self.nodes[1 + 2 * lobe] else {
+            unreachable!("schema checked")
+        };
+        Vec3::new(
+            offset.x() + if lobe == 0 { -radius } else { radius },
+            offset.y(),
+            offset.z(),
+        )
+        .map_err(|_| AuthoringError::Geometry("two-lobe sample site"))
+    }
+
     fn gradient_node(&self, index: usize, point: Vec3) -> Result<Gradient, MathError> {
         match self.nodes[index] {
             Node::Sphere(s) => s.gradient(point),
@@ -625,6 +698,22 @@ pub fn trace(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_lobe_parameters_preserve_revision_and_expand_bounds() {
+        let source = include_bytes!("../../../examples/field-graph/definitions/twin.json");
+        let graph = compile_json(source).unwrap();
+        // The legacy graph shares one sphere node, so it is not this schema.
+        assert!(graph.with_two_lobe_radii([0.5, 0.8]).is_err());
+        let source = br#"{"format_version":1,"id":"morph","root":"shape","nodes":[{"op":"sphere","id":"a","radius":0.5},{"op":"translate","id":"left","child":"a","offset":[-0.65,0,0]},{"op":"sphere","id":"b","radius":0.5},{"op":"translate","id":"right","child":"b","offset":[0.65,0,0]},{"op":"union","id":"shape","left":"left","right":"right"}]}"#;
+        let graph = compile_json(source).unwrap();
+        let changed = graph.with_two_lobe_radii([0.7, 1.1]).unwrap();
+        assert_eq!(changed.revision(), graph.revision());
+        assert!(changed.bounds().min.x() < graph.bounds().min.x());
+        assert!(changed.bounds().max.x() > graph.bounds().max.x());
+        assert!(changed.sample(Vec3::new(1.6, 0.0, 0.0).unwrap()).unwrap() < 0.2);
+        assert!(graph.with_two_lobe_radii([f64::NAN, 1.0]).is_err());
+    }
     use analytic_field::Field;
     fn v(x: f64, y: f64, z: f64) -> Vec3 {
         Vec3::new(x, y, z).unwrap()
