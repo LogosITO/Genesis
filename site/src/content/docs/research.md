@@ -38,3 +38,5 @@ The [Foundation 0.12 field-graph experiment](../reference/research/foundation-01
 [Living World 2](../reference/research/living-world-2/) connects a world-owned implicit Field Graph organism to the same finite resource economy and reports A/B replay, real mixed GPU readbacks, compiler reuse, and local performance limits.
 
 [Living World 3](../reference/research/living-world-3/) tests two independent world-owned radii, surface-derived resource sampling, shared allocation effects on neighbors, native event replay, and independent union-of-spheres GPU ray checks.
+
+[Living World 4](../reference/research/living-world-4/) evaluates shared authored parameter rules across sphere and box graphs, actual native mixed hit identity and depth readback, deterministic replay, and a small fixed feedback experiment matrix.

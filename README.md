@@ -65,6 +65,8 @@ Two organisms with different growth strategies share finite resources. The exper
 
 **Living World 3** adds two independently growing implicit sphere radii whose moving surface sites sample the same finite resources as neighboring organisms. Run `cargo run --release -p first-light --locked -- --living-morph` for the native view, `--living-morph-experiment` for the reproducible CPU A/B experiment, or `--living-morph-replay PATH` for an exported F6 history bundle. See the [guide](docs/guides/living-world.md) and [research record](docs/research/living-world-3.md). The field is visual only; this is a bounded research model.
 
+**Living World 4** adds world-owned, validated sphere-radius and box-extent channels bound to authored Field Graph nodes. The checked-in two-definition scene runs with `cargo run --release -p first-light --locked -- --living-rules`; `--living-rules-experiment` prints repeatable A/B, ablation and fixed-variant results without a GPU. An external scene loads with `--living-rules-scene PATH`. See the [authoring guide](docs/guides/living-world.md) and [research record](docs/research/living-world-4.md). This remains experimental visual geometry, without physical collision authority.
+
 Inspect an external mathematical definition on the CPU, then display it as analytic capsules:
 
 ```sh

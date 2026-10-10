@@ -1,4 +1,17 @@
-# World persistence versions 7–9
+# World persistence versions 7–10
+
+Living World 4 writes `format_version: 10` only when an occurrence owns generic
+`FieldParameters`. The completed snapshot retains each ordered binding, rule,
+initial/current value, allocation counters, and parameter-state revision. The
+immutable exact-byte Field Graph source and SHA-256 definition revision remain
+separate. Loading checks the parameter schema, source binding and ledger
+consistency, then rebuilds the derived graph and bounds. A v7–v9 file claiming
+generic parameter state is rejected. Worlds without it keep their previous
+version selection. Runtime channel revisions are not definition revisions.
+
+The existing F6 initial-snapshot-plus-event-history bundle also accepts v10
+initial states. F5/F9 remain completed-state snapshots. Replaying events on a
+completed F5 state is invalid; a fresh replay starts from the initial snapshot.
 
 Living World 3 writes `format_version: 9` when a field occurrence owns bounded
 two-lobe `FieldMorphology`. The snapshot stores the current and initial radii,
@@ -44,7 +57,23 @@ fields have no contact or gameplay authority.
 
 ## Decision
 
-`world-runtime` writes a JSON envelope with the runtime state. It reads valid versions 1–9. For version 1, missing `max_children` defaults to 2 and missing shared `budget` defaults to zero. For versions 1 and 2, the former dense node allocation count becomes `next_node_id`; their nodes, parents, and energy remain intact. Versions 3–9 require a valid explicit `next_node_id` and may contain gaps after pruning. Older saves without a kinematic body load with `body: None`. Versions 1–4 have unlimited sources without a reservoir; a finite reservoir mislabeled as an older version is rejected. Versions 1–5 have no authored world instances; authored definitions, occurrences or events mislabeled as an older version are rejected. Older runtimes are not expected to read new format versions. State includes fixed step, completed tick, seed, monotonic world ID allocator, sphere entities, organisms and sources, finite source ledgers where present, optional kinematic body state and last contact, shared exact-byte authored definitions and occurrence records, shared visual field definitions and occurrence records, pending typed events including authored updates, and next event order. The format is inspectable but not a stable public interchange API.
+`world-runtime` writes a JSON envelope with the runtime state. It reads valid
+versions 1–10. For version 1, missing `max_children` defaults to 2 and missing
+shared `budget` defaults to zero. For versions 1 and 2, the former dense node
+allocation count becomes `next_node_id`; their nodes, parents, and energy
+remain intact. Versions 3–10 require a valid explicit `next_node_id` and may
+contain gaps after pruning. Older saves without a kinematic body load with
+`body: None`. Versions 1–4 have unlimited sources without a reservoir; a
+finite reservoir mislabeled as an older version is rejected. Versions 1–5
+have no authored world instances; authored definitions, occurrences or events
+mislabeled as an older version are rejected. Older runtimes are not expected
+to read new format versions. State includes fixed step, completed tick, seed,
+monotonic world ID allocator, sphere entities, organisms and sources, finite
+source ledgers where present, optional kinematic body state and last contact,
+shared exact-byte authored definitions and occurrence records, shared visual
+field definitions and occurrence records, pending typed events including
+authored updates, and next event order. The format is inspectable but not a
+stable public interchange API.
 
 Input is limited to 2 MiB before parsing; each authored definition is separately bounded to 65,536 source bytes and each field graph to 16,384 bytes. Unknown fields, malformed JSON, unsupported versions, nonfinite or invalid numeric state, duplicate world IDs, invalid authored or field hashes or semantics, dangling definition references, missing or forward node parents, cycles, excess children, invalid budget or lifetime allocator, exhausted capacities, and invalid or conflicting pending events are rejected. Gaps in world IDs are allowed after occurrence removal, but IDs are never reused. Loading constructs a complete candidate, recompiles each distinct authored and field revision, migrates only older supported versions, validates it, then returns or replaces state; a failed `load_into` leaves the current runtime untouched. Exact `f64` JSON round trips use Serde JSON's `float_roundtrip` parser feature.
 

@@ -1,6 +1,6 @@
 # Bounded implicit field graph v1
 
-**Status: experimental / research stage.** `WorldState` now owns visual field instances, but they do not participate in contact, growth, picking or The Passage. The isolated CPU/GPU graph preview and analytic direct/BVH renderer remain available.
+**Status: experimental / research stage.** `WorldState` owns visual field instances. Some participate in finite-resource growth, but they do not gain contact, picking or The Passage authority. The isolated CPU/GPU graph preview and analytic direct/BVH renderer remain available.
 
 ## Source and validation
 
@@ -18,6 +18,24 @@ The external representation is JSON with `format_version: 1`, a logical `id`, a 
 The source is at most 16 KiB. At most 32 distinct nodes, depth 12, and 64 expanded node visits per sample are accepted. Invalid references, cycles, unreachable nodes, excessive work, invalid numeric ranges, nonfinite values, and unsupported versions fail before the graph is returned. Primitive sizes, scales and smooth widths are in `[0.01,100]`; each offset and box half-extent component has absolute value at most 1000, with positive box extents at least 0.01. Derived bounds must fit `[-10000,10000]` on each axis. `Source` and node variants deny unknown JSON fields. SHA-256 identifies exact source bytes, including whitespace. The logical ID is not a hash or path. No source code or shader is accepted.
 
 Example files: `examples/field-graph/definitions/twin.json` and `examples/field-graph/definitions/plinth.json`. The same executable reads both.
+
+### Bounded runtime components (Living World 4)
+
+An occurrence may bind at most four sphere-radius or box-half-extent
+components by authored node ID. The exact source bytes, definition revision
+and operation topology remain unchanged; `WorldState` owns current numeric
+values, ordered resource rules and a separate parameter revision. Authored
+defaults and current values are within `[0.1,2]` for this research path,
+which is narrower than the static graph parser's primitive range. Duplicate
+bindings, wrong node types, ambiguous sampling paths and invalid numbers are
+rejected. Applying values derives a new CPU graph and recomputes outward
+bounds; GPU node storage is refreshed from that derived graph. A dynamic
+occurrence cannot share numeric GPU nodes with another occurrence merely
+because source bytes match. Structural and Combined shaders read current
+numbers from storage, while `Auto` uses interpreter fallback for such
+occurrences. These parameters remain visual and do not authorize contacts.
+The [authoring guide](../guides/living-world.md) specifies the bounded rule
+and sampling-site vocabulary.
 
 ## Mathematical semantics
 
@@ -180,7 +198,8 @@ The graph definition itself has no world identity or collision authority. `World
 retains exact-byte definitions and distinct visual occurrences with stable
 `EntityId`, transform, enabled state and generation. Up to four graph revisions
 and eight occurrences are supported. Definitions share one compiled graph;
-version-7 saves persist source bytes and revision, then recompile on load. CPU
+version-7 static saves persist source bytes and revision, then recompile on load;
+dynamic growth selects versions 8–10 according to its authoritative state. CPU
 instance sampling and outward-derived bounds are read-only diagnostics. The GPU
 query path transforms rays to each visible graph's local coordinates and chooses
 the nearest displayed hit; uncertainty and exhaustion remain explicit. The

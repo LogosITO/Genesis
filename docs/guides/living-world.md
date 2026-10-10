@@ -106,3 +106,62 @@ same deterministic A/B rule without a GPU, use `--living-morph-experiment`;
 `--living-morph-measure` reports local CPU timing. See the
 [Living World 3 research record](../research/living-world-3.md) for results,
 numerical limits, and the tested GPU path.
+
+## Living World 4: authoring two evolving mathematical forms
+
+Run `cargo run --release -p first-light --locked -- --living-rules` for the
+checked-in scene or `--living-rules-experiment` for the GPU-free fixed A/B and
+ablation suite. The scene file is
+`examples/first-light/scenes/living-world-4.json`. Its two sibling Field Graphs
+are `morph-lobes.json` and `canopy-box.json`. Copy all three files plus
+`living-world.json` into one directory before editing, then run:
+
+```text
+cargo run --release -p first-light --locked -- --living-rules-scene PATH
+```
+
+The bounded scene schema is `format_version: 1`, one `base_scene` file name,
+and exactly two `fields`. Each field has a sibling `definition` file name,
+world `position`, positive uniform `scale`, and one to four `rules`. A rule
+names an authored graph node and component, then sets `uptake`,
+`gain_per_unit`, `maximum`, `positive_site`, and `feedback`. For example:
+
+```json
+{
+  "binding": { "node": "body", "component": "box_half_x" },
+  "uptake": 1.1,
+  "gain_per_unit": 0.26,
+  "maximum": 1.1,
+  "positive_site": true,
+  "feedback": true
+}
+```
+
+Supported components are `sphere_radius` and `box_half_x`, `box_half_y`,
+`box_half_z`. They bind to a sphere radius or one box half extent in the
+validated graph. The authored starting component must be within `[0.1, 2]`;
+`maximum` must be at least that value and no greater than 2. `uptake` is
+`[0, 100]`, `gain_per_unit` is `[0.001, 10]`. Each source requests
+`source.sample(site) × uptake × fixed_step_seconds`; headroom limits demand
+before the existing shared finite-stock allocator distributes it. Allocated
+units increase the authoritative parameter up to `maximum`. The sample site
+is the chosen positive or negative primitive-axis feature point, transformed
+through a unique graph path and then the occurrence transform. `feedback:
+false` holds that site at its authored initial location while growth proceeds.
+An internal union feature is not guaranteed to lie on the final exposed
+surface; this is a proximity sampling rule, not a physical contact model.
+
+Only plain sibling file names are accepted, with no directory escape. File
+limits are 64 KiB for the scene and 16 KiB per graph. Invalid JSON, missing
+files, unsupported node/component pairs, duplicate channels and invalid
+numbers reject the entire reload. Press **R** to reload an external scene;
+the running world remains intact if validation fails. **M** moves the first
+finite resource source on the next tick. **F5** writes a completed v10 state,
+**F9** reloads the last save in this session, and **F6** exports the initial
+state plus applied events for replay with `--living-morph-replay PATH`. A
+completed save after restart loads with `--living-load PATH`. These operations
+use the same `WorldState` and simulation as the earlier Living World stages.
+The history command and bundle `kind` retain their Living World 3 names for
+compatibility; their loader also validates v10 parameter worlds.
+See the [Living World 4 research record](../research/living-world-4.md) for
+measured results and limits.
