@@ -11,7 +11,7 @@ use std::{
 
 /// Maximum encoded save size, in bytes.
 pub const MAX_SAVE_BYTES: usize = 2 * 1024 * 1024;
-const FORMAT_VERSION: u32 = 7;
+const FORMAT_VERSION: u32 = 8;
 
 /// Save and load failure; a failed load leaves an existing runtime unchanged.
 #[derive(Debug)]
@@ -52,11 +52,21 @@ struct SaveFile {
 }
 
 impl Runtime {
-    /// Encodes a validated version-7 save. JSON is for inspection, not a stable public API.
+    /// Encodes version 8 when dynamic fields exist; legacy worlds retain version-7 bytes.
+    /// JSON is for inspection, not a stable public API.
     pub fn save_bytes(&self) -> Result<Vec<u8>, PersistenceError> {
         self.validate()?;
         let bytes = serde_json::to_vec_pretty(&SaveFile {
-            format_version: FORMAT_VERSION,
+            format_version: if self
+                .world
+                .field_instances()
+                .iter()
+                .any(|instance| instance.growth().is_some())
+            {
+                FORMAT_VERSION
+            } else {
+                7
+            },
             runtime: self.clone(),
         })?;
         if bytes.len() > MAX_SAVE_BYTES {
@@ -101,6 +111,18 @@ impl Runtime {
                 || !save.runtime.world.field_instances().is_empty())
         {
             return Err(PersistenceError::InvalidState("visual fields require v7"));
+        }
+        if save.format_version < 8
+            && save
+                .runtime
+                .world
+                .field_instances()
+                .iter()
+                .any(|instance| instance.growth().is_some())
+        {
+            return Err(PersistenceError::InvalidState(
+                "dynamic field growth requires v8",
+            ));
         }
         if save.format_version < 3 {
             save.runtime.world.migrate_legacy_node_ids();

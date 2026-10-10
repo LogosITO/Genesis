@@ -44,3 +44,43 @@ fn field_world_round_trip_and_tamper_rejection() {
         empty
     );
 }
+
+#[test]
+fn dynamic_field_requires_v8_and_survives_repeated_save_load() {
+    let mut world = WorldState::new(DeterministicSeed(84));
+    let id = world
+        .spawn_field(TWIN, Transform::new(spatial_math::Vec3::ZERO, 0.4).unwrap())
+        .unwrap();
+    world.enable_field_growth(id, 1.0, 0.4, 0.8).unwrap();
+    world.grow_field_allocated(id, 0.25).unwrap();
+    let revision = world.field_instance(id).unwrap().revision();
+    let mut runtime = Runtime::new(world, SimulationStep::new(0.1).unwrap());
+    let saved = runtime.save_bytes().unwrap();
+    let mut json: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(json["format_version"], 8);
+    for _ in 0..3 {
+        runtime = Runtime::load_bytes(&runtime.save_bytes().unwrap()).unwrap();
+        assert_eq!(
+            runtime.world().field_instance(id).unwrap().revision(),
+            revision
+        );
+    }
+    assert_eq!(
+        runtime
+            .world()
+            .field_instance(id)
+            .unwrap()
+            .growth()
+            .unwrap()
+            .total_allocated(),
+        0.25
+    );
+    json["format_version"] = 7.into();
+    assert!(Runtime::load_bytes(&serde_json::to_vec(&json).unwrap()).is_err());
+    json["format_version"] = 8.into();
+    json["runtime"]["world"]["field_instances"][0]["growth"]["total_allocated"] = (-1.0).into();
+    let corrupt = serde_json::to_vec(&json).unwrap();
+    let before = runtime.clone();
+    assert!(runtime.load_into(&corrupt).is_err());
+    assert_eq!(runtime, before);
+}

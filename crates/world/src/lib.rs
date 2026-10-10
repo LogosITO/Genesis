@@ -16,7 +16,9 @@ pub use authored::{
 use authored::{new_instance, transformed};
 pub use body::{BodyContact, ColliderId, KinematicBody, MAX_BODY_SPEED};
 use field::transformed_bounds;
-pub use field::{FieldDefinition, FieldInstance, MAX_FIELD_DEFINITIONS, MAX_FIELD_INSTANCES};
+pub use field::{
+    FieldDefinition, FieldGrowth, FieldInstance, MAX_FIELD_DEFINITIONS, MAX_FIELD_INSTANCES,
+};
 pub use life::{
     CONNECTION_RADIUS_RATIO, FiniteReservoir, GrowthNode, GrowthParameters, MAX_NODE_IDS,
     MAX_NODES, MAX_ORGANISMS, MAX_SOURCES, MAX_SPHERES, Organism, OrganismLifecycle,
@@ -261,6 +263,11 @@ impl WorldState {
             .position(|item| item.id() == id)
             .ok_or(WorldError::UnknownEntity)?;
         let revision = DefinitionRevision::of(source);
+        if self.field_instances[index].growth().is_some()
+            && revision != self.field_instances[index].revision()
+        {
+            return Err(WorldError::InvalidStructure);
+        }
         let existing = self
             .field_definitions
             .iter()
@@ -311,9 +318,51 @@ impl WorldState {
             .position(|item| item.id() == id)
             .ok_or(WorldError::UnknownEntity)?;
         let graph = self.field_graph(id).ok_or(WorldError::InvalidStructure)?;
+        if self.field_instances[index].growth().is_some()
+            && transform.scale() != self.field_instances[index].transform().scale()
+        {
+            return Err(WorldError::InvalidStructure);
+        }
         transformed_bounds(graph, transform)?;
         let mut proposed = self.field_instances[index].clone();
         proposed.set_transform(transform)?;
+        self.field_instances[index] = proposed;
+        Ok(())
+    }
+    /// Enables resource-coupled growth on a visual field without changing its exact definition.
+    pub fn enable_field_growth(
+        &mut self,
+        id: EntityId,
+        uptake: f64,
+        scale_per_unit: f64,
+        max_scale: f64,
+    ) -> Result<(), WorldError> {
+        let instance = self
+            .field_instances
+            .iter_mut()
+            .find(|item| item.id() == id)
+            .ok_or(WorldError::UnknownEntity)?;
+        let growth = FieldGrowth::new(
+            uptake,
+            scale_per_unit,
+            instance.transform().scale(),
+            max_scale,
+        )?;
+        instance.enable_growth(growth)
+    }
+    /// Applies units already withdrawn by the simulation from finite sources.
+    pub fn grow_field_allocated(&mut self, id: EntityId, amount: f64) -> Result<(), WorldError> {
+        let index = self
+            .field_instances
+            .iter()
+            .position(|item| item.id() == id)
+            .ok_or(WorldError::UnknownEntity)?;
+        let mut proposed = self.field_instances[index].clone();
+        proposed.grow_allocated(amount)?;
+        transformed_bounds(
+            self.field_graph(id).ok_or(WorldError::InvalidStructure)?,
+            proposed.transform(),
+        )?;
         self.field_instances[index] = proposed;
         Ok(())
     }
@@ -820,6 +869,9 @@ impl WorldState {
                 .field_graph(instance.id())
                 .ok_or(WorldError::InvalidStructure)?;
             transformed_bounds(graph, instance.transform())?;
+            if let Some(growth) = instance.growth() {
+                growth.validate(instance.transform().scale())?;
+            }
         }
         for entity in &self.entities {
             Sphere::new(entity.sphere.radius())?;

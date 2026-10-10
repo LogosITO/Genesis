@@ -9,6 +9,7 @@ use world_state::{EntityId, MAX_NODES, WorldState};
 struct Allocation {
     ratios: Vec<Vec<f64>>,
     totals: Vec<f64>,
+    field_ids: Vec<EntityId>,
 }
 
 // Each source allocates once across organisms. Demands are each organism's largest eligible
@@ -62,6 +63,29 @@ fn allocate_finite(
             }
         }
     }
+    let field_ids = world
+        .field_instances()
+        .iter()
+        .filter(|field| field.growth().is_some())
+        .map(|field| field.id())
+        .collect::<Vec<_>>();
+    for id in &field_ids {
+        let field = world.field_instance(*id).expect("current field");
+        let growth = field.growth().expect("growing field");
+        let requests = sources
+            .iter()
+            .map(|source| {
+                source
+                    .sample(field.transform().translation())
+                    .map(|sample| sample * growth.uptake() * step.seconds())
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(SimulationError::World)?;
+        if requests.iter().any(|value| !value.is_finite()) {
+            return Err(SimulationError::Math(spatial_math::MathError::NonFinite));
+        }
+        raw.push(requests);
+    }
     let mut demands = raw.clone();
     for (oi, organism) in world.organisms().iter().enumerate() {
         let sum: f64 = raw[oi].iter().sum();
@@ -74,8 +98,23 @@ fn allocate_finite(
             *demand *= scale;
         }
     }
+    for (field_index, id) in field_ids.iter().enumerate() {
+        let field = world.field_instance(*id).expect("current field");
+        let growth = field.growth().expect("growing field");
+        let row = world.organisms().len() + field_index;
+        let sum: f64 = raw[row].iter().sum();
+        if !sum.is_finite() {
+            return Err(SimulationError::Math(spatial_math::MathError::NonFinite));
+        }
+        let headroom =
+            ((growth.max_scale() - field.transform().scale()) / growth.scale_per_unit()).max(0.0);
+        let scale = if sum > headroom { headroom / sum } else { 1.0 };
+        for demand in &mut demands[row] {
+            *demand *= scale;
+        }
+    }
     let mut ratios = demands.clone();
-    let mut totals = vec![0.0; world.organisms().len()];
+    let mut totals = vec![0.0; raw.len()];
     for (si, source) in sources.iter().enumerate() {
         let available = source.reservoir().expect("finite source").stored();
         let total: f64 = demands.iter().map(|row| row[si]).sum();
@@ -88,7 +127,7 @@ fn allocate_finite(
             1.0
         };
         let mut remaining = available;
-        for oi in 0..world.organisms().len() {
+        for oi in 0..demands.len() {
             let allocated = (demands[oi][si] * factor).min(remaining);
             remaining -= allocated;
             world.sources_mut()[si]
@@ -102,7 +141,11 @@ fn allocate_finite(
             };
         }
     }
-    Ok(Some(Allocation { ratios, totals }))
+    Ok(Some(Allocation {
+        ratios,
+        totals,
+        field_ids,
+    }))
 }
 
 /// Maximum changes applied on one tick.
@@ -309,6 +352,13 @@ pub fn advance_life_cached(
             organism.grow(&samples).map_err(SimulationError::World)?;
         }
     }
+    if let Some(allocation) = &allocation {
+        for (index, id) in allocation.field_ids.iter().enumerate() {
+            proposed
+                .grow_field_allocated(*id, allocation.totals[proposed.organisms().len() + index])
+                .map_err(SimulationError::World)?;
+        }
+    }
     let mut next_time = *time;
     advance(&mut proposed, &mut next_time, step)?;
     if let Some(body) = proposed.body().cloned() {
@@ -367,6 +417,7 @@ pub fn advance_life_cached(
 #[cfg(test)]
 mod ecology_tests {
     use super::*;
+    use spatial_math::Transform;
     use world_state::{DeterministicSeed, GrowthParameters, OrganismLifecycle};
 
     fn fixture(stored: f64, refill: f64) -> WorldState {
@@ -478,6 +529,57 @@ mod ecology_tests {
         assert!((world.organisms()[0].budget() - 0.2 * a / (a + b)).abs() < 1e-12);
         assert!((world.organisms()[1].budget() - 0.2 * b / (a + b)).abs() < 1e-12);
         assert!(world.organisms()[0].budget() > world.organisms()[1].budget());
+    }
+
+    #[test]
+    fn implicit_field_competes_for_one_finite_resource_ledger() {
+        const TWIN: &[u8] = include_bytes!("../../../examples/field-graph/definitions/twin.json");
+        let mut world = fixture(0.2, 0.0);
+        let id = world
+            .spawn_field(TWIN, Transform::new(Vec3::ZERO, 0.4).unwrap())
+            .unwrap();
+        world.enable_field_growth(id, 1.0, 0.4, 0.8).unwrap();
+        let mut repeated = world.clone();
+        let mut time = SimulationTime::default();
+        let mut repeated_time = time;
+        let step = SimulationStep::new(0.1).unwrap();
+        advance_life(&mut world, &mut time, step, &[]).unwrap();
+        advance_life(&mut repeated, &mut repeated_time, step, &[]).unwrap();
+        assert_eq!(world, repeated);
+        let field = world.field_instance(id).unwrap();
+        let growth = field.growth().unwrap();
+        let stock = world.sources()[0].reservoir().unwrap();
+        assert!(growth.total_allocated() > 0.0);
+        assert!(field.transform().scale() > 0.4);
+        assert!((stock.last_allocated() - 0.2).abs() < 1e-12);
+        assert!(
+            (world
+                .organisms()
+                .iter()
+                .map(|tree| tree.budget())
+                .sum::<f64>()
+                + growth.last_allocated()
+                - stock.last_allocated())
+            .abs()
+                < 1e-12
+        );
+        world.validate().unwrap();
+
+        let mut deprived = fixture(0.2, 0.0);
+        let field = deprived
+            .spawn_field(TWIN, Transform::new(Vec3::ZERO, 0.4).unwrap())
+            .unwrap();
+        deprived.enable_field_growth(field, 1.0, 0.4, 0.8).unwrap();
+        deprived.sources_mut()[0]
+            .move_to(Vec3::new(100.0, 0.0, 0.0).unwrap())
+            .unwrap();
+        let mut deprived_time = SimulationTime::default();
+        advance_life(&mut deprived, &mut deprived_time, step, &[]).unwrap();
+        assert_eq!(
+            deprived.field_instance(field).unwrap().transform().scale(),
+            0.4
+        );
+        assert_eq!(deprived.sources()[0].reservoir().unwrap().stored(), 0.2);
     }
 
     #[test]

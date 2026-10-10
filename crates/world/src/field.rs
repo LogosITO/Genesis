@@ -16,6 +16,87 @@ pub const MAX_FIELD_INSTANCES: usize = 8;
 /// Interpretation version of the persisted graph source.
 pub const FIELD_GRAPH_SEMANTICS_VERSION: u32 = 1;
 
+/// Resource-coupled uniform growth of one visual field occurrence.
+/// The graph source stays immutable; its world-owned transform scale is the shape parameter.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FieldGrowth {
+    uptake: f64,
+    scale_per_unit: f64,
+    initial_scale: f64,
+    max_scale: f64,
+    total_allocated: f64,
+    last_allocated: f64,
+}
+impl FieldGrowth {
+    /// Validates a bounded conversion from resource units to uniform field scale.
+    pub fn new(
+        uptake: f64,
+        scale_per_unit: f64,
+        initial_scale: f64,
+        max_scale: f64,
+    ) -> Result<Self, WorldError> {
+        if [uptake, scale_per_unit, initial_scale, max_scale]
+            .iter()
+            .any(|value| !value.is_finite())
+            || !(0.0..=100.0).contains(&uptake)
+            || !(0.001..=10.0).contains(&scale_per_unit)
+            || !(0.01..=100.0).contains(&initial_scale)
+            || !(initial_scale..=100.0).contains(&max_scale)
+        {
+            return Err(WorldError::OutOfRange);
+        }
+        Ok(Self {
+            uptake,
+            scale_per_unit,
+            initial_scale,
+            max_scale,
+            total_allocated: 0.0,
+            last_allocated: 0.0,
+        })
+    }
+    /// Resource demand multiplier for local source influence per second.
+    pub fn uptake(&self) -> f64 {
+        self.uptake
+    }
+    /// Uniform scale gained per acquired resource unit.
+    pub fn scale_per_unit(&self) -> f64 {
+        self.scale_per_unit
+    }
+    /// Saturation limit for the world-owned scale.
+    pub fn max_scale(&self) -> f64 {
+        self.max_scale
+    }
+    /// Units acquired over all completed ticks.
+    pub fn total_allocated(&self) -> f64 {
+        self.total_allocated
+    }
+    /// Units acquired during the most recently completed tick.
+    pub fn last_allocated(&self) -> f64 {
+        self.last_allocated
+    }
+    pub(crate) fn validate(&self, scale: f64) -> Result<(), WorldError> {
+        Self::new(
+            self.uptake,
+            self.scale_per_unit,
+            self.initial_scale,
+            self.max_scale,
+        )?;
+        let expected =
+            (self.initial_scale + self.total_allocated * self.scale_per_unit).min(self.max_scale);
+        if !self.total_allocated.is_finite()
+            || self.total_allocated < 0.0
+            || !self.last_allocated.is_finite()
+            || !(0.0..=self.total_allocated).contains(&self.last_allocated)
+            || !expected.is_finite()
+            || (expected - scale).abs() > 1e-10 * self.max_scale
+        {
+            return Err(WorldError::InvalidStructure);
+        }
+        Ok(())
+    }
+}
+
 /// Exact authored bytes and a disposable compiled graph shared by occurrences.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -79,6 +160,8 @@ pub struct FieldInstance {
     transform: Transform,
     enabled: bool,
     generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    growth: Option<FieldGrowth>,
 }
 impl FieldInstance {
     /// World-stable ID, never reused after removal.
@@ -101,6 +184,10 @@ impl FieldInstance {
     pub fn generation(&self) -> u64 {
         self.generation
     }
+    /// Optional resource-coupled growth; ordinary visual fields have none.
+    pub fn growth(&self) -> Option<&FieldGrowth> {
+        self.growth.as_ref()
+    }
     pub(crate) fn new(id: EntityId, revision: DefinitionRevision, transform: Transform) -> Self {
         Self {
             id,
@@ -108,6 +195,7 @@ impl FieldInstance {
             transform,
             enabled: true,
             generation: 0,
+            growth: None,
         }
     }
     pub(crate) fn set_revision(&mut self, revision: DefinitionRevision) -> Result<(), WorldError> {
@@ -139,6 +227,35 @@ impl FieldInstance {
             self.enabled = enabled;
         }
         Ok(())
+    }
+    pub(crate) fn enable_growth(&mut self, growth: FieldGrowth) -> Result<(), WorldError> {
+        if self.growth.is_some() || growth.initial_scale != self.transform.scale() {
+            return Err(WorldError::InvalidStructure);
+        }
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(WorldError::IdExhausted)?;
+        self.growth = Some(growth);
+        Ok(())
+    }
+    pub(crate) fn grow_allocated(&mut self, amount: f64) -> Result<(), WorldError> {
+        let growth = self.growth.as_ref().ok_or(WorldError::InvalidStructure)?;
+        let remaining = (growth.max_scale - self.transform.scale()) / growth.scale_per_unit;
+        if !amount.is_finite() || amount < 0.0 || amount > remaining + 1e-12 {
+            return Err(WorldError::OutOfRange);
+        }
+        let total = growth.total_allocated + amount;
+        let scale = (growth.initial_scale + total * growth.scale_per_unit).min(growth.max_scale);
+        if !total.is_finite() || !scale.is_finite() {
+            return Err(WorldError::OutOfRange);
+        }
+        let transform = Transform::new(self.transform.translation(), scale)?;
+        self.set_transform(transform)?;
+        let growth = self.growth.as_mut().ok_or(WorldError::InvalidStructure)?;
+        growth.total_allocated = total;
+        growth.last_allocated = amount;
+        growth.validate(self.transform.scale())
     }
 }
 

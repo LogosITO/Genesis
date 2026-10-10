@@ -118,3 +118,35 @@ fn repeated_valid_edits_replace_unused_revisions() {
     assert_eq!(full.field_definitions().len(), 4);
     full.validate().unwrap();
 }
+
+#[test]
+fn resource_growth_changes_field_scale_without_rewriting_definition() {
+    let mut world = WorldState::new(DeterministicSeed(83));
+    let id = world
+        .spawn_field(TWIN, Transform::new(v(0.0, 0.0, 0.0), 0.4).unwrap())
+        .unwrap();
+    let revision = world.field_instance(id).unwrap().revision();
+    let source = world.field_definitions()[0].source().to_vec();
+    let before = world.field_sample(id, Vec3::ZERO).unwrap();
+    world.enable_field_growth(id, 1.0, 0.4, 0.8).unwrap();
+    world.grow_field_allocated(id, 0.25).unwrap();
+    let grown = world.field_instance(id).unwrap();
+    assert_eq!(grown.id(), id);
+    assert_eq!(grown.revision(), revision);
+    assert_eq!(grown.transform().scale(), 0.5);
+    assert_eq!(grown.growth().unwrap().total_allocated(), 0.25);
+    assert!(world.field_sample(id, Vec3::ZERO).unwrap() < before);
+    assert_eq!(world.field_definitions()[0].source(), source);
+    let valid = world.clone();
+    assert!(world.grow_field_allocated(id, f64::NAN).is_err());
+    assert!(world.grow_field_allocated(id, 10.0).is_err());
+    assert!(world.replace_field(id, PLINTH).is_err());
+    assert!(
+        world
+            .set_field_transform(id, Transform::new(Vec3::ZERO, 0.6).unwrap())
+            .is_err()
+    );
+    assert!(world.enable_field_growth(id, 1.0, 0.4, 0.8).is_err());
+    assert_eq!(world, valid);
+    world.validate().unwrap();
+}
