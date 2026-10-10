@@ -48,10 +48,15 @@ cargo test --release -p analytic-renderer --lib specialized_wgsl_feasibility --l
 cargo test -p analytic-renderer --test mixed_gpu bounded_mixed_viewport_matches_direct_field_queries --locked -- --ignored --nocapture --test-threads=1
 ```
 
-The local `target/performance-research-1-reference-repeat.txt` and
-`target/performance-research-1-accepted-matrix.txt` contain the exact serial
-runs used below. Seven samples do not establish a stable long-tail p95 or
-cross-machine performance.
+The table below uses an A/B/A sequence:
+`target/performance-research-1-aba-a1.txt` (starting HEAD),
+`target/performance-research-1-aba-b.txt` (clean final HEAD `af14cbe`), and
+`target/performance-research-1-aba-a2.txt` (starting HEAD again). Each has 25
+serial JSON rows from separately built source trees and Cargo targets. At
+1080p the 32-node reference field was 48.17 / 48.66 ms in A1/A2, showing
+little drift during the sequence. Earlier independent runs varied more, so
+seven samples do not establish a stable long-tail p95 or cross-machine
+performance.
 
 ## Baseline and ray-domain experiment
 
@@ -70,21 +75,21 @@ GPU compute p50, milliseconds, identical scene and resolution:
 
 | Field nodes | 720p reference → bounded | 1080p reference → bounded | 1440p reference → bounded |
 | ---: | ---: | ---: | ---: |
-| 1 | 4.70 → 1.17 | 10.07 → 2.65 | 16.28 → 4.67 |
-| 8 | 8.59 → 1.95 | 16.52 → 3.76 | 28.85 → 5.83 |
-| 16 | 13.21 → 5.15 | 29.02 → 8.54 | 50.16 → 13.77 |
-| 32 | 28.01 → 14.15 | 56.98 → 30.93 | 99.91 → 53.54 |
+| 1 | 3.99 → 1.12 | 8.82 → 2.20 | 15.88 → 3.62 |
+| 8 | 6.06 → 1.57 | 14.19 → 2.77 | 25.24 → 4.03 |
+| 16 | 11.22 → 3.52 | 23.60 → 6.38 | 42.16 → 10.78 |
+| 32 | 22.19 → 10.57 | 48.17 → 21.71 | 81.46 → 36.12 |
 
 Additional 1080p p50/p95, milliseconds:
 
 | Scene | Reference | Bounded |
 | --- | ---: | ---: |
-| Mixed analytic + 8-node field | 16.32 / 16.56 | 3.11 / 3.76 |
-| Mixed analytic + 32-node field | 62.98 / 63.87 | 31.89 / 32.68 |
-| 32-node field moved offscreen | 19.73 / 20.27 | 0.04 / 0.04 |
-| One radius-3 nearly full-screen field | 15.81 / 16.26 | 15.85 / 16.68 |
-| Two overlapping 8-node instances | 33.68 / 34.45 | 6.55 / 7.33 |
-| Two shared-definition 8-node instances | 33.75 / 34.12 | 6.42 / 7.29 |
+| Mixed analytic + 8-node field | 13.88 / 14.57 | 2.54 / 2.82 |
+| Mixed analytic + 32-node field | 48.02 / 50.27 | 22.43 / 23.06 |
+| 32-node field moved offscreen | 17.37 / 17.59 | 0.04 / 0.04 |
+| One radius-3 nearly full-screen field | 13.89 / 14.19 | 13.95 / 14.25 |
+| Two overlapping 8-node instances | 28.11 / 28.76 | 4.96 / 5.71 |
+| Two shared-definition 8-node instances | 28.49 / 29.27 | 5.70 / 6.39 |
 | Analytic-only | 0.03 / 0.03 | 0.03 / 0.03 |
 
 The full-screen negative control is essentially unchanged. The first, tighter
@@ -200,7 +205,7 @@ capture was claimed.
 | Stage | Status | Basis |
 | --- | --- | --- |
 | 0 Architecture | Complete | Source/ownership/frequency map above. |
-| 1 Baseline | Complete | 25 reference and 25 current machine-readable release GPU rows. |
+| 1 Baseline | Complete | A/B/A: 50 reference and 25 clean final-HEAD machine-readable release GPU rows. |
 | 2 GPU profiling | Partial | Exact ray/sample/status counts, worst-case visits; no actual per-node or mixed rejection counters. |
 | 3 CPU/runtime | Partial | Real clone/snapshot/BVH and existing parse fixtures; no detailed `mixed_binding` phase split. |
 | 4 Spatial experiment | Complete | Integrated guard, matched matrix and GPU parity. |
