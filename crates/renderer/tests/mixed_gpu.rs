@@ -2,7 +2,7 @@
 use analytic_field::Sphere;
 use analytic_renderer::{
     Camera, DrawOptions, GpuRenderer, MixedDrawOptions,
-    field_graph_gpu::{GraphGpuRenderer, GraphTracePolicy},
+    field_graph_gpu::{GraphGpuRenderer, GraphTracePolicy, WorldFieldGpuOutcome},
     material::{Material, MaterialPattern, MaterialSet},
     mixed::{MixedRenderOptions, MixedSource, render_mixed_rgba},
 };
@@ -105,6 +105,216 @@ fn write_bmp(path: &std::path::Path, pixels: &[u8], size: [u32; 2]) {
         bmp.resize(row_start + stride as usize, 0);
     }
     std::fs::write(path, bmp).unwrap();
+}
+
+#[test]
+#[ignore = "requires native GPU; compare bounded mixed viewport against direct GPU field queries"]
+fn bounded_mixed_viewport_matches_direct_field_queries() {
+    let instance = wgpu::Instance::default();
+    let adapter =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+            .unwrap();
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let renderer =
+        pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+    let reference = pollster::block_on(GraphGpuRenderer::new(&device)).unwrap();
+    let camera = Camera::look_at(v(0.0, 0.0, -6.0), Vec3::ZERO, v(0.0, 1.0, 0.0), 0.9).unwrap();
+    let size = [129, 129];
+    let rays = (0..size[1])
+        .flat_map(|y| (0..size[0]).map(move |x| camera.ray(x, y, size[0], size[1]).unwrap()))
+        .collect::<Vec<_>>();
+    let source = br#"{"format_version":1,"id":"parity","root":"s","nodes":[{"op":"sphere","id":"s","radius":0.9}]}"#;
+    let mut world = WorldState::new(DeterministicSeed(104));
+    world.spawn_field(source, Transform::identity()).unwrap();
+    for case in 0..3 {
+        if case == 1 {
+            world
+                .spawn_field(source, Transform::new(v(0.5, 0.0, 0.0), 1.0).unwrap())
+                .unwrap();
+        } else if case == 2 {
+            let id = world.field_instances()[0].id();
+            world
+                .set_field_transform(id, Transform::new(v(40.0, 0.0, 0.0), 1.0).unwrap())
+                .unwrap();
+        }
+        let direct = reference
+            .query_world_fields(
+                &device,
+                &queue,
+                &world,
+                camera,
+                &rays,
+                GraphTracePolicy::default(),
+            )
+            .unwrap();
+        let image = renderer
+            .draw_mixed(
+                &device,
+                &queue,
+                &world,
+                camera,
+                MixedDrawOptions {
+                    draw: DrawOptions {
+                        size,
+                        normal_debug: false,
+                        surface: None,
+                        timer: None,
+                    },
+                    policy: GraphTracePolicy::default(),
+                    show_analytic: false,
+                    show_fields: true,
+                    diagnostic: true,
+                    materials: None,
+                    simulation_seconds: 0.0,
+                    background: [0.0; 3],
+                    light_direction: [0.5, 0.8, -0.6],
+                },
+            )
+            .unwrap();
+        let pixels = rgba(&device, &queue, &image, size);
+        let mut compared = 0usize;
+        for (index, (outcome, pixel)) in direct.iter().zip(pixels.chunks_exact(4)).enumerate() {
+            let lit = pixel[..3] != [0, 0, 0];
+            match outcome {
+                WorldFieldGpuOutcome::Hit { .. } => {
+                    assert!(lit, "case {case} direct hit lost at pixel {index}")
+                }
+                WorldFieldGpuOutcome::Miss => assert!(
+                    !lit,
+                    "case {case} direct miss changed at pixel {index}: {pixel:?}"
+                ),
+                WorldFieldGpuOutcome::Uncertain { .. } | WorldFieldGpuOutcome::Exhausted { .. } => {
+                    assert!(
+                        lit,
+                        "case {case} direct uncertainty hidden at pixel {index}"
+                    );
+                }
+            }
+            compared += 1;
+        }
+        assert!(compared > 16_000);
+        println!(
+            "bounded_parity case={case} compared={compared} adapter={}",
+            adapter.get_info().name
+        );
+    }
+    let mut tangent_world = WorldState::new(DeterministicSeed(105));
+    tangent_world
+        .spawn_field(source, Transform::identity())
+        .unwrap();
+    for y in [1.0 + 1e-8, 1.05, 1.2] {
+        let tangent_camera =
+            Camera::look_at(v(0.0, y, -6.0), v(0.0, y, 0.0), v(0.0, 1.0, 0.0), 0.9).unwrap();
+        let ray = tangent_camera.ray(0, 0, 1, 1).unwrap();
+        let direct = reference
+            .query_world_fields(
+                &device,
+                &queue,
+                &tangent_world,
+                tangent_camera,
+                &[ray],
+                GraphTracePolicy::default(),
+            )
+            .unwrap();
+        let image = renderer
+            .draw_mixed(
+                &device,
+                &queue,
+                &tangent_world,
+                tangent_camera,
+                MixedDrawOptions {
+                    draw: DrawOptions {
+                        size: [1, 1],
+                        normal_debug: false,
+                        surface: None,
+                        timer: None,
+                    },
+                    policy: GraphTracePolicy::default(),
+                    show_analytic: false,
+                    show_fields: true,
+                    diagnostic: true,
+                    materials: None,
+                    simulation_seconds: 0.0,
+                    background: [0.0; 3],
+                    light_direction: [0.5, 0.8, -0.6],
+                },
+            )
+            .unwrap();
+        let lit = rgba(&device, &queue, &image, [1, 1])[..3] != [0, 0, 0];
+        match direct[0] {
+            WorldFieldGpuOutcome::Hit { .. } => assert!(lit, "near-tangent hit lost at y={y}"),
+            WorldFieldGpuOutcome::Miss => assert!(!lit, "near-tangent miss changed at y={y}"),
+            _ => assert!(lit, "uncertainty hidden at y={y}"),
+        }
+    }
+    for (x, scale) in [(1000.0, 0.1), (-1000.0, 100.0)] {
+        let mut scaled_world = WorldState::new(DeterministicSeed(106));
+        scaled_world
+            .spawn_field(source, Transform::new(v(x, 0.0, 0.0), scale).unwrap())
+            .unwrap();
+        let scaled_camera = Camera::look_at(
+            v(x, 0.0, -6.0 * scale),
+            v(x, 0.0, 0.0),
+            v(0.0, 1.0, 0.0),
+            0.9,
+        )
+        .unwrap();
+        let rays = (0..size[1])
+            .flat_map(|y| {
+                (0..size[0])
+                    .map(move |column| scaled_camera.ray(column, y, size[0], size[1]).unwrap())
+            })
+            .collect::<Vec<_>>();
+        let direct = reference
+            .query_world_fields(
+                &device,
+                &queue,
+                &scaled_world,
+                scaled_camera,
+                &rays,
+                GraphTracePolicy::default(),
+            )
+            .unwrap();
+        let image = renderer
+            .draw_mixed(
+                &device,
+                &queue,
+                &scaled_world,
+                scaled_camera,
+                MixedDrawOptions {
+                    draw: DrawOptions {
+                        size,
+                        normal_debug: false,
+                        surface: None,
+                        timer: None,
+                    },
+                    policy: GraphTracePolicy::default(),
+                    show_analytic: false,
+                    show_fields: true,
+                    diagnostic: true,
+                    materials: None,
+                    simulation_seconds: 0.0,
+                    background: [0.0; 3],
+                    light_direction: [0.5, 0.8, -0.6],
+                },
+            )
+            .unwrap();
+        let pixels = rgba(&device, &queue, &image, size);
+        for (index, (outcome, pixel)) in direct.iter().zip(pixels.chunks_exact(4)).enumerate() {
+            let lit = pixel[..3] != [0, 0, 0];
+            match outcome {
+                WorldFieldGpuOutcome::Miss => {
+                    assert!(!lit, "scale {scale} direct miss changed at {index}")
+                }
+                _ => assert!(
+                    lit,
+                    "scale {scale} direct result hidden at {index}: {outcome:?}"
+                ),
+            }
+        }
+        println!("bounded_parity scale={scale} compared={}", rays.len());
+    }
 }
 
 #[test]

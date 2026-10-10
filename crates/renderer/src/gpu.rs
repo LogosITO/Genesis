@@ -44,6 +44,8 @@ struct GpuHit {
 struct GpuFieldInstance {
     position_scale: [f32; 4],
     info: [u32; 4],
+    bounds_min: [f32; 4],
+    bounds_max: [f32; 4],
 }
 
 #[repr(C)]
@@ -998,6 +1000,13 @@ impl GpuRenderer {
                 .and_then(|assignments| assignments.field(instance.id()))
                 .map(|material| material_index(material, &mut materials))
                 .unwrap_or(u32::MAX);
+            let bounds = graph.bounds();
+            let lower = [bounds.min.x(), bounds.min.y(), bounds.min.z()];
+            let upper = [bounds.max.x(), bounds.max.y(), bounds.max.z()];
+            // Include the largest hit tolerance and slack for supported f32 ray/graph arithmetic.
+            let padding = |axis: usize| {
+                0.25_f32 + 0.001 * (lower[axis].abs().max(upper[axis].abs()) as f32).max(1.0)
+            };
             instances.push(GpuFieldInstance {
                 position_scale: vec4(t.translation(), t.scale() as f32),
                 info: [
@@ -1009,6 +1018,20 @@ impl GpuRenderer {
                     (id >> 32) as u32,
                     material,
                 ],
+                bounds_min: std::array::from_fn(|axis| {
+                    if axis == 3 {
+                        0.0
+                    } else {
+                        (lower[axis] as f32 - padding(axis)).next_down()
+                    }
+                }),
+                bounds_max: std::array::from_fn(|axis| {
+                    if axis == 3 {
+                        0.0
+                    } else {
+                        (upper[axis] as f32 + padding(axis)).next_up()
+                    }
+                }),
             });
         }
         let node_count = u32::try_from(nodes.len()).map_err(|_| RenderError::TooManyObjects)?;
@@ -1514,7 +1537,11 @@ mod tests {
         assert_eq!(std::mem::offset_of!(FlatNode, max), 16);
         assert_eq!(std::mem::offset_of!(FlatNode, meta), 32);
         assert_eq!(std::mem::offset_of!(FlatNode, leaf), 48);
-        assert_eq!(std::mem::size_of::<GpuFieldInstance>(), 32);
+        assert_eq!(std::mem::size_of::<GpuFieldInstance>(), 64);
+        assert_eq!(std::mem::offset_of!(GpuFieldInstance, position_scale), 0);
+        assert_eq!(std::mem::offset_of!(GpuFieldInstance, info), 16);
+        assert_eq!(std::mem::offset_of!(GpuFieldInstance, bounds_min), 32);
+        assert_eq!(std::mem::offset_of!(GpuFieldInstance, bounds_max), 48);
         assert_eq!(std::mem::size_of::<GpuMixedOptions>(), 64);
         for shader in [
             include_str!("../shaders/analytic.wgsl"),

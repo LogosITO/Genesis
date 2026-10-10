@@ -11,7 +11,12 @@ struct FieldConfig {
 struct Node { links: vec4<u32>, param: vec4<f32> }
 struct Outcome { distance_normal: vec4<f32>, info: vec4<u32> }
 struct Frame { point: vec3<f32>, first: f32, index: u32, phase: u32 }
-struct FieldInstance { position_scale: vec4<f32>, info: vec4<u32> }
+struct FieldInstance {
+    position_scale: vec4<f32>,
+    info: vec4<u32>,
+    bounds_min: vec4<f32>,
+    bounds_max: vec4<f32>,
+}
 struct MixedOptions {
     trace: vec4<f32>,
     info: vec4<u32>,
@@ -33,6 +38,25 @@ struct MaterialGpu {
 var<private> field_config: FieldConfig;
 
 // FIELD_EVALUATOR_INSERTION_POINT
+
+fn misses_field_bounds(origin: vec3<f32>, direction: vec3<f32>, near: f32, far: f32,
+    lower: vec3<f32>, upper: vec3<f32>) -> bool {
+    var lo = near;
+    var hi = far;
+    for (var axis = 0u; axis < 3u; axis++) {
+        if (direction[axis] == 0.0) {
+            if (origin[axis] < lower[axis] || origin[axis] > upper[axis]) { return true; }
+            continue;
+        }
+        let a = (lower[axis] - origin[axis]) / direction[axis];
+        let b = (upper[axis] - origin[axis]) / direction[axis];
+        if (!finite(a) || !finite(b)) { return false; }
+        lo = max(lo, min(a, b));
+        hi = min(hi, max(a, b));
+        if (lo > hi) { return true; }
+    }
+    return false;
+}
 
 fn shade_material(index: u32, point: vec3<f32>, normal: vec3<f32>, fallback: vec3<f32>, emphasis: f32) -> vec3<f32> {
     let light = normalize(mixed_options.light.xyz);
@@ -78,6 +102,8 @@ fn render_mixed(@builtin(global_invocation_id) gid: vec3<u32>) {
             field_config.info = vec4<u32>(instance.info.x, mixed_options.info.y, mixed_options.info.w, 0u);
             field_config.trace = mixed_options.trace;
             let origin = (camera.origin.xyz - instance.position_scale.xyz) / scale;
+            if (misses_field_bounds(origin, direction, camera.view.z / scale,
+                camera.view.w / scale, instance.bounds_min.xyz, instance.bounds_max.xyz)) { continue; }
             let result = field_trace(origin, direction, camera.view.z / scale, camera.view.w / scale);
             if (result.info.x == 2u) { uncertain = true; }
             if (result.info.x == 3u) { exhausted = true; }
