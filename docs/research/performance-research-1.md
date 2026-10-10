@@ -50,7 +50,7 @@ cargo test -p analytic-renderer --test mixed_gpu bounded_mixed_viewport_matches_
 
 The table below uses an A/B/A sequence:
 `target/performance-research-1-aba-a1.txt` (starting HEAD),
-`target/performance-research-1-aba-b.txt` (clean final HEAD `af14cbe`), and
+`target/performance-research-1-aba-b.txt` (clean implementation commit `af14cbe`), and
 `target/performance-research-1-aba-a2.txt` (starting HEAD again). Each has 25
 serial JSON rows from separately built source trees and Cargo targets. At
 1080p the 32-node reference field was 48.17 / 48.66 ms in A1/A2, showing
@@ -223,3 +223,36 @@ timings in changing World Lab scenes, and safe revision invalidation. The
 current spatial guard should first be checked on another backend and with
 more adversarial numerical cases. No vendor-specific assembly is justified
 by current evidence.
+
+### Prioritized engineering follow-up
+
+1. **Qualify the visual ray-domain guard.** A previous narrow host/GPU bound
+   disagreed near `y = 1 + 1e-8`, and the current widening is an empirical
+   `f32` allowance. Model rounding through local transforms, slab division,
+   and graph parameter conversion; test the full admitted coordinate and
+   scale range, including 0.01× by a reference path that supports its local
+   ray interval. The required guarantee for a stronger contract is that a
+   skipped field cannot produce a supported hit or hidden uncertainty. This
+   depends on explicit backend arithmetic assumptions. Accept only after
+   a broad differential ray/image corpus passes on another GPU backend and
+   matched empty, occupied, and overlapping scene timings remain recorded.
+   The risk is conservative widening reducing the observed acceleration.
+2. **Prototype revision-scoped shader compilation.** The test-only matched
+   static graphs showed large compute savings but varying pipeline creation
+   times. Build an asynchronous, bounded cache keyed by exact definition
+   revision and compiler semantics version, with the interpreter as fallback.
+   It must preserve status, hit order, distance/normal tolerances, resource
+   limits, and rollback after an invalid edit. Dependencies are immutable
+   revision ownership and a renderer-side pipeline lifecycle. Test 65,536+
+   deterministic rays across all operations and edited worlds, then compare
+   interpreter/compiled 720p–1440p frames and compile stalls. The risk is
+   shader explosion and latency in rapidly changing worlds.
+3. **Add separate mixed-pass workload diagnostics and a second hardware tier.**
+   Current sample/step counts come from direct query; exact native bounds
+   rejections and node visits remain unknown. An opt-in diagnostic pipeline
+   can count these with bounded storage, while ordinary frames stay free of
+   atomics. Reconcile counters against known ray counts, measure diagnostic
+   overhead, and repeat the matched benchmark on a lower-power GPU when
+   available. The risk is profiler overhead being mistaken for normal frame
+   cost. Only then reconsider CPU snapshot or packing caches if their measured
+   share becomes material in larger changing worlds.
