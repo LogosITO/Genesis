@@ -53,6 +53,17 @@ the mixed GPU path, reads back real BMP images, and requires a visible byte
 change plus a refreshed graph-node upload. It leaves the source showcase
 untouched.
 
+For a bounded local window profile, set `GENESIS_WORLD_LAB_PROFILE` to a
+writable JSONL path and optionally set `GENESIS_WORLD_LAB_PROFILE_FRAMES`
+(default 600, allowed 32–10,000). The Lab exits at that frame count. With the
+checked-in `scenes/showcase.json`, `GENESIS_WORLD_LAB_PROFILE_SCENARIO=auto`
+or `structural` additionally runs deterministic camera, material, transform,
+source-revision, and invalid-edit phases. This fixture edits only its in-memory
+`WorldState`; it does not save a new scene or define gameplay rules. The JSONL
+separates CPU stages, surface acquisition/presentation, frame interval, and
+occasional GPU timestamp samples. See [Performance Research 3](../research/performance-research-3.md)
+for methodology and limitations.
+
 Numerical diagnostic colors expose uncertain field tracing. Normal display
 is an approximate GPU `f32` visualization, not certified occupancy or
 implicit collision. No mesh or voxel scene representation is introduced.
