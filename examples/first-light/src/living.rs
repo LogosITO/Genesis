@@ -104,7 +104,7 @@ pub fn intervention(runtime: &Runtime) -> EnvironmentEventKind {
     }
 }
 
-fn digest(runtime: &Runtime) -> Result<String, Box<dyn Error>> {
+pub(crate) fn digest(runtime: &Runtime) -> Result<String, Box<dyn Error>> {
     let hash = runtime
         .save_bytes()?
         .iter()
@@ -191,9 +191,13 @@ pub fn experiment() -> Result<Value, Box<dyn Error>> {
 
 /// Serial CPU measurements of the actual changing A/B worlds; no window or GPU time included.
 pub fn measure_cpu() -> Result<Value, Box<dyn Error>> {
+    measure_cpu_with(initial(SimulationStep::new(super::STEP.as_secs_f64())?)?)
+}
+
+pub(crate) fn measure_cpu_with(initial: Runtime) -> Result<Value, Box<dyn Error>> {
     let mut rows = Vec::new();
     for intervene in [false, true] {
-        let mut runtime = initial(SimulationStep::new(super::STEP.as_secs_f64())?)?;
+        let mut runtime = initial.clone();
         let mut tick_ms = Vec::new();
         let mut snapshot_ms = Vec::new();
         let mut primitives = 0;

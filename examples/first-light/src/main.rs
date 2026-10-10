@@ -2,12 +2,14 @@
 
 mod hud;
 mod living;
+mod living_implicit;
 mod passage;
 
 use analytic_field::{AxisAlignedBox, Capsule, Sphere};
 use analytic_renderer::{
-    BranchVisibility, Camera, DrawOptions, GpuRenderer, GpuTimer, MixedDrawOptions, PickOutcome,
-    Primitive, Scene, SemanticTarget, field_graph_gpu::GraphTracePolicy,
+    BranchVisibility, Camera, DrawOptions, GpuFieldExecution, GpuFieldRenderMode, GpuRenderer,
+    GpuTimer, MixedDrawOptions, PickOutcome, Primitive, Scene, SemanticTarget,
+    field_graph_gpu::GraphTracePolicy,
 };
 use spatial_math::{Transform, Vec3};
 use std::{
@@ -354,6 +356,7 @@ struct App {
     cpu_total: Duration,
     life: bool,
     living: bool,
+    living_implicit: bool,
     passage: bool,
     fast: bool,
     last_save: Option<PathBuf>,
@@ -448,6 +451,7 @@ impl App {
             cpu_total: Duration::ZERO,
             life,
             living: false,
+            living_implicit: false,
             passage,
             fast: false,
             last_save: None,
@@ -520,6 +524,12 @@ impl App {
         app.body_id = app.world.body().map(|body| body.id());
         app.body_input_dirty = false;
         app.living = true;
+        app.living_implicit = app
+            .world
+            .field_instances()
+            .iter()
+            .any(|field| field.growth().is_some());
+        app.mixed = app.living_implicit;
         app.status = "TWO STRATEGIES; MOVE THE RESOURCE TO CHANGE THEIR FUTURE".into();
         Ok(app)
     }
@@ -532,6 +542,8 @@ impl App {
     fn reset_living(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let reset = if let Some(path) = &self.living_scene_path {
             Self::living(living::read_scene(path, self.step)?)?
+        } else if self.living_implicit {
+            Self::living(living_implicit::initial(self.step)?)?
         } else {
             Self::living(living::initial(self.step)?)?
         };
@@ -539,6 +551,8 @@ impl App {
         self.time = reset.time;
         self.source_id = reset.source_id;
         self.body_id = reset.body_id;
+        self.living_implicit = reset.living_implicit;
+        self.mixed = reset.mixed;
         self.contact_cache = None;
         self.selected = None;
         self.pending_move = false;
@@ -570,6 +584,8 @@ impl App {
         self.time = loaded.time;
         self.source_id = loaded.source_id;
         self.body_id = loaded.body_id;
+        self.living_implicit = loaded.living_implicit;
+        self.mixed = loaded.mixed;
         self.contact_cache = None;
         self.selected = None;
         self.pending_move = false;
@@ -1140,7 +1156,54 @@ impl App {
             self.snapshot_samples
                 .push(snapshot_started.elapsed().as_secs_f64() * 1000.0);
         }
-        let hud_lines = if self.living {
+        let hud_lines = if self.living_implicit {
+            let field = self
+                .world
+                .field_instances()
+                .iter()
+                .find(|field| field.growth().is_some())
+                .expect("implicit organism");
+            let growth = field.growth().expect("implicit growth");
+            let stocks = self
+                .world
+                .sources()
+                .iter()
+                .map(|source| source.reservoir().expect("finite source").stored())
+                .collect::<Vec<_>>();
+            let path = self
+                .graphics
+                .as_ref()
+                .and_then(|graphics| graphics.renderer.compiler_stats())
+                .map(|stats| {
+                    format!(
+                        "{:?} pending:{} requests:{} hits:{}",
+                        stats.active, stats.pending, stats.requests, stats.cache_hits
+                    )
+                })
+                .unwrap_or_else(|| "GPU STATUS UNKNOWN".into());
+            Some([
+                "GENESIS LIVING WORLD 2 | EXPERIMENTAL".into(),
+                "SPACE PAUSE | . STEP | F FAST | M MOVE SOURCE".into(),
+                format!(
+                    "TICK {} | NODES {:?} | STOCK {:.3}/{:.3}",
+                    self.time.ticks(),
+                    self.world
+                        .organisms()
+                        .iter()
+                        .map(|tree| tree.nodes().len())
+                        .collect::<Vec<_>>(),
+                    stocks[0],
+                    stocks[1]
+                ),
+                format!(
+                    "IMPLICIT {} | SCALE {:.3} | RESOURCE {:.3}",
+                    field.id().value(),
+                    field.transform().scale(),
+                    growth.total_allocated()
+                ),
+                format!("{path} | {}", self.status),
+            ])
+        } else if self.living {
             let counts = self
                 .world
                 .organisms()
@@ -1375,7 +1438,7 @@ impl App {
             timer: sampled_timer,
         };
         let rendered = if self.mixed {
-            graphics.renderer.draw_mixed(
+            graphics.renderer.draw_mixed_with_execution(
                 &graphics.device,
                 &graphics.queue,
                 &self.world,
@@ -1390,6 +1453,14 @@ impl App {
                     simulation_seconds: self.time.ticks() as f32 * STEP.as_secs_f32(),
                     background: [0.05, 0.075, 0.115],
                     light_direction: [0.5, 0.8, -0.6],
+                },
+                if self.living_implicit {
+                    GpuFieldRenderMode {
+                        execution: GpuFieldExecution::Structural,
+                        spatial_guard: true,
+                    }
+                } else {
+                    GpuFieldRenderMode::default()
                 },
             )
         } else {
@@ -1731,7 +1802,7 @@ impl ApplicationHandler for App {
                         KeyCode::Digit1 if self.mixed => self.show_analytic = !self.show_analytic,
                         KeyCode::Digit2 if self.mixed => self.show_fields = !self.show_fields,
                         KeyCode::Digit3 if self.mixed => self.diagnostic = !self.diagnostic,
-                        KeyCode::KeyT if self.mixed => {
+                        KeyCode::KeyT if self.mixed && !self.living_implicit => {
                             if let Some(field) = self.world.field_instances().first() {
                                 let id = field.id();
                                 let position = field.transform().translation();
@@ -1880,6 +1951,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", serde_json::to_string_pretty(&living::experiment()?)?);
         return Ok(());
     }
+    if args.as_slice() == ["--living-implicit-experiment"] {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&living_implicit::experiment()?)?
+        );
+        return Ok(());
+    }
+    if args.as_slice() == ["--living-implicit-measure"] {
+        println!("{}", living_implicit::measure_cpu()?);
+        return Ok(());
+    }
     if args.as_slice() == ["--living-measure"] {
         println!("{}", living::measure_cpu()?);
         return Ok(());
@@ -1894,6 +1976,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [flag] if flag == "--living" => {
             App::living(living::initial(SimulationStep::new(STEP.as_secs_f64())?)?)?
         }
+        [flag] if flag == "--living-implicit" => App::living(living_implicit::initial(
+            SimulationStep::new(STEP.as_secs_f64())?,
+        )?)?,
         [flag, path] if flag == "--living-scene" => App::living_scene(PathBuf::from(path))?,
         [flag, path] if flag == "--living-load" => App::living(Runtime::load_file(path)?)?,
         [flag] if flag == "--mixed" => App::mixed()?,
@@ -1901,7 +1986,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [flag, path] if flag == "--authored-world" => App::authored_world(PathBuf::from(path))?,
         _ => {
             return Err(
-                "usage: first-light [--life|--living|--living-scene FILE|--living-load FILE|--living-experiment|--living-measure|--passage|--mixed|--authoring FILE|--authored-world FILE]"
+                "usage: first-light [--life|--living|--living-implicit|--living-implicit-experiment|--living-implicit-measure|--living-scene FILE|--living-load FILE|--living-experiment|--living-measure|--passage|--mixed|--authoring FILE|--authored-world FILE]"
                     .into(),
             );
         }
@@ -1934,14 +2019,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             "Space pause; "
         },
-        if app.mixed {
+        if app.living {
+            "M move resource; O toggle source; P prune; F fast time; . fixed step; R reset; F5 save; F9 load; "
+        } else if app.mixed {
             "1 analytic; 2 fields; 3 diagnostics; T move field; "
         } else if app.authored.is_some() {
             "R reload definition; "
         } else if !app.world.authored_instances().is_empty() {
             "Left click select; E enable/disable; M move +X; "
-        } else if app.living {
-            "M move resource; O toggle source; P prune; F fast time; . fixed step; R reset; F5 save; F9 load; "
         } else if life && !passage {
             "M move resource source; Left click select; P prune selected branch; I/J/K/L move body; "
         } else if passage {
@@ -1994,6 +2079,31 @@ mod app_tests {
         app.reset_living().unwrap();
         assert_eq!(&app.world, initial.world());
         assert_eq!(app.time, initial.time());
+    }
+
+    #[test]
+    fn living_implicit_native_load_and_reset_preserve_world_identity() {
+        let initial =
+            living_implicit::initial(SimulationStep::new(STEP.as_secs_f64()).unwrap()).unwrap();
+        let mut app = App::living(initial.clone()).unwrap();
+        assert!(app.living_implicit && app.mixed);
+        for _ in 0..80 {
+            app.simulation_tick().unwrap();
+        }
+        let field_id = app.world.field_instances()[0].id();
+        let saved = Runtime::from_snapshot(app.world.clone(), app.time, app.step)
+            .unwrap()
+            .save_bytes()
+            .unwrap();
+        let loaded = App::living(Runtime::load_bytes(&saved).unwrap()).unwrap();
+        assert!(loaded.living_implicit && loaded.mixed);
+        assert_eq!(loaded.time, app.time);
+        assert_eq!(loaded.world.field_instances()[0].id(), field_id);
+        assert_eq!(loaded.world, app.world);
+        app.reset_living().unwrap();
+        assert_eq!(app.world, *initial.world());
+        assert_eq!(app.time, initial.time());
+        assert!(app.living_implicit && app.mixed);
     }
 
     #[test]
@@ -2561,7 +2671,7 @@ mod app_tests {
         println!("{{\"scenario\":\"growth-and-stale-selection\",\"result\":\"success\"}}");
     }
 
-    fn read_rgb(
+    pub(super) fn read_rgb(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         image: &wgpu::Texture,
@@ -2618,7 +2728,7 @@ mod app_tests {
         rgb
     }
 
-    fn write_bmp(path: &Path, rgb: &[u8], size: [u32; 2]) {
+    pub(super) fn write_bmp(path: &Path, rgb: &[u8], size: [u32; 2]) {
         let [width, height] = size;
         let stride = (width * 3).div_ceil(4) * 4;
         let data_size = stride * height;
