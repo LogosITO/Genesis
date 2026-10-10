@@ -1,7 +1,23 @@
-# World persistence version 7
+# World persistence versions 7 and 8
 
-Foundation 0.13 adds visual field definitions and occurrences. New saves use
-`format_version: 7`; versions 1–6 remain readable with empty field collections.
+Living World 2 writes `format_version: 8` when a visual Field Graph occurrence
+has resource-coupled `FieldGrowth`. The growth law, initial and maximum scale,
+cumulative and last allocation, and current world-owned transform are in the
+completed snapshot. The immutable graph source bytes and exact SHA-256 revision
+remain in the field definition. The loader validates the growth state against
+the scale and rejects a v7 file that contains growth. Worlds without dynamic
+fields still write v7, preserving the original Living World 1 save bytes and
+digests. Versions 1–7 remain readable under their existing gates.
+
+A save is a **completed state snapshot**, optionally with events scheduled for
+future ticks. It is not a history of previously applied inputs. Loading and
+continuing must not reapply past events. The headless Living World 2 experiment
+records a separate initial v8 snapshot and the typed tick-61 event; that pair
+is self-contained because the snapshot embeds the exact graph source. Native
+F5/F9 saves do not contain a complete keyboard event log.
+
+Foundation 0.13 adds visual field definitions and occurrences. Static-field
+saves use `format_version: 7`; versions 1–6 remain readable with empty field collections.
 Files that claim an older version but contain field state are rejected. On load,
 each distinct exact-byte graph is recompiled and checked against its recorded
 SHA-256 revision and graph semantics version before the world is accepted. A
@@ -11,7 +27,7 @@ fields have no contact or gameplay authority.
 
 ## Decision
 
-`world-runtime` writes a JSON envelope with `format_version: 7` and the runtime state. It reads valid versions 1–6. For version 1, missing `max_children` defaults to 2 and missing shared `budget` defaults to zero. For versions 1 and 2, the former dense node allocation count becomes `next_node_id`; their nodes, parents, and energy remain intact. Versions 3–7 require a valid explicit `next_node_id` and may contain gaps after pruning. Older saves without a kinematic body load with `body: None`. Versions 1–4 have unlimited sources without a reservoir; a finite reservoir mislabeled as an older version is rejected. Versions 1–5 have no authored world instances; authored definitions, occurrences or events mislabeled as an older version are rejected. New saves are version 7, so older runtimes are not expected to read them. State includes fixed step, completed tick, seed, monotonic world ID allocator, sphere entities, organisms and sources, finite source ledgers where present, optional kinematic body state and last contact, shared exact-byte authored definitions and occurrence records, shared visual field definitions and occurrence records, pending typed events including authored updates, and next event order. The format is inspectable but not a stable public interchange API.
+`world-runtime` writes a JSON envelope with the runtime state. It reads valid versions 1–7. For version 1, missing `max_children` defaults to 2 and missing shared `budget` defaults to zero. For versions 1 and 2, the former dense node allocation count becomes `next_node_id`; their nodes, parents, and energy remain intact. Versions 3–8 require a valid explicit `next_node_id` and may contain gaps after pruning. Older saves without a kinematic body load with `body: None`. Versions 1–4 have unlimited sources without a reservoir; a finite reservoir mislabeled as an older version is rejected. Versions 1–5 have no authored world instances; authored definitions, occurrences or events mislabeled as an older version are rejected. Older runtimes are not expected to read new format versions. State includes fixed step, completed tick, seed, monotonic world ID allocator, sphere entities, organisms and sources, finite source ledgers where present, optional kinematic body state and last contact, shared exact-byte authored definitions and occurrence records, shared visual field definitions and occurrence records, pending typed events including authored updates, and next event order. The format is inspectable but not a stable public interchange API.
 
 Input is limited to 2 MiB before parsing; each authored definition is separately bounded to 65,536 source bytes and each field graph to 16,384 bytes. Unknown fields, malformed JSON, unsupported versions, nonfinite or invalid numeric state, duplicate world IDs, invalid authored or field hashes or semantics, dangling definition references, missing or forward node parents, cycles, excess children, invalid budget or lifetime allocator, exhausted capacities, and invalid or conflicting pending events are rejected. Gaps in world IDs are allowed after occurrence removal, but IDs are never reused. Loading constructs a complete candidate, recompiles each distinct authored and field revision, migrates only older supported versions, validates it, then returns or replaces state; a failed `load_into` leaves the current runtime untouched. Exact `f64` JSON round trips use Serde JSON's `float_roundtrip` parser feature.
 

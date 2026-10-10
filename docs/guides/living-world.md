@@ -65,3 +65,22 @@ The resource influence field guides CPU growth; it is not an implicit physical
 collider. The present demonstration does not exercise the experimental Field
 Graph compiler. See the [research report](../research/living-world-1.md) for
 actual captures, performance measurements, and limitations.
+
+## Living World 2: implicit organism
+
+Run `cargo run --release -p first-light --locked -- --living-implicit` to see
+the two analytical organisms and a two-lobed implicit field competing for the
+same finite sources. The implicit field's uniform scale grows from acquired
+resources. Its HUD shows tick, analytical node counts, source stocks, scale,
+total acquired units, and compiler status. The controls above apply, including
+M to move a source, R to reset, F5 to save and F9 to reload. After restart,
+`--living-load PATH` recognizes the v8 dynamic-field snapshot and restores
+the mixed view. Wait for the HUD's Structural path; interpreter fallback keeps
+the scene visible while compilation is pending.
+
+For a deterministic, GPU-free A/B experiment run
+`cargo run --release -p first-light --locked -- --living-implicit-experiment`.
+The JSON contains the exact initial v8 snapshot, tick-61 event, checkpoints,
+and replay result. `--living-implicit-measure` measures local CPU stages.
+See the [Living World 2 research record](../research/living-world-2.md) for
+GPU captures and limits. The field is visual and is not a physical collider.

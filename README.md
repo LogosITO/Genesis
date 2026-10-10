@@ -61,6 +61,8 @@ cargo run --release -p first-light --locked -- --living-experiment
 
 Two organisms with different growth strategies share finite resources. The experiment moves one source at tick 61 and checks later state and replay. The native view supports pause, fixed steps, resource intervention, reset, and save/load. See the [player guide](docs/guides/living-world.md), [scene](examples/first-light/scenes/living-world.json), and [local research record](docs/research/living-world-1.md). This is a bounded experimental model, not biological realism.
 
+**Living World 2** adds a resource-coupled implicit Field Graph organism to the same world. Run `cargo run --release -p first-light --locked -- --living-implicit` for the native mixed view, or `cargo run --release -p first-light --locked -- --living-implicit-experiment` for self-contained A/B JSON and replay. Its changing world-owned scale reuses a compatible Structural GPU program. See the [guide](docs/guides/living-world.md) and [research record](docs/research/living-world-2.md). This remains an experimental visual field without implicit physical contact.
+
 Inspect an external mathematical definition on the CPU, then display it as analytic capsules:
 
 ```sh
