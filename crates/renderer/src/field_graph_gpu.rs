@@ -21,10 +21,10 @@ struct GpuConfig {
     meta: [u32; 4],
 }
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct GpuNode {
-    links: [u32; 4],
-    param: [f32; 4],
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
+pub(crate) struct GpuNode {
+    pub(crate) links: [u32; 4],
+    pub(crate) param: [f32; 4],
 }
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -59,7 +59,7 @@ impl Default for GraphTracePolicy {
     }
 }
 impl GraphTracePolicy {
-    fn validate(self) -> Result<(), RenderError> {
+    pub(crate) fn validate(self) -> Result<(), RenderError> {
         if !self.tolerance.is_finite()
             || !self.safety.is_finite()
             || !(0.00001..=0.1).contains(&self.tolerance)
@@ -168,7 +168,7 @@ fn vec4(v: spatial_math::Vec3, w: f32) -> [f32; 4] {
     [v.x() as f32, v.y() as f32, v.z() as f32, w]
 }
 
-fn gpu_nodes(graph: &Graph) -> Vec<GpuNode> {
+pub(crate) fn gpu_nodes(graph: &Graph) -> Vec<GpuNode> {
     graph
         .nodes()
         .iter()

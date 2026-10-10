@@ -5,8 +5,8 @@ mod passage;
 
 use analytic_field::{AxisAlignedBox, Capsule, Sphere};
 use analytic_renderer::{
-    BranchVisibility, Camera, DrawOptions, GpuRenderer, GpuTimer, PickOutcome, Primitive, Scene,
-    SemanticTarget,
+    BranchVisibility, Camera, DrawOptions, GpuRenderer, GpuTimer, MixedDrawOptions, PickOutcome,
+    Primitive, Scene, SemanticTarget, field_graph_gpu::GraphTracePolicy,
 };
 use spatial_math::{Transform, Vec3};
 use std::{
@@ -352,6 +352,10 @@ struct App {
     cpu_total: Duration,
     life: bool,
     passage: bool,
+    mixed: bool,
+    show_analytic: bool,
+    show_fields: bool,
+    diagnostic: bool,
     won: bool,
     focused: bool,
     status: String,
@@ -437,6 +441,10 @@ impl App {
             cpu_total: Duration::ZERO,
             life,
             passage,
+            mixed: false,
+            show_analytic: true,
+            show_fields: true,
+            diagnostic: false,
             won: false,
             focused: true,
             status: if passage {
@@ -484,6 +492,16 @@ impl App {
         app.world
             .spawn_authored(&source, spatial_math::Transform::identity(), true)?;
         app.paused = true;
+        Ok(app)
+    }
+    fn mixed() -> Result<Self, Box<dyn std::error::Error>> {
+        let mut app = Self::new(true, false)?;
+        let source = include_bytes!("../../field-graph/definitions/twin.json");
+        for x in [-2.3, 2.3] {
+            app.world
+                .spawn_field(source, Transform::new(v(x, 1.2, 0.0), 0.8)?)?;
+        }
+        app.mixed = true;
         Ok(app)
     }
     fn authored_action(&mut self, move_instance: bool) {
@@ -1104,9 +1122,11 @@ impl App {
             String::new()
         };
         graphics.window.set_title(&format!(
-            "{} — tick {}{} — selected {:?} — contact {:?}{}",
+            "{} — tick {}{} — selected {:?} — contact {:?}{}{}",
             if self.passage {
                 "The Passage"
+            } else if self.mixed {
+                "Genesis Mixed Research View"
             } else if self.authored.is_some() {
                 "Genesis Authoring Preview"
             } else if self.life {
@@ -1125,7 +1145,15 @@ impl App {
                 " — prune queued"
             } else {
                 ""
-            }
+            },
+            if self.mixed {
+                format!(
+                    " — A:{} F:{} D:{}",
+                    self.show_analytic, self.show_fields, self.diagnostic
+                )
+            } else {
+                String::new()
+            },
         ));
         let acquire_started = Instant::now();
         let (frame, reconfigure_after) =
@@ -1167,18 +1195,36 @@ impl App {
         } else {
             None
         };
-        if let Err(error) = graphics.renderer.draw(
-            &graphics.device,
-            &graphics.queue,
-            &scene,
-            camera,
-            DrawOptions {
-                size: [size.width, size.height],
-                normal_debug: self.normals,
-                surface: Some(&view),
-                timer: sampled_timer,
-            },
-        ) {
+        let draw_options = DrawOptions {
+            size: [size.width, size.height],
+            normal_debug: self.normals,
+            surface: Some(&view),
+            timer: sampled_timer,
+        };
+        let rendered = if self.mixed {
+            graphics.renderer.draw_mixed(
+                &graphics.device,
+                &graphics.queue,
+                &self.world,
+                camera,
+                MixedDrawOptions {
+                    draw: draw_options,
+                    policy: GraphTracePolicy::default(),
+                    show_analytic: self.show_analytic,
+                    show_fields: self.show_fields,
+                    diagnostic: self.diagnostic,
+                },
+            )
+        } else {
+            graphics.renderer.draw(
+                &graphics.device,
+                &graphics.queue,
+                &scene,
+                camera,
+                draw_options,
+            )
+        };
+        if let Err(error) = rendered {
             eprintln!("render failed: {error}");
             event_loop.exit();
             return;
@@ -1498,6 +1544,23 @@ impl ApplicationHandler for App {
                         KeyCode::Escape => event_loop.exit(),
                         KeyCode::Space if self.authored.is_none() => self.toggle_pause(),
                         KeyCode::KeyN => self.normals = !self.normals,
+                        KeyCode::Digit1 if self.mixed => self.show_analytic = !self.show_analytic,
+                        KeyCode::Digit2 if self.mixed => self.show_fields = !self.show_fields,
+                        KeyCode::Digit3 if self.mixed => self.diagnostic = !self.diagnostic,
+                        KeyCode::KeyT if self.mixed => {
+                            if let Some(field) = self.world.field_instances().first() {
+                                let id = field.id();
+                                let position = field.transform().translation();
+                                let next_x = if position.x() < -1.0 { -0.2 } else { -2.3 };
+                                if let Err(error) = self.world.set_field_transform(
+                                    id,
+                                    Transform::new(v(next_x, position.y(), position.z()), 0.8)
+                                        .expect("bounded research transform"),
+                                ) {
+                                    eprintln!("field move rejected: {error}");
+                                }
+                            }
+                        }
                         KeyCode::KeyE if !self.world.authored_instances().is_empty() => {
                             self.authored_action(false)
                         }
@@ -1604,11 +1667,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [] => App::new(false, false)?,
         [flag] if flag == "--passage" => App::new(true, true)?,
         [flag] if flag == "--life" => App::new(true, false)?,
+        [flag] if flag == "--mixed" => App::mixed()?,
         [flag, path] if flag == "--authoring" => App::authoring(PathBuf::from(path))?,
         [flag, path] if flag == "--authored-world" => App::authored_world(PathBuf::from(path))?,
         _ => {
             return Err(
-                "usage: first-light [--life|--passage|--authoring FILE|--authored-world FILE]"
+                "usage: first-light [--life|--passage|--mixed|--authoring FILE|--authored-world FILE]"
                     .into(),
             );
         }
@@ -1618,6 +1682,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "{} controls: {} {}N normals; {}Esc exit",
         if passage {
             "The Passage"
+        } else if app.mixed {
+            "Genesis Mixed Research View"
         } else if life {
             "First Life"
         } else if !app.world.authored_instances().is_empty() {
@@ -1637,7 +1703,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             "Space pause; "
         },
-        if app.authored.is_some() {
+        if app.mixed {
+            "1 analytic; 2 fields; 3 diagnostics; T move field; "
+        } else if app.authored.is_some() {
             "R reload definition; "
         } else if !app.world.authored_instances().is_empty() {
             "Left click select; E enable/disable; M move +X; "

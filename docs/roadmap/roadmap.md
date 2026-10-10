@@ -116,18 +116,18 @@ or unimplemented. These milestones are not complete.
 
 ## Next engineering priorities
 
-The current mathematical-world campaign has a mixed offscreen depth reference
-and a restricted visual `smooth_union` operation. The native viewport is still
-analytic-only; the mixed reference blocks on GPU readback and cannot be used as
-an interactive frame loop. A proposed CPU bounds prefilter was rejected after
-an `f64`/`f32` boundary regression. See the [mixed-depth record](../research/mixed-depth-reference.md)
-and [smooth-field experiment](../research/smooth-field-experiment.md).
-GPU-side mixed composition and measured buffer reuse remain priorities before
-procedural materials or an externally authored World Lab can be called complete.
+The current campaign has a native mixed research mode with GPU-side depth
+comparison, multiple world-owned field instances, explicit numerical warning
+colors, and reused GPU image/definition buffers. The [native mixed record](../research/native-mixed-viewport.md)
+states its tested scope and limits. The blocking [mixed-depth reference](../research/mixed-depth-reference.md)
+remains a diagnostic comparison, and the [smooth-field experiment](../research/smooth-field-experiment.md)
+records the restricted `smooth_union` contract. A proposed CPU bounds prefilter
+was rejected after an `f64`/`f32` boundary regression.
 
-Integrate visual field instances into a depth-correct viewport without making
-their GPU output authoritative. Instrument field sample counts and evaluate
-conservative sparse-scene culling with paired before/after GPU captures. Improve
+Next, measure the native pipeline separately from readback, instrument field
+work, and evaluate conservative sparse-scene culling with paired before/after
+GPU captures. Mathematical materials and an externally authored World Lab are
+still required for the integrated research workflow. Improve
 the CPU solid-query proof before considering field-graph collisions. Verify
 the packaged native experience and numerical results on a second machine.
 

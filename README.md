@@ -83,6 +83,14 @@ cargo run -p field-graph-preview --locked -- --inspect examples/field-graph/defi
 
 The headless preview writes GPU-readback PPM captures under `target/field-graph-captures/` and prints CPU/GPU ray results as JSON. Editing the file in `--watch` mode reloads valid changes while preserving the previous preview on validation failure. See the [example guide](examples/field-graph/README.md) and [bounded graph contract](docs/specifications/field-graph.md).
 
+The native mixed research view displays living analytic structures and world-owned Field Graph instances in one depth-aware GPU pass:
+
+```sh
+cargo run -p first-light --locked -- --mixed
+```
+
+Use **1** for analytic visibility, **2** for field visibility, **3** for numerical diagnostics, and **T** to move a field occurrence. Camera and exit controls match First Light. See the [native mixed research record](docs/research/native-mixed-viewport.md) for tested depth behavior and limits.
+
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings

@@ -1,10 +1,15 @@
-use crate::{Bvh, Camera, Ray, RenderError, Scene, acceleration::FlatNode};
+use crate::{
+    Bvh, Camera, Ray, RenderError, Scene,
+    acceleration::FlatNode,
+    field_graph_gpu::{GpuNode, GraphTracePolicy, gpu_nodes},
+};
 use bytemuck::{Pod, Zeroable};
 use std::{
     sync::{Mutex, mpsc},
     time::Instant,
 };
 use wgpu::util::DeviceExt;
+use world_state::WorldState;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -31,6 +36,60 @@ struct GpuRay {
 struct GpuHit {
     distance_normal: [f32; 4],
     meta: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
+struct GpuFieldInstance {
+    position_scale: [f32; 4],
+    info: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuMixedOptions {
+    trace: [f32; 4],
+    info: [u32; 4], // occurrence count, node count, visibility/diagnostics flags, iteration budget
+}
+
+struct FieldBuffers {
+    nodes: Vec<GpuNode>,
+    instances: Vec<GpuFieldInstance>,
+    node_buffer: wgpu::Buffer,
+    instance_buffer: wgpu::Buffer,
+    node_capacity: u64,
+    instance_capacity: u64,
+}
+struct MixedImage {
+    size: [u32; 2],
+    texture: wgpu::Texture,
+}
+
+enum DrawMode<'a> {
+    Analytic(GpuTraversal),
+    Mixed(&'a WorldState, GraphTracePolicy, [bool; 3]),
+}
+
+fn mixed_shader_source() -> String {
+    let analytic = include_str!("../shaders/analytic.wgsl")
+        .split_once("@compute @workgroup_size(8, 8)")
+        .expect("analytic render entry")
+        .0;
+    let field = include_str!("../shaders/field_graph.wgsl")
+        .split_once("fn finite")
+        .expect("field evaluator")
+        .1
+        .split_once("@compute @workgroup_size(8, 8)")
+        .expect("field render entry")
+        .0;
+    let field = format!("fn finite{field}")
+        .replace("config.", "field_config.")
+        .replace("nodes[", "field_nodes[")
+        .replace("&nodes", "&field_nodes")
+        .replace("fn trace(", "fn field_trace(");
+    let mixed =
+        include_str!("../shaders/mixed.wgsl").replace("// FIELD_EVALUATOR_INSERTION_POINT", &field);
+    format!("{analytic}\n{mixed}")
 }
 
 /// GPU query result. GPU `f32` values are approximate and not error bounded.
@@ -61,6 +120,20 @@ pub struct DrawOptions<'a> {
     pub surface: Option<&'a wgpu::TextureView>,
     /// Optional timestamp sampler; the device must support it.
     pub timer: Option<&'a GpuTimer>,
+}
+
+/// Native mixed viewport controls. Both geometry paths use the same normalized world ray.
+pub struct MixedDrawOptions<'a> {
+    /// Existing viewport, normal and presentation targets.
+    pub draw: DrawOptions<'a>,
+    /// Bounded field tracing policy.
+    pub policy: GraphTracePolicy,
+    /// Draw analytic primitives from the world snapshot.
+    pub show_analytic: bool,
+    /// Draw enabled world-owned Field Graph occurrences.
+    pub show_fields: bool,
+    /// Mark uncertain, exhausted and near-coincident depth explicitly.
+    pub diagnostic: bool,
 }
 
 /// Direct analytic traversal, GPU BVH traversal, or the measured-size policy.
@@ -205,11 +278,15 @@ pub struct GpuRenderer {
     compute_layout: wgpu::BindGroupLayout,
     render_pipeline: wgpu::ComputePipeline,
     query_pipeline: wgpu::ComputePipeline,
+    mixed_layout: wgpu::BindGroupLayout,
+    mixed_pipeline: wgpu::ComputePipeline,
     present_layout: wgpu::BindGroupLayout,
     present_pipeline: wgpu::RenderPipeline,
     primitive_budget_bytes: u64,
     dummy_bvh: wgpu::Buffer,
     primitives: Mutex<Option<PrimitiveBuffer>>,
+    fields: Mutex<Option<FieldBuffers>>,
+    mixed_image: Mutex<Option<MixedImage>>,
 }
 struct PrimitiveBuffer {
     buffer: wgpu::Buffer,
@@ -361,6 +438,59 @@ impl GpuRenderer {
             compilation_options: Default::default(),
             cache: None,
         });
+        let mixed_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("mixed field resources"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let mixed_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("native mixed analytic and field rendering"),
+            source: wgpu::ShaderSource::Wgsl(mixed_shader_source().into()),
+        });
+        let mixed_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("mixed compute pipeline"),
+                bind_group_layouts: &[Some(&compute_layout), Some(&mixed_layout)],
+                immediate_size: 0,
+            });
+        let mixed_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("render mixed mathematical geometry"),
+            layout: Some(&mixed_pipeline_layout),
+            module: &mixed_shader,
+            entry_point: Some("render_mixed"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         let present_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("present image"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/present.wgsl").into()),
@@ -421,11 +551,15 @@ impl GpuRenderer {
             compute_layout,
             render_pipeline,
             query_pipeline,
+            mixed_layout,
+            mixed_pipeline,
             present_layout,
             present_pipeline,
             primitive_budget_bytes,
             dummy_bvh,
             primitives: Mutex::new(None),
+            fields: Mutex::new(None),
+            mixed_image: Mutex::new(None),
         })
     }
 
@@ -687,6 +821,175 @@ impl GpuRenderer {
         Ok((group, result_buffer))
     }
 
+    fn mixed_binding(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        world: &WorldState,
+        policy: GraphTracePolicy,
+        [show_analytic, show_fields, diagnostic]: [bool; 3],
+    ) -> Result<wgpu::BindGroup, RenderError> {
+        policy.validate()?;
+        world
+            .validate()
+            .map_err(|_| RenderError::InvalidInput("invalid world"))?;
+        let mut nodes = Vec::new();
+        let mut instances = Vec::new();
+        let mut definitions = Vec::new();
+        for instance in world.field_instances().iter().filter(|item| item.enabled()) {
+            let graph = world
+                .field_graph(instance.id())
+                .ok_or(RenderError::InvalidInput("missing field graph"))?;
+            let offset = if let Some((_, offset)) = definitions
+                .iter()
+                .find(|(revision, _)| *revision == instance.revision())
+            {
+                *offset
+            } else {
+                let offset = u32::try_from(nodes.len()).map_err(|_| RenderError::TooManyObjects)?;
+                let mut graph_nodes = gpu_nodes(graph);
+                for node in &mut graph_nodes {
+                    if (2..=5).contains(&node.links[0]) {
+                        node.links[1] = node.links[1]
+                            .checked_add(offset)
+                            .ok_or(RenderError::TooManyObjects)?;
+                    }
+                    if (4..=5).contains(&node.links[0]) {
+                        node.links[2] = node.links[2]
+                            .checked_add(offset)
+                            .ok_or(RenderError::TooManyObjects)?;
+                    }
+                }
+                nodes.extend(graph_nodes);
+                definitions.push((instance.revision(), offset));
+                offset
+            };
+            let t = instance.transform();
+            let id = instance.id().value();
+            instances.push(GpuFieldInstance {
+                position_scale: vec4(t.translation(), t.scale() as f32),
+                info: [
+                    graph
+                        .root()
+                        .checked_add(offset)
+                        .ok_or(RenderError::TooManyObjects)?,
+                    id as u32,
+                    (id >> 32) as u32,
+                    0,
+                ],
+            });
+        }
+        let node_count = u32::try_from(nodes.len()).map_err(|_| RenderError::TooManyObjects)?;
+        let node_bytes = (nodes.len().max(1) * std::mem::size_of::<GpuNode>()) as u64;
+        let instance_bytes =
+            (instances.len().max(1) * std::mem::size_of::<GpuFieldInstance>()) as u64;
+        let limit = device
+            .limits()
+            .max_storage_buffer_binding_size
+            .min(device.limits().max_buffer_size);
+        if node_bytes > limit || instance_bytes > limit {
+            return Err(RenderError::AccelerationCapacity {
+                requested_bytes: node_bytes.max(instance_bytes),
+                allowed_bytes: limit,
+            });
+        }
+        let mut cached = self
+            .fields
+            .lock()
+            .map_err(|_| RenderError::Gpu("field buffer lock poisoned".into()))?;
+        let replace = cached.as_ref().is_none_or(|old| {
+            old.node_capacity < node_bytes || old.instance_capacity < instance_bytes
+        });
+        if replace {
+            let node_capacity = node_bytes.next_power_of_two().min(limit);
+            let instance_capacity = instance_bytes.next_power_of_two().min(limit);
+            *cached = Some(FieldBuffers {
+                nodes: Vec::new(),
+                instances: Vec::new(),
+                node_buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("resident field graph nodes"),
+                    size: node_capacity,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                instance_buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("resident field instances"),
+                    size: instance_capacity,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                node_capacity,
+                instance_capacity,
+            });
+        }
+        let storage = cached.as_mut().expect("allocated above");
+        if replace || storage.nodes != nodes {
+            let dummy = GpuNode::zeroed();
+            queue.write_buffer(
+                &storage.node_buffer,
+                0,
+                if nodes.is_empty() {
+                    bytemuck::bytes_of(&dummy)
+                } else {
+                    bytemuck::cast_slice(&nodes)
+                },
+            );
+            storage.nodes = nodes;
+        }
+        if replace || storage.instances != instances {
+            let dummy = GpuFieldInstance::zeroed();
+            queue.write_buffer(
+                &storage.instance_buffer,
+                0,
+                if instances.is_empty() {
+                    bytemuck::bytes_of(&dummy)
+                } else {
+                    bytemuck::cast_slice(&instances)
+                },
+            );
+            storage.instances = instances;
+        }
+        let options = GpuMixedOptions {
+            trace: [
+                policy.tolerance,
+                policy.safety,
+                (policy.tolerance * 0.5).max(0.0001),
+                0.0,
+            ],
+            info: [
+                storage.instances.len() as u32,
+                node_count,
+                u32::from(show_analytic)
+                    | (u32::from(show_fields) << 1)
+                    | (u32::from(diagnostic) << 2),
+                policy.iterations,
+            ],
+        };
+        let options_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mixed render options"),
+            contents: bytemuck::bytes_of(&options),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        Ok(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mixed world fields"),
+            layout: &self.mixed_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: storage.node_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: storage.instance_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: options_buffer.as_entire_binding(),
+                },
+            ],
+        }))
+    }
+
     /// Computes an offscreen RGBA8 image and optionally presents it to a surface view.
     /// Zero-sized windows should skip this call until resized.
     pub fn draw(
@@ -709,6 +1012,54 @@ impl GpuRenderer {
         traversal: GpuTraversal,
         options: DrawOptions<'_>,
     ) -> Result<wgpu::Texture, RenderError> {
+        self.draw_internal(
+            device,
+            queue,
+            scene,
+            camera,
+            options,
+            DrawMode::Analytic(traversal),
+        )
+    }
+
+    /// Render analytic and world-owned implicit geometry directly to a GPU image.
+    /// No readback is performed; uncertainty uses visible warning colors.
+    pub fn draw_mixed(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        world: &WorldState,
+        camera: Camera,
+        options: MixedDrawOptions<'_>,
+    ) -> Result<wgpu::Texture, RenderError> {
+        let scene = Scene::from_world(world)?;
+        self.draw_internal(
+            device,
+            queue,
+            &scene,
+            camera,
+            options.draw,
+            DrawMode::Mixed(
+                world,
+                options.policy,
+                [
+                    options.show_analytic,
+                    options.show_fields,
+                    options.diagnostic,
+                ],
+            ),
+        )
+    }
+
+    fn draw_internal(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: &Scene,
+        camera: Camera,
+        options: DrawOptions<'_>,
+        mode: DrawMode<'_>,
+    ) -> Result<wgpu::Texture, RenderError> {
         let [width, height] = options.size;
         if width == 0
             || height == 0
@@ -717,7 +1068,24 @@ impl GpuRenderer {
         {
             return Err(RenderError::InvalidInput("invalid render resolution"));
         }
-        let image = Self::image(device, width, height);
+        let image = if matches!(mode, DrawMode::Mixed(..)) {
+            let mut cached = self
+                .mixed_image
+                .lock()
+                .map_err(|_| RenderError::Gpu("mixed image lock poisoned".into()))?;
+            if cached
+                .as_ref()
+                .is_none_or(|item| item.size != [width, height])
+            {
+                *cached = Some(MixedImage {
+                    size: [width, height],
+                    texture: Self::image(device, width, height),
+                });
+            }
+            cached.as_ref().expect("allocated above").texture.clone()
+        } else {
+            Self::image(device, width, height)
+        };
         let image_view = image.create_view(&wgpu::TextureViewDescriptor::default());
         let (group, _) = self.binding(
             device,
@@ -729,11 +1097,20 @@ impl GpuRenderer {
                 height,
                 options.normal_debug,
                 scene.primitives().len(),
-                traversal,
+                match mode {
+                    DrawMode::Analytic(traversal) => traversal,
+                    DrawMode::Mixed(..) => GpuTraversal::Auto,
+                },
             ),
             &image_view,
             &[],
         )?;
+        let field_group = match mode {
+            DrawMode::Analytic(..) => None,
+            DrawMode::Mixed(world, policy, flags) => {
+                Some(self.mixed_binding(device, queue, world, policy, flags)?)
+            }
+        };
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("analytic frame"),
         });
@@ -747,8 +1124,15 @@ impl GpuRenderer {
                 label: Some("analytic intersections"),
                 timestamp_writes: timestamps,
             });
-            pass.set_pipeline(&self.render_pipeline);
+            pass.set_pipeline(if field_group.is_some() {
+                &self.mixed_pipeline
+            } else {
+                &self.render_pipeline
+            });
             pass.set_bind_group(0, &group, &[]);
+            if let Some(field_group) = &field_group {
+                pass.set_bind_group(1, field_group, &[]);
+            }
             pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
         }
         if let Some(timer) = options.timer {
@@ -907,9 +1291,12 @@ mod tests {
         assert_eq!(std::mem::offset_of!(FlatNode, max), 16);
         assert_eq!(std::mem::offset_of!(FlatNode, meta), 32);
         assert_eq!(std::mem::offset_of!(FlatNode, leaf), 48);
+        assert_eq!(std::mem::size_of::<GpuFieldInstance>(), 32);
+        assert_eq!(std::mem::size_of::<GpuMixedOptions>(), 32);
         for shader in [
             include_str!("../shaders/analytic.wgsl"),
             include_str!("../shaders/present.wgsl"),
+            &mixed_shader_source(),
         ] {
             let module = naga::front::wgsl::parse_str(shader).unwrap();
             naga::valid::Validator::new(

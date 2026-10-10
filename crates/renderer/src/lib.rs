@@ -8,7 +8,7 @@ pub mod mixed;
 pub use acceleration::{Bvh, PrimitiveBounds};
 pub use gpu::{
     DrawOptions, GpuAccelerationStats, GpuRenderer, GpuResult, GpuTimer, GpuTraversal,
-    GpuUploadStats,
+    GpuUploadStats, MixedDrawOptions,
 };
 
 use analytic_field::{AxisAlignedBox, Capsule, Sphere};
