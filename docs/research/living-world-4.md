@@ -107,6 +107,9 @@ Independent one-pixel tests selected the implicit sphere at distance
 approximately 3.0, then the nearer analytical sphere at 1.5. A transformed
 box returned its expected 3.4 distance and outward normal, while an
 inside-sphere start returned explicit uncertainty rather than a false miss.
+Actual readback distances were 2.999040, 1.5 and 3.398912, respectively;
+the box normal was `[0,0,-1]`. The machine-readable values are in the local
+review package.
 Two occurrences sharing exact source bytes but holding radii 0.5 and 0.75
 returned separate identities and expected depths 3.5 and 3.25; this catches
 incorrect GPU node-buffer sharing. These cases had correct identity and

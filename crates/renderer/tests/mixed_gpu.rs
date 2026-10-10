@@ -164,6 +164,17 @@ fn native_mixed_diagnostic_selects_nearest_mathematical_object() {
         (second.distance.unwrap() - 3.25).abs() < 0.003,
         "{second:?}"
     );
+    eprintln!(
+        "mixed_spatial_oracle={}",
+        serde_json::json!({
+            "implicit_sphere":{"distance":implicit.distance,"identity":format!("{:?}",implicit.identity),"uncertain":implicit.uncertain},
+            "nearer_analytic":{"distance":analytic.distance,"identity":format!("{:?}",analytic.identity),"uncertain":analytic.uncertain},
+            "inside_start":{"hit":inside.hit,"uncertain":inside.uncertain,"exhausted":inside.exhausted},
+            "transformed_box":{"distance":box_hit.distance,"identity":format!("{:?}",box_hit.identity),"normal":box_hit.normal},
+            "shared_source_left":{"distance":first.distance,"identity":format!("{:?}",first.identity)},
+            "shared_source_right":{"distance":second.distance,"identity":format!("{:?}",second.identity)},
+        })
+    );
 }
 
 #[test]
