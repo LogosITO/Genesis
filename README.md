@@ -52,6 +52,15 @@ cargo test -p first-light passage_playthrough --locked -- --nocapture
 
 The orange body must cross a growing analytic branch after moving a finite resource source and pruning the stem. An in-window HUD shows controls and feedback; the headless playthrough prints a JSON success record. See the [player guide](docs/guides/the-passage.md), [manual QA checklist](docs/guides/playtest-qa.md), and [research record](docs/research/first-playable.md). On Windows, `powershell -ExecutionPolicy Bypass -File tools/package-passage.ps1` creates and checks a local ZIP under `target/dist/`; it is not published.
 
+Explore the local **Living World 1** ecosystem or reproduce its two-world experiment:
+
+```sh
+cargo run --release -p first-light --locked -- --living
+cargo run --release -p first-light --locked -- --living-experiment
+```
+
+Two organisms with different growth strategies share finite resources. The experiment moves one source at tick 61 and checks later state and replay. The native view supports pause, fixed steps, resource intervention, reset, and save/load. See the [player guide](docs/guides/living-world.md), [scene](examples/first-light/scenes/living-world.json), and [local research record](docs/research/living-world-1.md). This is a bounded experimental model, not biological realism.
+
 Inspect an external mathematical definition on the CPU, then display it as analytic capsules:
 
 ```sh

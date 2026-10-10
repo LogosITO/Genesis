@@ -32,3 +32,5 @@ The [Foundation 0.12 field-graph experiment](../reference/research/foundation-01
 [Performance Research 3](../reference/research/performance-research-3/) evaluates runtime graph parameters, shared-structure multi-definition rendering, actual World Lab frame intervals, and the remaining heterogeneous and DX12 limits.
 
 [Performance Research 4](../reference/research/performance-research-4/) evaluates bounded multi-topology GPU compilation, dynamic world edits, real window timing, and numerical diagnostic behavior.
+
+[Living World 1](../reference/research/living-world-1/) tests whether one source move changes later resource allocation and organism topology under shared deterministic laws, with save/replay evidence, actual GPU readbacks, and local performance measurements.
