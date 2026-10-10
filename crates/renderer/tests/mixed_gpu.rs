@@ -13,17 +13,7 @@ use std::{sync::mpsc, time::Duration};
 #[test]
 #[ignore = "requires native GPU; verify native specialization, cache and live revision fallback"]
 fn native_compiler_revision_lifecycle() {
-    let instance = if std::env::var("GENESIS_TEST_GPU_BACKEND").as_deref() == Ok("dx12") {
-        let mut options = wgpu::InstanceDescriptor::new_without_display_handle();
-        options.backends = wgpu::Backends::DX12;
-        if let Ok(dxc_path) = std::env::var("GENESIS_TEST_DXC_PATH") {
-            options.backend_options.dx12.shader_compiler =
-                wgpu::Dx12Compiler::DynamicDxc { dxc_path };
-        }
-        wgpu::Instance::new(options)
-    } else {
-        wgpu::Instance::default()
-    };
+    let instance = test_instance();
     let adapter =
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
             .unwrap();
@@ -274,7 +264,169 @@ fn native_compiler_revision_lifecycle() {
             .all(|(a, b)| a.abs_diff(*b) <= 1)
     );
 }
+
+#[test]
+#[ignore = "requires native GPU; compare structural shader against interpreter across parameter revisions"]
+fn structural_parameters_reuse_pipeline_for_two_revisions() {
+    let instance = test_instance();
+    let adapter =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+            .unwrap();
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let renderer =
+        pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+    let size = [160, 90];
+    let camera = Camera::look_at(v(0.0, 0.0, -5.0), Vec3::ZERO, v(0.0, 1.0, 0.0), 0.9).unwrap();
+    let first_source = br#"{"format_version":1,"id":"first","root":"s","nodes":[{"op":"sphere","id":"s","radius":0.7}]}"#;
+    let second_source = br#"{"format_version":1,"id":"second","root":"s","nodes":[{"op":"sphere","id":"s","radius":0.5}]}"#;
+    let revised_source = br#"{"format_version":1,"id":"revised","root":"s","nodes":[{"op":"sphere","id":"s","radius":0.3}]}"#;
+    let mut world = WorldState::new(DeterministicSeed(301));
+    let first = world
+        .spawn_field(
+            first_source,
+            Transform::new(v(-0.8, 0.0, 0.0), 1.0).unwrap(),
+        )
+        .unwrap();
+    world
+        .spawn_field(
+            second_source,
+            Transform::new(v(0.8, 0.0, 0.0), 1.0).unwrap(),
+        )
+        .unwrap();
+    world
+        .spawn_sphere(
+            Sphere::new(0.2).unwrap(),
+            Transform::new(v(0.0, -0.8, 0.0), 1.0).unwrap(),
+            0.0,
+        )
+        .unwrap();
+    let draw = |world: &WorldState, execution| {
+        let image = renderer
+            .draw_mixed_with_execution(
+                &device,
+                &queue,
+                world,
+                camera,
+                MixedDrawOptions {
+                    draw: DrawOptions {
+                        size,
+                        normal_debug: false,
+                        surface: None,
+                        timer: None,
+                    },
+                    policy: GraphTracePolicy::default(),
+                    show_analytic: true,
+                    show_fields: true,
+                    diagnostic: true,
+                    materials: None,
+                    simulation_seconds: 0.0,
+                    background: [0.0; 3],
+                    light_direction: [0.5, 0.8, -0.6],
+                },
+                GpuFieldRenderMode {
+                    execution,
+                    spatial_guard: true,
+                },
+            )
+            .unwrap();
+        rgba(&device, &queue, &image, size)
+    };
+    let reference = draw(&world, GpuFieldExecution::Interpreter);
+    for _ in 0..200 {
+        let candidate = draw(&world, GpuFieldExecution::Structural);
+        if renderer.compiler_stats().unwrap().active == GpuFieldPath::Structural {
+            assert!(
+                reference
+                    .iter()
+                    .zip(candidate)
+                    .all(|(a, b)| a.abs_diff(b) <= 1)
+            );
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        renderer.compiler_stats().unwrap().active,
+        GpuFieldPath::Structural
+    );
+    let captures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/performance-research-3-review");
+    std::fs::create_dir_all(&captures).unwrap();
+    write_bmp(
+        &captures.join("structural-before.bmp"),
+        &draw(&world, GpuFieldExecution::Structural),
+        size,
+    );
+    let requests = renderer.compiler_stats().unwrap().requests;
+    world.replace_field(first, revised_source).unwrap();
+    let revised_reference = draw(&world, GpuFieldExecution::Interpreter);
+    assert_ne!(reference, revised_reference);
+    let revised = draw(&world, GpuFieldExecution::Structural);
+    assert_eq!(
+        renderer.compiler_stats().unwrap().active,
+        GpuFieldPath::Structural
+    );
+    assert_eq!(renderer.compiler_stats().unwrap().requests, requests);
+    assert!(
+        revised_reference
+            .iter()
+            .zip(revised)
+            .all(|(a, b)| a.abs_diff(b) <= 1)
+    );
+    write_bmp(
+        &captures.join("structural-after.bmp"),
+        &draw(&world, GpuFieldExecution::Structural),
+        size,
+    );
+    for (source, x) in [
+        (br#"{"format_version":1,"id":"third","root":"s","nodes":[{"op":"sphere","id":"s","radius":0.4}]}"#.as_slice(), -1.5),
+        (br#"{"format_version":1,"id":"fourth","root":"s","nodes":[{"op":"sphere","id":"s","radius":0.6}]}"#.as_slice(), 1.5),
+    ] {
+        world
+            .spawn_field(source, Transform::new(v(x, 0.4, 0.0), 1.0).unwrap())
+            .unwrap();
+    }
+    assert_eq!(world.field_definitions().len(), 4);
+    let four_reference = draw(&world, GpuFieldExecution::Interpreter);
+    let four_structural = draw(&world, GpuFieldExecution::Structural);
+    assert_eq!(
+        renderer.compiler_stats().unwrap().active,
+        GpuFieldPath::Structural
+    );
+    assert_eq!(renderer.compiler_stats().unwrap().requests, requests);
+    assert!(
+        four_reference
+            .iter()
+            .zip(four_structural)
+            .all(|(a, b)| a.abs_diff(b) <= 1)
+    );
+    let box_source = br#"{"format_version":1,"id":"box","root":"b","nodes":[{"op":"box","id":"b","half_extent":[0.3,0.4,0.5]}]}"#;
+    world.replace_field(first, box_source).unwrap();
+    let fallback_reference = draw(&world, GpuFieldExecution::Interpreter);
+    let fallback = draw(&world, GpuFieldExecution::Structural);
+    assert_eq!(
+        renderer.compiler_stats().unwrap().active,
+        GpuFieldPath::Interpreter
+    );
+    assert_eq!(fallback_reference, fallback);
+    assert_eq!(renderer.compiler_stats().unwrap().requests, requests);
+}
 use world_state::{DeterministicSeed, WorldState};
+
+fn test_instance() -> wgpu::Instance {
+    if std::env::var("GENESIS_TEST_GPU_BACKEND").as_deref() == Ok("dx12") {
+        let mut options = wgpu::InstanceDescriptor::new_without_display_handle();
+        options.backends = wgpu::Backends::DX12;
+        if let Ok(dxc_path) = std::env::var("GENESIS_TEST_DXC_PATH") {
+            options.backend_options.dx12.shader_compiler =
+                wgpu::Dx12Compiler::DynamicDxc { dxc_path };
+        }
+        wgpu::Instance::new(options)
+    } else {
+        wgpu::Instance::default()
+    }
+}
 
 fn v(x: f64, y: f64, z: f64) -> Vec3 {
     Vec3::new(x, y, z).unwrap()
@@ -386,7 +538,7 @@ fn bounded_mixed_viewport_matches_direct_field_queries() {
         pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
     let reference = pollster::block_on(GraphGpuRenderer::new(&device)).unwrap();
     let camera = Camera::look_at(v(0.0, 0.0, -6.0), Vec3::ZERO, v(0.0, 1.0, 0.0), 0.9).unwrap();
-    let size = [129, 129];
+    let size = [256, 256];
     let rays = (0..size[1])
         .flat_map(|y| (0..size[0]).map(move |x| camera.ray(x, y, size[0], size[1]).unwrap()))
         .collect::<Vec<_>>();
@@ -471,7 +623,7 @@ fn bounded_mixed_viewport_matches_direct_field_queries() {
             }
             compared += 1;
         }
-        assert!(compared > 16_000);
+        assert!(compared > 65_000);
         println!(
             "bounded_parity case={case} compared={compared} adapter={}",
             adapter.get_info().name

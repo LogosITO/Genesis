@@ -1,7 +1,10 @@
 use crate::{
     Bvh, Camera, Ray, RenderError, Scene, SemanticTarget,
     acceleration::FlatNode,
-    field_compiler::{SEMANTICS_VERSION, specialized_field_source},
+    field_compiler::{
+        SEMANTICS_VERSION, StructuralKey, specialized_field_source, structural_field_source,
+        structural_key,
+    },
     field_graph_gpu::{GpuNode, GraphTracePolicy, gpu_nodes},
     material::MaterialSet,
 };
@@ -81,6 +84,7 @@ struct FieldBuffers {
     analytic_index_capacity: u64,
     node_uploads: u64,
     material_uploads: u64,
+    last_node_enqueue_ms: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -100,7 +104,7 @@ struct MixedImage {
 
 enum DrawMode<'a> {
     Analytic(GpuTraversal),
-    Mixed(&'a WorldState, MixedSceneOptions<'a>),
+    Mixed(&'a WorldState, MixedSceneOptions<'a>, f64),
 }
 
 fn mixed_shader_source(field_source: &str) -> String {
@@ -124,10 +128,15 @@ fn compile_mixed_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     graph: &Graph,
+    runtime_parameters: bool,
 ) -> Result<CompiledArtifact, String> {
     let started = Instant::now();
-    let field = specialized_field_source(graph)
-        .ok_or_else(|| "definition exceeds finite GPU or shader source budget".to_owned())?;
+    let field = if runtime_parameters {
+        structural_field_source(graph)
+    } else {
+        specialized_field_source(graph)
+    }
+    .ok_or_else(|| "definition exceeds finite GPU or shader source budget".to_owned())?;
     let source = mixed_shader_source(&field);
     let source_bytes = source.len();
     let source_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -230,6 +239,8 @@ pub struct MixedDrawOptions<'a> {
 pub enum GpuFieldExecution {
     /// Interpret until a validated specialized pipeline for the current definition is ready.
     Auto,
+    /// Experimentally compile node topology and read validated parameters from GPU storage.
+    Structural,
     /// Always use the reference interpreter.
     Interpreter,
 }
@@ -259,6 +270,8 @@ pub enum GpuFieldPath {
     Interpreter,
     /// One exact definition revision was compiled and selected.
     Specialized,
+    /// A structural shader reads current numerical parameters from the field-node buffer.
+    Structural,
 }
 
 /// Renderer-local compilation diagnostics. Pipelines never cross device ownership.
@@ -440,14 +453,21 @@ pub struct GpuRenderer {
     fields: Mutex<Option<FieldBuffers>>,
     mixed_image: Mutex<Option<MixedImage>>,
     compiler: Mutex<CompilerCache>,
+    last_draw_stats: Mutex<Option<GpuDrawStats>>,
 }
 
 const MAX_COMPILED_PIPELINES: usize = 4;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CompilerKey {
-    revision: DefinitionRevision,
-    semantics: u32,
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CompilerKey {
+    Exact {
+        revision: DefinitionRevision,
+        semantics: u32,
+    },
+    Structure {
+        schema: StructuralKey,
+        semantics: u32,
+    },
 }
 
 struct CompiledPipeline {
@@ -547,6 +567,8 @@ pub struct GpuFieldCacheStats {
     pub material_uploads: u64,
     /// Active unique definition bytes.
     pub node_bytes: u64,
+    /// CPU time spent queuing the most recent field-node buffer write; excludes GPU transfer.
+    pub last_node_enqueue_ms: f64,
 }
 /// CPU-side cost of queuing the most recent scene upload; not GPU transfer time.
 #[derive(Clone, Copy, Debug, Default)]
@@ -560,7 +582,26 @@ pub struct GpuUploadStats {
     /// CPU BVH build and flatten time, in milliseconds.
     pub bvh_build_ms: f64,
 }
+
+/// CPU stage timings from the most recent draw; GPU execution is measured separately.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GpuDrawStats {
+    /// Conversion of authoritative world state to the analytical scene.
+    pub scene_ms: f64,
+    /// Analytical primitive buffer and bind-group preparation.
+    pub analytic_binding_ms: f64,
+    /// Field, instance, and material buffer and bind-group preparation.
+    pub field_binding_ms: f64,
+    /// Selection or queuing of the compiled pipeline.
+    pub pipeline_selection_ms: f64,
+    /// CPU command encoding and queue submission, excluding GPU completion.
+    pub encode_submit_ms: f64,
+}
 impl GpuRenderer {
+    /// CPU stage timings from the most recent successful draw.
+    pub fn last_draw_stats(&self) -> Option<GpuDrawStats> {
+        *self.last_draw_stats.lock().ok()?
+    }
     /// Inspect bounded, renderer-local mathematical shader compilation.
     pub fn compiler_stats(&self) -> Option<GpuCompilerStats> {
         let state = self.compiler.lock().ok()?;
@@ -586,7 +627,7 @@ impl GpuRenderer {
         &self,
         device: &wgpu::Device,
         world: &WorldState,
-        enabled: bool,
+        execution: GpuFieldExecution,
     ) -> Result<Option<wgpu::ComputePipeline>, RenderError> {
         if device != &self.device {
             return Err(RenderError::InvalidInput("renderer device changed"));
@@ -611,22 +652,39 @@ impl GpuRenderer {
             let pending = state.pending.take().expect("completed pending request");
             state.insert(pending.key, finished.unwrap_or_else(Err));
         }
-        if !enabled {
+        if execution == GpuFieldExecution::Interpreter {
             return Ok(None);
         }
         let mut selected = None;
+        let mut graph = None;
         for instance in world.field_instances().iter().filter(|item| item.enabled()) {
-            if selected.is_some_and(|revision| revision != instance.revision()) {
+            let current = world
+                .field_graph(instance.id())
+                .ok_or(RenderError::InvalidInput("missing field graph"))?;
+            let key = match execution {
+                GpuFieldExecution::Auto => CompilerKey::Exact {
+                    revision: instance.revision(),
+                    semantics: SEMANTICS_VERSION,
+                },
+                GpuFieldExecution::Structural => {
+                    let Some(schema) = structural_key(current) else {
+                        return Ok(None);
+                    };
+                    CompilerKey::Structure {
+                        schema,
+                        semantics: SEMANTICS_VERSION,
+                    }
+                }
+                GpuFieldExecution::Interpreter => unreachable!(),
+            };
+            if selected.as_ref().is_some_and(|old| old != &key) {
                 return Ok(None);
             }
-            selected = Some(instance.revision());
+            selected = Some(key);
+            graph.get_or_insert_with(|| current.clone());
         }
-        let Some(revision) = selected else {
+        let Some(key) = selected else {
             return Ok(None);
-        };
-        let key = CompilerKey {
-            revision,
-            semantics: SEMANTICS_VERSION,
         };
         if let Some(index) = state.entries.iter().position(|entry| entry.key == key) {
             let entry = state.entries.remove(index).expect("found entry");
@@ -639,25 +697,24 @@ impl GpuRenderer {
             state.entries.push_back(entry);
             if pipeline.is_some() {
                 state.cache_hits = state.cache_hits.saturating_add(1);
-                state.active = GpuFieldPath::Specialized;
+                state.active = match key {
+                    CompilerKey::Exact { .. } => GpuFieldPath::Specialized,
+                    CompilerKey::Structure { .. } => GpuFieldPath::Structural,
+                };
             }
             return Ok(pipeline);
         }
         if state.pending.is_none() {
-            let graph = world
-                .field_instances()
-                .iter()
-                .find(|item| item.enabled() && item.revision() == revision)
-                .and_then(|item| world.field_graph(item.id()))
-                .ok_or(RenderError::InvalidInput("missing field graph"))?
-                .clone();
+            let graph = graph.expect("selected graph");
+            let runtime_parameters = matches!(key, CompilerKey::Structure { .. });
             let device = device.clone();
             let layout = self.mixed_pipeline_layout.clone();
             let (sender, receiver) = mpsc::sync_channel(1);
             match std::thread::Builder::new()
                 .name("genesis-field-compiler".into())
                 .spawn(move || {
-                    let result = compile_mixed_pipeline(&device, &layout, &graph);
+                    let result =
+                        compile_mixed_pipeline(&device, &layout, &graph, runtime_parameters);
                     let _ = sender.send(result);
                 }) {
                 Ok(_) => {
@@ -677,6 +734,7 @@ impl GpuRenderer {
             node_uploads: fields.node_uploads,
             material_uploads: fields.material_uploads,
             node_bytes: (fields.nodes.len() * std::mem::size_of::<GpuNode>()) as u64,
+            last_node_enqueue_ms: fields.last_node_enqueue_ms,
         })
     }
     /// Uses a 16 MiB primitive-storage budget. This excludes render targets and query buffers.
@@ -936,6 +994,7 @@ impl GpuRenderer {
             fields: Mutex::new(None),
             mixed_image: Mutex::new(None),
             compiler: Mutex::new(CompilerCache::default()),
+            last_draw_stats: Mutex::new(None),
         })
     }
 
@@ -1399,11 +1458,14 @@ impl GpuRenderer {
                 analytic_index_capacity,
                 node_uploads: 0,
                 material_uploads: 0,
+                last_node_enqueue_ms: 0.0,
             });
         }
         let storage = cached.as_mut().expect("allocated above");
+        storage.last_node_enqueue_ms = 0.0;
         if replace || storage.nodes != nodes {
             let dummy = GpuNode::zeroed();
+            let started = Instant::now();
             queue.write_buffer(
                 &storage.node_buffer,
                 0,
@@ -1413,6 +1475,7 @@ impl GpuRenderer {
                     bytemuck::cast_slice(&nodes)
                 },
             );
+            storage.last_node_enqueue_ms = started.elapsed().as_secs_f64() * 1000.0;
             storage.nodes = nodes;
             storage.node_uploads += 1;
         }
@@ -1581,7 +1644,9 @@ impl GpuRenderer {
         options: MixedDrawOptions<'_>,
         render_mode: GpuFieldRenderMode,
     ) -> Result<wgpu::Texture, RenderError> {
+        let scene_started = Instant::now();
         let scene = Scene::from_world(world)?;
+        let scene_ms = scene_started.elapsed().as_secs_f64() * 1000.0;
         self.draw_internal(
             device,
             queue,
@@ -1603,6 +1668,7 @@ impl GpuRenderer {
                     light_direction: options.light_direction,
                     render_mode,
                 },
+                scene_ms,
             ),
         )
     }
@@ -1616,6 +1682,10 @@ impl GpuRenderer {
         options: DrawOptions<'_>,
         mode: DrawMode<'_>,
     ) -> Result<wgpu::Texture, RenderError> {
+        let scene_ms = match mode {
+            DrawMode::Analytic(..) => 0.0,
+            DrawMode::Mixed(_, _, ms) => ms,
+        };
         let [width, height] = options.size;
         if width == 0
             || height == 0
@@ -1643,6 +1713,7 @@ impl GpuRenderer {
             Self::image(device, width, height)
         };
         let image_view = image.create_view(&wgpu::TextureViewDescriptor::default());
+        let stage_started = Instant::now();
         let (group, _) = self.binding(
             device,
             queue,
@@ -1661,20 +1732,30 @@ impl GpuRenderer {
             &image_view,
             &[],
         )?;
+        let analytic_binding_ms = stage_started.elapsed().as_secs_f64() * 1000.0;
+        let stage_started = Instant::now();
         let field_group = match mode {
             DrawMode::Analytic(..) => None,
-            DrawMode::Mixed(world, mixed_options) => {
+            DrawMode::Mixed(world, mixed_options, _) => {
                 Some(self.mixed_binding(device, queue, world, scene, mixed_options)?)
             }
         };
+        let field_binding_ms = stage_started.elapsed().as_secs_f64() * 1000.0;
+        let stage_started = Instant::now();
         let compiled_pipeline = match mode {
-            DrawMode::Mixed(world, settings) => self.compiled_pipeline(
+            DrawMode::Mixed(world, settings, _) => self.compiled_pipeline(
                 device,
                 world,
-                settings.flags[1] && settings.render_mode.execution == GpuFieldExecution::Auto,
+                if settings.flags[1] {
+                    settings.render_mode.execution
+                } else {
+                    GpuFieldExecution::Interpreter
+                },
             )?,
             DrawMode::Analytic(..) => None,
         };
+        let pipeline_selection_ms = stage_started.elapsed().as_secs_f64() * 1000.0;
+        let stage_started = Instant::now();
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("analytic frame"),
         });
@@ -1733,6 +1814,15 @@ impl GpuRenderer {
             pass.draw(0..3, 0..1);
         }
         queue.submit([encoder.finish()]);
+        if let Ok(mut last) = self.last_draw_stats.lock() {
+            *last = Some(GpuDrawStats {
+                scene_ms,
+                analytic_binding_ms,
+                field_binding_ms,
+                pipeline_selection_ms,
+                encode_submit_ms: stage_started.elapsed().as_secs_f64() * 1000.0,
+            });
+        }
         Ok(image)
     }
 
@@ -1893,7 +1983,7 @@ mod tests {
     fn compiled_cache_is_bounded_and_revision_scoped() {
         let mut cache = CompilerCache::default();
         for index in 0..=MAX_COMPILED_PIPELINES {
-            let key = CompilerKey {
+            let key = CompilerKey::Exact {
                 revision: DefinitionRevision::of(&[index as u8]),
                 semantics: SEMANTICS_VERSION,
             };
@@ -1902,12 +1992,15 @@ mod tests {
         assert_eq!(cache.entries.len(), MAX_COMPILED_PIPELINES);
         assert_eq!(cache.failures, (MAX_COMPILED_PIPELINES + 1) as u64);
         assert_eq!(
-            cache.entries.front().unwrap().key.revision,
-            DefinitionRevision::of(&[1])
+            cache.entries.front().unwrap().key,
+            CompilerKey::Exact {
+                revision: DefinitionRevision::of(&[1]),
+                semantics: SEMANTICS_VERSION,
+            }
         );
         assert_ne!(
             cache.entries.front().unwrap().key,
-            CompilerKey {
+            CompilerKey::Exact {
                 revision: DefinitionRevision::of(&[1]),
                 semantics: SEMANTICS_VERSION + 1,
             }
