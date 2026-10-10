@@ -230,6 +230,7 @@ fn trace(origin: vec3<f32>, direction: vec3<f32>, near: f32, far: f32) -> Hit {
     return trace_direct(origin, direction, near, far);
 }
 
+// GENESIS_ANALYTIC_LIBRARY_END
 @compute @workgroup_size(8, 8)
 fn render(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= u32(camera.view.x) || gid.y >= u32(camera.view.y)) { return; }

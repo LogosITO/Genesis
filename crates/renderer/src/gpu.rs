@@ -105,7 +105,7 @@ enum DrawMode<'a> {
 
 fn mixed_shader_source(field_source: &str) -> String {
     let analytic = include_str!("../shaders/analytic.wgsl")
-        .split_once("@compute @workgroup_size(8, 8)")
+        .split_once("// GENESIS_ANALYTIC_LIBRARY_END")
         .expect("analytic render entry")
         .0;
     let field = field_source
