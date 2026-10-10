@@ -792,6 +792,164 @@ fn multi_definition_matrix() {
     }
 }
 
+#[test]
+#[ignore = "requires native GPU timestamps; four-topology authoritative edit sequence"]
+fn heterogeneous_world_edit_stress() {
+    let instance = wgpu::Instance::default();
+    let adapter =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+            .unwrap();
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+        ..Default::default()
+    }))
+    .unwrap();
+    let renderer =
+        pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+    let timer = GpuTimer::new(&device).unwrap();
+    let camera = Camera::look_at(v(0.0, 0.0, -6.0), Vec3::ZERO, v(0.0, 1.0, 0.0), 0.9).unwrap();
+    let sphere = br#"{"format_version":1,"id":"living","root":"s","nodes":[{"op":"sphere","id":"s","radius":0.5}]}"#;
+    let box_graph = br#"{"format_version":1,"id":"box","root":"b","nodes":[{"op":"box","id":"b","half_extent":[0.4,0.5,0.4]}]}"#;
+    let smooth = br#"{"format_version":1,"id":"smooth","root":"u","nodes":[{"op":"sphere","id":"s","radius":0.35},{"op":"translate","id":"t","child":"s","offset":[0.3,0,0]},{"op":"smooth_union","id":"u","left":"s","right":"t","width":0.2}]}"#;
+    let changed = br#"{"format_version":1,"id":"changed","root":"t","nodes":[{"op":"box","id":"b","half_extent":[0.3,0.4,0.3]},{"op":"translate","id":"t","child":"b","offset":[0.2,0,0]}]}"#;
+    let mut world = WorldState::new(DeterministicSeed(407));
+    let mut ids = Vec::new();
+    for (source, x) in [
+        (sphere.as_slice(), -1.8),
+        (box_graph.as_slice(), -0.6),
+        (graph(4).as_slice(), 0.6),
+        (smooth.as_slice(), 1.8),
+    ] {
+        ids.push(
+            world
+                .spawn_field(source, Transform::new(v(x, 0.0, 0.0), 1.0).unwrap())
+                .unwrap(),
+        );
+    }
+    let initial_ids = world
+        .field_instances()
+        .iter()
+        .map(|item| item.id())
+        .collect::<Vec<_>>();
+    let mut replay = world.clone();
+    let draw = |world: &WorldState| {
+        let started = Instant::now();
+        renderer
+            .draw_mixed_with_execution(
+                &device,
+                &queue,
+                world,
+                camera,
+                MixedDrawOptions {
+                    draw: DrawOptions {
+                        size: [640, 360],
+                        normal_debug: false,
+                        surface: None,
+                        timer: Some(&timer),
+                    },
+                    policy: GraphTracePolicy::default(),
+                    show_analytic: true,
+                    show_fields: true,
+                    diagnostic: true,
+                    materials: None,
+                    simulation_seconds: 0.0,
+                    background: [0.05, 0.075, 0.115],
+                    light_direction: [0.5, 0.8, -0.6],
+                },
+                GpuFieldRenderMode {
+                    execution: GpuFieldExecution::Combined,
+                    spatial_guard: true,
+                },
+            )
+            .unwrap();
+        (
+            started.elapsed().as_secs_f64() * 1000.0,
+            timer.read_ms(&device, &queue).unwrap(),
+        )
+    };
+    for _ in 0..500 {
+        draw(&world);
+        if renderer.compiler_stats().unwrap().active == GpuFieldPath::Combined {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(
+        renderer.compiler_stats().unwrap().active,
+        GpuFieldPath::Combined
+    );
+    let initial_requests = renderer.compiler_stats().unwrap().requests;
+    let evolve = |world: &mut WorldState, step: usize| {
+        world
+            .set_field_transform(
+                ids[1],
+                Transform::new(v(-0.6 + (step % 5) as f64 * 0.02, 0.0, 0.0), 1.0).unwrap(),
+            )
+            .unwrap();
+        if step == 15 {
+            world.replace_field(ids[0], changed).unwrap();
+        } else if step == 25 || (step.is_multiple_of(2) && !(15..25).contains(&step)) {
+            let source = format!(
+                r#"{{"format_version":1,"id":"living","root":"s","nodes":[{{"op":"sphere","id":"s","radius":{:.2}}}]}}"#,
+                0.5 + step as f64 * 0.01
+            );
+            world.replace_field(ids[0], source.as_bytes()).unwrap();
+        }
+        if step == 20 {
+            let before = world.clone();
+            assert!(world.replace_field(ids[0], b"{invalid").is_err());
+            assert_eq!(*world, before);
+        }
+    };
+    for step in 0..40 {
+        let started = Instant::now();
+        evolve(&mut world, step);
+        let update_ms = started.elapsed().as_secs_f64() * 1000.0;
+        evolve(&mut replay, step);
+        assert_eq!(world, replay);
+        assert_eq!(
+            world
+                .field_instances()
+                .iter()
+                .map(|item| item.id())
+                .collect::<Vec<_>>(),
+            initial_ids
+        );
+        let (submit_ms, gpu_ms) = draw(&world);
+        let state = renderer.compiler_stats().unwrap();
+        println!(
+            "HETEROGENEOUS_WORLD_FRAME {}",
+            serde_json::json!({
+                "step": step, "active": format!("{:?}", state.active),
+                "world_update_ms": update_ms, "cpu_draw_submit_ms": submit_ms,
+                "gpu_compute_ms": gpu_ms, "requests": state.requests,
+                "node_enqueue_ms": renderer.field_cache_stats().unwrap().last_node_enqueue_ms,
+                "revision": world.field_instances()[0].revision().hex(),
+            })
+        );
+        if step == 15 {
+            assert_eq!(state.active, GpuFieldPath::Interpreter);
+            for _ in 0..500 {
+                draw(&world);
+                if renderer.compiler_stats().unwrap().active == GpuFieldPath::Combined {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_eq!(
+                renderer.compiler_stats().unwrap().active,
+                GpuFieldPath::Combined
+            );
+        } else {
+            assert_eq!(state.active, GpuFieldPath::Combined);
+        }
+    }
+    assert_eq!(
+        renderer.compiler_stats().unwrap().requests,
+        initial_requests + 1
+    );
+}
+
 fn evolve_visual_world(world: &mut WorldState, ids: [EntityId; 3], step: usize) {
     let x = -1.2 + (step % 5) as f64 * 0.04;
     world

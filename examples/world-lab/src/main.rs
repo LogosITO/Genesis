@@ -147,7 +147,7 @@ struct FrameProfile {
 
 impl App {
     fn new(path: PathBuf) -> Result<Self, Box<dyn Error>> {
-        let scene = LabScene::load(&path)?;
+        let mut scene = LabScene::load(&path)?;
         let capture_once = std::env::var_os("GENESIS_WORLD_LAB_CAPTURE_ONCE").map(PathBuf::from);
         let profile = std::env::var_os("GENESIS_WORLD_LAB_PROFILE")
             .map(|path| -> Result<FrameProfile, Box<dyn Error>> {
@@ -164,14 +164,14 @@ impl App {
                 })
             })
             .transpose()?;
-        let profile_execution = match std::env::var("GENESIS_WORLD_LAB_PROFILE_SCENARIO")
-            .ok()
-            .as_deref()
-        {
+        let profile_scenario = std::env::var("GENESIS_WORLD_LAB_PROFILE_SCENARIO").ok();
+        let profile_execution = match profile_scenario.as_deref() {
             None => None,
             Some("auto") => Some(GpuFieldExecution::Auto),
             Some("structural") => Some(GpuFieldExecution::Structural),
-            Some(_) => return Err("profile scenario must be auto or structural".into()),
+            Some("heterogeneous-auto") => Some(GpuFieldExecution::Auto),
+            Some("heterogeneous-combined") => Some(GpuFieldExecution::Combined),
+            Some(_) => return Err("unknown profile scenario".into()),
         };
         if profile_execution.is_some()
             && (profile.is_none()
@@ -183,6 +183,16 @@ impl App {
             return Err(
                 "profile scenario requires the unmodified showcase scene and profile output".into(),
             );
+        }
+        if matches!(
+            profile_scenario.as_deref(),
+            Some("heterogeneous-auto" | "heterogeneous-combined")
+        ) {
+            scene.world.spawn_field(
+                br#"{"format_version":1,"id":"profile-box","root":"b","nodes":[{"op":"box","id":"b","half_extent":[0.5,0.4,0.5]}]}"#,
+                Transform::new(Vec3::new(0.0, 1.2, -0.5)?, 0.7)?,
+            )?;
+            scene.graph_nodes += 1;
         }
         Ok(Self {
             yaw: scene.yaw,
@@ -310,6 +320,7 @@ impl App {
                         .field_instances()
                         .iter()
                         .map(|item| item.id())
+                        .take(2)
                         .collect::<Vec<_>>()
                     {
                         self.scene.world.replace_field(id, &source)?;
@@ -318,6 +329,14 @@ impl App {
                 if frame < 500 {
                     "rapid_revision"
                 } else {
+                    if self.scene.world.field_instances().len() == 3 && frame == 525 {
+                        let id = self.scene.world.field_instances()[2].id();
+                        self.scene.world.replace_field(id, br#"{"format_version":1,"id":"profile-sphere","root":"s","nodes":[{"op":"sphere","id":"s","radius":0.5}]}"#)?;
+                    }
+                    if self.scene.world.field_instances().len() == 3 && frame == 545 {
+                        let id = self.scene.world.field_instances()[2].id();
+                        self.scene.world.replace_field(id, br#"{"format_version":1,"id":"profile-box","root":"b","nodes":[{"op":"box","id":"b","half_extent":[0.5,0.4,0.5]}]}"#)?;
+                    }
                     "slow_revision"
                 }
             }
@@ -476,6 +495,7 @@ impl App {
         let field_path = match compiler.as_ref() {
             Some(state) if state.active == GpuFieldPath::Specialized => "COMPILED",
             Some(state) if state.active == GpuFieldPath::Structural => "STRUCTURAL",
+            Some(state) if state.active == GpuFieldPath::Combined => "COMBINED",
             Some(state) if state.pending => "INTERPRETER/COMPILING",
             Some(state) if state.last_error.is_some() => "INTERPRETER/COMPILE ERROR",
             _ => "INTERPRETER",
@@ -775,6 +795,32 @@ mod tests {
             app.scene.world.field_instances()[0].revision(),
             changed_revision
         );
+        assert_eq!(app.profile_phase, "invalid_edit_rollback");
+    }
+
+    #[test]
+    fn heterogeneous_profile_replaces_and_restores_one_topology() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scenes/showcase.json");
+        let mut app = App::new(path).unwrap();
+        app.profile_execution = Some(GpuFieldExecution::Combined);
+        let third = app
+            .scene
+            .world
+            .spawn_field(
+                br#"{"format_version":1,"id":"profile-box","root":"b","nodes":[{"op":"box","id":"b","half_extent":[0.5,0.4,0.5]}]}"#,
+                Transform::identity(),
+            )
+            .unwrap();
+        let original = app.scene.world.field_instances()[2].revision();
+        app.frames = 525;
+        app.profile_tick().unwrap();
+        assert_ne!(app.scene.world.field_instances()[2].revision(), original);
+        app.frames = 545;
+        app.profile_tick().unwrap();
+        assert_eq!(app.scene.world.field_instances()[2].revision(), original);
+        assert_eq!(app.scene.world.field_instances()[2].id(), third);
+        app.frames = 550;
+        app.profile_tick().unwrap();
         assert_eq!(app.profile_phase, "invalid_edit_rollback");
     }
     #[test]

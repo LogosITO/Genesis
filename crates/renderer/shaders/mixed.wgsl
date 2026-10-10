@@ -103,7 +103,7 @@ fn render_mixed(@builtin(global_invocation_id) gid: vec3<u32>) {
             field_config.info = vec4<u32>(instance.info.x, mixed_options.info.y, mixed_options.info.w, instance.topology.x);
             field_config.trace = mixed_options.trace;
             let origin = (camera.origin.xyz - instance.position_scale.xyz) / scale;
-            if ((mixed_options.info.z & 8u) != 0u && misses_field_bounds(origin, direction, camera.view.z / scale,
+            if ((mixed_options.info.z & 8u) != 0u && (mixed_options.info.z & 4u) == 0u && misses_field_bounds(origin, direction, camera.view.z / scale,
                 camera.view.w / scale, instance.bounds_min.xyz, instance.bounds_max.xyz)) { continue; }
             let result = field_trace(origin, direction, camera.view.z / scale, camera.view.w / scale);
             if (result.info.x == 2u) { uncertain = true; }

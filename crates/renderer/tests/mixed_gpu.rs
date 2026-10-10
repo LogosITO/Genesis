@@ -463,7 +463,13 @@ fn combined_topologies_preserve_mixed_image_and_fallback() {
         )
         .unwrap(),
     );
-    let draw = |world: &WorldState, materials: &MaterialSet, execution| {
+    let draw = |world: &WorldState,
+                materials: &MaterialSet,
+                execution,
+                camera: Camera,
+                size: [u32; 2],
+                policy: GraphTracePolicy,
+                guard| {
         let image = renderer
             .draw_mixed_with_execution(
                 &device,
@@ -477,7 +483,7 @@ fn combined_topologies_preserve_mixed_image_and_fallback() {
                         surface: None,
                         timer: None,
                     },
-                    policy: GraphTracePolicy::default(),
+                    policy,
                     show_analytic: true,
                     show_fields: true,
                     diagnostic: true,
@@ -488,7 +494,7 @@ fn combined_topologies_preserve_mixed_image_and_fallback() {
                 },
                 GpuFieldRenderMode {
                     execution,
-                    spatial_guard: true,
+                    spatial_guard: guard,
                 },
             )
             .unwrap();
@@ -501,10 +507,10 @@ fn combined_topologies_preserve_mixed_image_and_fallback() {
         if step > 0 {
             world.replace_field(first, source).unwrap();
         }
-        let reference = draw(&world, &materials, GpuFieldExecution::Interpreter);
+        let reference = draw(&world, &materials, GpuFieldExecution::Interpreter, camera, size, GraphTracePolicy::default(), true);
         let mut compiled = None;
         for _ in 0..200 {
-            let candidate = draw(&world, &materials, GpuFieldExecution::Combined);
+            let candidate = draw(&world, &materials, GpuFieldExecution::Combined, camera, size, GraphTracePolicy::default(), true);
             let state = renderer.compiler_stats().unwrap();
             assert!(state.last_error.is_none(), "combined compiler: {:?}", state.last_error);
             if state.active == GpuFieldPath::Combined {
@@ -532,10 +538,26 @@ fn combined_topologies_preserve_mixed_image_and_fallback() {
             Material::new(color, [0.0; 3], [0.0; 3], MaterialPattern::Constant).unwrap(),
         );
     }
-    let reference = draw(&world, &materials, GpuFieldExecution::Interpreter);
+    let reference = draw(
+        &world,
+        &materials,
+        GpuFieldExecution::Interpreter,
+        camera,
+        size,
+        GraphTracePolicy::default(),
+        true,
+    );
     let mut compiled = None;
     for _ in 0..200 {
-        let candidate = draw(&world, &materials, GpuFieldExecution::Combined);
+        let candidate = draw(
+            &world,
+            &materials,
+            GpuFieldExecution::Combined,
+            camera,
+            size,
+            GraphTracePolicy::default(),
+            true,
+        );
         let state = renderer.compiler_stats().unwrap();
         assert!(
             state.last_error.is_none(),
@@ -556,6 +578,97 @@ fn combined_topologies_preserve_mixed_image_and_fallback() {
             .all(|(a, b)| a.abs_diff(*b) <= 1)
     );
     write_bmp(&captures.join("combined-four.bmp"), &compiled, size);
+    assert_eq!(renderer.compiler_stats().unwrap().requests, 2);
+    let broad_size = [640, 360];
+    let inside = Camera::look_at(
+        v(-0.65, 0.0, 0.0),
+        v(-0.65, 0.0, 1.0),
+        v(0.0, 1.0, 0.0),
+        0.9,
+    )
+    .unwrap();
+    for (label, scale, view, policy, guard) in [
+        ("small", 0.01, camera, GraphTracePolicy::default(), true),
+        ("medium", 0.1, camera, GraphTracePolicy::default(), false),
+        ("ordinary", 1.0, camera, GraphTracePolicy::default(), true),
+        ("inside", 1.0, inside, GraphTracePolicy::default(), true),
+        ("large", 100.0, camera, GraphTracePolicy::default(), true),
+        (
+            "exhausted",
+            1.0,
+            camera,
+            GraphTracePolicy {
+                iterations: 1,
+                ..GraphTracePolicy::default()
+            },
+            false,
+        ),
+    ] {
+        world
+            .set_field_transform(first, Transform::new(v(-0.65, 0.0, 0.0), scale).unwrap())
+            .unwrap();
+        let reference = draw(
+            &world,
+            &materials,
+            GpuFieldExecution::Interpreter,
+            view,
+            broad_size,
+            policy,
+            guard,
+        );
+        let compiled = draw(
+            &world,
+            &materials,
+            GpuFieldExecution::Combined,
+            view,
+            broad_size,
+            policy,
+            guard,
+        );
+        assert_eq!(
+            renderer.compiler_stats().unwrap().active,
+            GpuFieldPath::Combined
+        );
+        let max_diff = reference
+            .iter()
+            .zip(&compiled)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        assert!(max_diff <= 1, "{label} image drift: {max_diff}");
+        let direct = draw(
+            &world,
+            &materials,
+            GpuFieldExecution::Combined,
+            view,
+            broad_size,
+            policy,
+            !guard,
+        );
+        let guard_diff = direct
+            .iter()
+            .zip(&compiled)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        assert!(guard_diff <= 1, "{label} visual guard drift: {guard_diff}");
+        println!(
+            "COMBINED_PARITY {label} pixels={} max_channel_delta={max_diff} guard_delta={guard_diff}",
+            broad_size[0] * broad_size[1]
+        );
+        if label == "ordinary" {
+            write_bmp(
+                &captures.join("combined-interpreter-640.bmp"),
+                &reference,
+                broad_size,
+            );
+            write_bmp(
+                &captures.join("combined-compiled-640.bmp"),
+                &compiled,
+                broad_size,
+            );
+        }
+    }
     assert_eq!(renderer.compiler_stats().unwrap().requests, 2);
 }
 use world_state::{DeterministicSeed, WorldState};
