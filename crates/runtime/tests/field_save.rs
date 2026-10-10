@@ -1,11 +1,80 @@
 //! Version-7 visual field save integrity and legacy-version gate.
-use spatial_math::Transform;
+use spatial_math::{Transform, Vec3};
 use world_runtime::Runtime;
 use world_simulation::SimulationStep;
-use world_state::{DeterministicSeed, WorldState};
+use world_state::{
+    DeterministicSeed, ParameterBinding, ParameterComponent, ParameterRule, WorldState,
+};
 
 const TWIN: &[u8] = include_bytes!("../../../examples/field-graph/definitions/twin.json");
 const MORPH: &[u8] = include_bytes!("../../../examples/field-graph/definitions/morph-lobes.json");
+const BOX: &[u8] = br#"{"format_version":1,"id":"grow_box","root":"body","nodes":[{"op":"box","id":"body","half_extent":[0.4,0.3,0.3]}]}"#;
+
+#[test]
+fn generic_parameter_world_uses_one_ledger_and_requires_v10() {
+    let mut world = WorldState::new(DeterministicSeed(91));
+    let sphere = world.spawn_field(MORPH, Transform::identity()).unwrap();
+    let box_id = world
+        .spawn_field(
+            BOX,
+            Transform::new(Vec3::new(0.8, 0.0, 0.0).unwrap(), 1.0).unwrap(),
+        )
+        .unwrap();
+    for (id, node, component) in [
+        (sphere, "left_ball", ParameterComponent::SphereRadius),
+        (box_id, "body", ParameterComponent::BoxHalfX),
+    ] {
+        world
+            .enable_field_parameters(
+                id,
+                vec![ParameterRule {
+                    binding: ParameterBinding {
+                        node: node.into(),
+                        component,
+                    },
+                    uptake: 2.0,
+                    gain_per_unit: 0.2,
+                    maximum: 1.2,
+                    positive_site: true,
+                    feedback: true,
+                }],
+            )
+            .unwrap();
+    }
+    world
+        .spawn_finite_source(Vec3::new(0.5, 0.0, 0.0).unwrap(), 2.0, 10.0, 0.5, 0.5, 0.0)
+        .unwrap();
+    let mut runtime = Runtime::new(world, SimulationStep::new(0.1).unwrap());
+    runtime.tick().unwrap();
+    let allocated: f64 = runtime
+        .world()
+        .field_instances()
+        .iter()
+        .map(|field| field.parameters().unwrap().channels()[0].total_allocated())
+        .sum();
+    assert!(allocated > 0.0 && allocated <= 0.5);
+    assert_eq!(
+        runtime.world().sources()[0]
+            .reservoir()
+            .unwrap()
+            .total_allocated(),
+        allocated
+    );
+    let save = runtime.save_bytes().unwrap();
+    let mut value: serde_json::Value = serde_json::from_slice(&save).unwrap();
+    assert_eq!(value["format_version"], 10);
+    assert_eq!(Runtime::load_bytes(&save).unwrap(), runtime);
+    value["format_version"] = 9.into();
+    assert!(Runtime::load_bytes(&serde_json::to_vec(&value).unwrap()).is_err());
+    let mut value: serde_json::Value = serde_json::from_slice(&save).unwrap();
+    value["runtime"]["world"]["field_instances"][0]["parameters"]["channels"][0]["current"] =
+        serde_json::json!(-1.0);
+    assert!(Runtime::load_bytes(&serde_json::to_vec(&value).unwrap()).is_err());
+    let mut resumed = Runtime::load_bytes(&save).unwrap();
+    runtime.tick().unwrap();
+    resumed.tick().unwrap();
+    assert_eq!(resumed, runtime);
+}
 
 #[test]
 fn field_world_round_trip_and_tamper_rejection() {

@@ -17,8 +17,8 @@ use authored::{new_instance, transformed};
 pub use body::{BodyContact, ColliderId, KinematicBody, MAX_BODY_SPEED};
 use field::transformed_bounds;
 pub use field::{
-    FieldDefinition, FieldGrowth, FieldInstance, FieldMorphology, MAX_FIELD_DEFINITIONS,
-    MAX_FIELD_INSTANCES,
+    FIELD_PARAMETER_SCHEMA_VERSION, FieldDefinition, FieldGrowth, FieldInstance, FieldMorphology,
+    FieldParameters, MAX_FIELD_DEFINITIONS, MAX_FIELD_INSTANCES, ParameterChannel, ParameterRule,
 };
 pub use life::{
     CONNECTION_RADIUS_RATIO, FiniteReservoir, GrowthNode, GrowthParameters, MAX_NODE_IDS,
@@ -26,6 +26,7 @@ pub use life::{
     ResourceSource,
 };
 use world_authoring::DefinitionRevision;
+pub use world_authoring::field_graph::{ParameterBinding, ParameterComponent};
 
 /// A stable identifier for the lifetime of a world. IDs are never reused.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -268,7 +269,8 @@ impl WorldState {
             .ok_or(WorldError::UnknownEntity)?;
         let revision = DefinitionRevision::of(source);
         if (self.field_instances[index].growth().is_some()
-            || self.field_instances[index].morphology().is_some())
+            || self.field_instances[index].morphology().is_some()
+            || self.field_instances[index].parameters().is_some())
             && revision != self.field_instances[index].revision()
         {
             return Err(WorldError::InvalidStructure);
@@ -452,6 +454,89 @@ impl WorldState {
             .field_graph(id)
             .ok_or(WorldError::InvalidStructure)?
             .two_lobe_outer_site(lobe, radius)
+            .map_err(|_| WorldError::InvalidStructure)?;
+        instance
+            .transform()
+            .translation()
+            .checked_add(local.checked_scale(instance.transform().scale())?)
+            .map_err(Into::into)
+    }
+    /// Enables validated resource rules for up to four primitive components.
+    pub fn enable_field_parameters(
+        &mut self,
+        id: EntityId,
+        rules: Vec<ParameterRule>,
+    ) -> Result<(), WorldError> {
+        let index = self
+            .field_instances
+            .iter()
+            .position(|item| item.id() == id)
+            .ok_or(WorldError::UnknownEntity)?;
+        let source = self
+            .field_definitions
+            .iter()
+            .find(|item| item.revision() == self.field_instances[index].revision())
+            .and_then(FieldDefinition::graph)
+            .ok_or(WorldError::InvalidStructure)?;
+        let state = FieldParameters::new(source, rules)?;
+        let mut proposed = self.field_instances[index].clone();
+        proposed.enable_parameters(state, source)?;
+        transformed_bounds(
+            proposed
+                .runtime_graph()
+                .ok_or(WorldError::InvalidStructure)?,
+            proposed.transform(),
+        )?;
+        self.field_instances[index] = proposed;
+        Ok(())
+    }
+    /// Applies finite-source units already accounted for by the shared allocator.
+    pub fn grow_field_parameters(
+        &mut self,
+        id: EntityId,
+        amounts: &[f64],
+    ) -> Result<(), WorldError> {
+        let index = self
+            .field_instances
+            .iter()
+            .position(|item| item.id() == id)
+            .ok_or(WorldError::UnknownEntity)?;
+        let source = self
+            .field_definitions
+            .iter()
+            .find(|item| item.revision() == self.field_instances[index].revision())
+            .and_then(FieldDefinition::graph)
+            .ok_or(WorldError::InvalidStructure)?;
+        let mut proposed = self.field_instances[index].clone();
+        proposed.grow_parameters(amounts, source)?;
+        transformed_bounds(
+            proposed
+                .runtime_graph()
+                .ok_or(WorldError::InvalidStructure)?,
+            proposed.transform(),
+        )?;
+        self.field_instances[index] = proposed;
+        Ok(())
+    }
+    /// World-space feature point tied to one current primitive component.
+    pub fn field_parameter_site(&self, id: EntityId, channel: usize) -> Result<Vec3, WorldError> {
+        let instance = self.field_instance(id).ok_or(WorldError::UnknownEntity)?;
+        let state = instance.parameters().ok_or(WorldError::InvalidStructure)?;
+        let channel = state
+            .channels()
+            .get(channel)
+            .ok_or(WorldError::OutOfRange)?;
+        let graph = if channel.rule().feedback {
+            self.field_graph(id)
+        } else {
+            self.field_definitions
+                .iter()
+                .find(|item| item.revision() == instance.revision())
+                .and_then(FieldDefinition::graph)
+        }
+        .ok_or(WorldError::InvalidStructure)?;
+        let local = graph
+            .parameter_site(&channel.rule().binding, channel.rule().positive_site)
             .map_err(|_| WorldError::InvalidStructure)?;
         instance
             .transform()
@@ -990,6 +1075,21 @@ impl WorldState {
                 {
                     return Err(WorldError::InvalidStructure);
                 }
+            }
+            if let Some(parameters) = instance.parameters() {
+                if instance.growth().is_some()
+                    || instance.morphology().is_some()
+                    || instance.runtime_graph().is_none()
+                {
+                    return Err(WorldError::InvalidStructure);
+                }
+                let source = self
+                    .field_definitions
+                    .iter()
+                    .find(|item| item.revision() == instance.revision())
+                    .and_then(FieldDefinition::graph)
+                    .ok_or(WorldError::InvalidStructure)?;
+                parameters.validate(source)?;
             }
         }
         for entity in &self.entities {

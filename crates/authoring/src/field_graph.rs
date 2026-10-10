@@ -4,7 +4,7 @@ use crate::{AuthoringError, DefinitionRevision};
 use analytic_field::{
     AnalyticGradient, AxisAlignedBox, Gradient, GradientIssue, ScalarField, Sphere,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use spatial_math::{MathError, Vec3};
 use std::collections::BTreeMap;
 
@@ -24,6 +24,32 @@ pub const MAX_NODES: usize = 32;
 pub const MAX_DEPTH: usize = 12;
 /// Maximum node visits for one sample, after shared references are expanded.
 pub const MAX_VISITS: usize = 64;
+/// Maximum mutable channels attached to one visual occurrence.
+pub const MAX_PARAMETER_CHANNELS: usize = 4;
+
+/// A bounded numeric component of one authored primitive node.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParameterComponent {
+    /// Sphere radius.
+    SphereRadius,
+    /// Box half extent along the X axis.
+    BoxHalfX,
+    /// Box half extent along the Y axis.
+    BoxHalfY,
+    /// Box half extent along the Z axis.
+    BoxHalfZ,
+}
+
+/// Stable authored node ID and numeric component; the occurrence supplies its definition revision.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParameterBinding {
+    /// Authored node ID, resolved against exact definition bytes.
+    pub node: String,
+    /// Supported mutable component.
+    pub component: ParameterComponent,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -134,6 +160,7 @@ pub struct Bounds {
 pub struct Graph {
     id: String,
     revision: DefinitionRevision,
+    node_ids: Vec<String>,
     nodes: Vec<Node>,
     root: u32,
     visits: usize,
@@ -188,6 +215,134 @@ impl Graph {
         1.0
     }
 
+    fn binding_index(&self, binding: &ParameterBinding) -> Result<usize, AuthoringError> {
+        self.node_ids
+            .iter()
+            .position(|id| id == &binding.node)
+            .ok_or(AuthoringError::Invalid("parameter node"))
+    }
+
+    /// Default or current value of a supported primitive component.
+    pub fn parameter_value(&self, binding: &ParameterBinding) -> Result<f64, AuthoringError> {
+        let node = &self.nodes[self.binding_index(binding)?];
+        match (node, binding.component) {
+            (Node::Sphere(sphere), ParameterComponent::SphereRadius) => Ok(sphere.radius()),
+            (Node::Box(bounds), component) => {
+                let extent = bounds.half_extent();
+                match component {
+                    ParameterComponent::BoxHalfX => Ok(extent.x()),
+                    ParameterComponent::BoxHalfY => Ok(extent.y()),
+                    ParameterComponent::BoxHalfZ => Ok(extent.z()),
+                    _ => Err(AuthoringError::Invalid("parameter operation")),
+                }
+            }
+            _ => Err(AuthoringError::Invalid("parameter operation")),
+        }
+    }
+
+    /// Derives numeric values without changing source identity or graph topology.
+    pub fn with_parameters(
+        &self,
+        values: &[(ParameterBinding, f64)],
+    ) -> Result<Self, AuthoringError> {
+        if values.len() > MAX_PARAMETER_CHANNELS {
+            return Err(AuthoringError::Budget("parameter channels"));
+        }
+        let mut graph = self.clone();
+        for (index, (binding, value)) in values.iter().enumerate() {
+            if !value.is_finite()
+                || !(0.1..=2.0).contains(value)
+                || values[..index].iter().any(|(prior, _)| prior == binding)
+            {
+                return Err(AuthoringError::Invalid("parameter value or duplicate"));
+            }
+            let node = graph.binding_index(binding)?;
+            graph.nodes[node] = match (&graph.nodes[node], binding.component) {
+                (Node::Sphere(_), ParameterComponent::SphereRadius) => Node::Sphere(
+                    Sphere::new(*value).map_err(|_| AuthoringError::Invalid("sphere radius"))?,
+                ),
+                (Node::Box(bounds), component) => {
+                    let extent = bounds.half_extent();
+                    let mut e = [extent.x(), extent.y(), extent.z()];
+                    let axis = match component {
+                        ParameterComponent::BoxHalfX => 0,
+                        ParameterComponent::BoxHalfY => 1,
+                        ParameterComponent::BoxHalfZ => 2,
+                        _ => return Err(AuthoringError::Invalid("parameter operation")),
+                    };
+                    e[axis] = *value;
+                    Node::Box(
+                        AxisAlignedBox::new(Vec3::new(e[0], e[1], e[2]).unwrap())
+                            .map_err(|_| AuthoringError::Invalid("box half extent"))?,
+                    )
+                }
+                _ => return Err(AuthoringError::Invalid("parameter operation")),
+            };
+        }
+        let (bounds, exact_sdf) = properties(&graph.nodes, graph.root as usize)?;
+        validate_bounds(bounds)?;
+        graph.bounds = bounds;
+        graph.exact_sdf = exact_sdf;
+        Ok(graph)
+    }
+
+    /// Surface feature point of a uniquely reached primitive. DAG aliases are rejected.
+    pub fn parameter_site(
+        &self,
+        binding: &ParameterBinding,
+        positive: bool,
+    ) -> Result<Vec3, AuthoringError> {
+        let target = self.binding_index(binding)?;
+        let extent = self.parameter_value(binding)?;
+        let signed = if positive { extent } else { -extent };
+        let point = match binding.component {
+            ParameterComponent::SphereRadius | ParameterComponent::BoxHalfX => {
+                Vec3::new(signed, 0.0, 0.0).unwrap()
+            }
+            ParameterComponent::BoxHalfY => Vec3::new(0.0, signed, 0.0).unwrap(),
+            ParameterComponent::BoxHalfZ => Vec3::new(0.0, 0.0, signed).unwrap(),
+        };
+        fn paths(
+            nodes: &[Node],
+            index: usize,
+            target: usize,
+            point: Vec3,
+        ) -> Result<Vec<Vec3>, AuthoringError> {
+            if index == target {
+                return Ok(vec![point]);
+            }
+            match nodes[index] {
+                Node::Translate { child, offset } => paths(nodes, child as usize, target, point)?
+                    .into_iter()
+                    .map(|site| {
+                        site.checked_add(offset)
+                            .map_err(|_| AuthoringError::Geometry("parameter site"))
+                    })
+                    .collect(),
+                Node::Scale { child, factor } => paths(nodes, child as usize, target, point)?
+                    .into_iter()
+                    .map(|site| {
+                        site.checked_scale(factor)
+                            .map_err(|_| AuthoringError::Geometry("parameter site"))
+                    })
+                    .collect(),
+                Node::Union { left, right } | Node::SmoothUnion { left, right, .. } => {
+                    let mut sites = paths(nodes, left as usize, target, point)?;
+                    sites.extend(paths(nodes, right as usize, target, point)?);
+                    Ok(sites)
+                }
+                _ => Ok(Vec::new()),
+            }
+        }
+        let sites = paths(&self.nodes, self.root as usize, target, point)?;
+        if sites.len() != 1 {
+            return Err(AuthoringError::Invalid(
+                "parameter site must have one graph path",
+            ));
+        }
+        Ok(sites[0])
+    }
+
     /// CPU reference sample. Negative means inside; zero means on the mathematical zero set.
     pub fn sample(&self, point: Vec3) -> Result<f64, MathError> {
         self.sample_node(self.root as usize, point)
@@ -237,33 +392,22 @@ impl Graph {
         {
             return Err(AuthoringError::Invalid("two-lobe parameter schema"));
         }
-        let mut graph = self.clone();
-        graph.nodes[0] = Node::Sphere(
-            Sphere::new(radii[0]).map_err(|_| AuthoringError::Invalid("left radius"))?,
-        );
-        graph.nodes[2] = Node::Sphere(
-            Sphere::new(radii[1]).map_err(|_| AuthoringError::Invalid("right radius"))?,
-        );
-        let [
-            Node::Translate { offset: left, .. },
-            Node::Translate { offset: right, .. },
-        ] = [&graph.nodes[1], &graph.nodes[3]]
-        else {
-            unreachable!("schema checked above")
-        };
-        let l = Vec3::new(radii[0], radii[0], radii[0]).unwrap();
-        let r = Vec3::new(radii[1], radii[1], radii[1]).unwrap();
-        graph.bounds = Bounds {
-            min: vec_min(
-                outward_vec(l.negated(), *left, false, false)?,
-                outward_vec(r.negated(), *right, false, false)?,
-            )?,
-            max: vec_max(
-                outward_vec(l, *left, false, true)?,
-                outward_vec(r, *right, false, true)?,
-            )?,
-        };
-        Ok(graph)
+        self.with_parameters(&[
+            (
+                ParameterBinding {
+                    node: self.node_ids[0].clone(),
+                    component: ParameterComponent::SphereRadius,
+                },
+                radii[0],
+            ),
+            (
+                ParameterBinding {
+                    node: self.node_ids[2].clone(),
+                    component: ParameterComponent::SphereRadius,
+                },
+                radii[1],
+            ),
+        ])
     }
 
     /// Radii for the fixed two-sphere union schema, if the graph matches it.
@@ -501,79 +645,25 @@ pub fn compile_json(bytes: &[u8]) -> Result<Graph, AuthoringError> {
     if state.contains(&0) {
         return Err(AuthoringError::Invalid("unreachable field node"));
     }
-    fn properties(nodes: &[Node], index: usize) -> Result<(Bounds, bool), AuthoringError> {
-        Ok(match nodes[index] {
-            Node::Sphere(s) => {
-                let r = s.radius();
-                (
-                    Bounds {
-                        min: Vec3::new(-r, -r, -r).unwrap(),
-                        max: Vec3::new(r, r, r).unwrap(),
-                    },
-                    true,
-                )
-            }
-            Node::Box(b) => (
-                Bounds {
-                    min: b.half_extent().negated(),
-                    max: b.half_extent(),
-                },
-                true,
-            ),
-            Node::Translate { child, offset } => {
-                let (b, exact) = properties(nodes, child as usize)?;
-                (
-                    Bounds {
-                        min: outward_vec(b.min, offset, false, false)?,
-                        max: outward_vec(b.max, offset, false, true)?,
-                    },
-                    exact,
-                )
-            }
-            Node::Scale { child, factor } => {
-                let (b, exact) = properties(nodes, child as usize)?;
-                let factor = Vec3::new(factor, factor, factor).unwrap();
-                (
-                    Bounds {
-                        min: outward_vec(b.min, factor, true, false)?,
-                        max: outward_vec(b.max, factor, true, true)?,
-                    },
-                    exact,
-                )
-            }
-            Node::Union { left, right } => {
-                let (a, _) = properties(nodes, left as usize)?;
-                let (b, _) = properties(nodes, right as usize)?;
-                (
-                    Bounds {
-                        min: vec_min(a.min, b.min)?,
-                        max: vec_max(a.max, b.max)?,
-                    },
-                    false,
-                )
-            }
-            Node::SmoothUnion { left, right, width } => {
-                let (a, a_exact) = properties(nodes, left as usize)?;
-                let (b, b_exact) = properties(nodes, right as usize)?;
-                if !a_exact || !b_exact {
-                    return Err(AuthoringError::Invalid(
-                        "smooth union requires exact-SDF children",
-                    ));
-                }
-                let margin = (width / 4.0).next_up();
-                let lower = Vec3::new(-margin, -margin, -margin).unwrap();
-                let upper = Vec3::new(margin, margin, margin).unwrap();
-                (
-                    Bounds {
-                        min: outward_vec(vec_min(a.min, b.min)?, lower, false, false)?,
-                        max: outward_vec(vec_max(a.max, b.max)?, upper, false, true)?,
-                    },
-                    false,
-                )
-            }
-        })
-    }
     let (bounds, exact_sdf) = properties(&nodes, root as usize)?;
+    validate_bounds(bounds)?;
+    Ok(Graph {
+        id: source.id,
+        revision: DefinitionRevision::of(bytes),
+        node_ids: source
+            .nodes
+            .iter()
+            .map(|node| node.id().to_owned())
+            .collect(),
+        nodes,
+        root,
+        visits,
+        bounds,
+        exact_sdf,
+    })
+}
+
+fn validate_bounds(bounds: Bounds) -> Result<(), AuthoringError> {
     // Keep the old geometric ceiling usable when outward rounding adds a few ulps.
     let mut admission_limit = 10_000.0_f64;
     for _ in 0..(2 * MAX_DEPTH) {
@@ -592,14 +682,79 @@ pub fn compile_json(bytes: &[u8]) -> Result<Graph, AuthoringError> {
     {
         return Err(AuthoringError::Budget("field world bounds"));
     }
-    Ok(Graph {
-        id: source.id,
-        revision: DefinitionRevision::of(bytes),
-        nodes,
-        root,
-        visits,
-        bounds,
-        exact_sdf,
+    Ok(())
+}
+
+fn properties(nodes: &[Node], index: usize) -> Result<(Bounds, bool), AuthoringError> {
+    Ok(match nodes[index] {
+        Node::Sphere(s) => {
+            let r = s.radius();
+            (
+                Bounds {
+                    min: Vec3::new(-r, -r, -r).unwrap(),
+                    max: Vec3::new(r, r, r).unwrap(),
+                },
+                true,
+            )
+        }
+        Node::Box(b) => (
+            Bounds {
+                min: b.half_extent().negated(),
+                max: b.half_extent(),
+            },
+            true,
+        ),
+        Node::Translate { child, offset } => {
+            let (b, exact) = properties(nodes, child as usize)?;
+            (
+                Bounds {
+                    min: outward_vec(b.min, offset, false, false)?,
+                    max: outward_vec(b.max, offset, false, true)?,
+                },
+                exact,
+            )
+        }
+        Node::Scale { child, factor } => {
+            let (b, exact) = properties(nodes, child as usize)?;
+            let factor = Vec3::new(factor, factor, factor).unwrap();
+            (
+                Bounds {
+                    min: outward_vec(b.min, factor, true, false)?,
+                    max: outward_vec(b.max, factor, true, true)?,
+                },
+                exact,
+            )
+        }
+        Node::Union { left, right } => {
+            let (a, _) = properties(nodes, left as usize)?;
+            let (b, _) = properties(nodes, right as usize)?;
+            (
+                Bounds {
+                    min: vec_min(a.min, b.min)?,
+                    max: vec_max(a.max, b.max)?,
+                },
+                false,
+            )
+        }
+        Node::SmoothUnion { left, right, width } => {
+            let (a, a_exact) = properties(nodes, left as usize)?;
+            let (b, b_exact) = properties(nodes, right as usize)?;
+            if !a_exact || !b_exact {
+                return Err(AuthoringError::Invalid(
+                    "smooth union requires exact-SDF children",
+                ));
+            }
+            let margin = (width / 4.0).next_up();
+            let lower = Vec3::new(-margin, -margin, -margin).unwrap();
+            let upper = Vec3::new(margin, margin, margin).unwrap();
+            (
+                Bounds {
+                    min: outward_vec(vec_min(a.min, b.min)?, lower, false, false)?,
+                    max: outward_vec(vec_max(a.max, b.max)?, upper, false, true)?,
+                },
+                false,
+            )
+        }
     })
 }
 
@@ -719,6 +874,51 @@ mod tests {
         Vec3::new(x, y, z).unwrap()
     }
     const SOURCE: &str = r#"{"format_version":1,"id":"test","root":"both","nodes":[{"op":"sphere","id":"a","radius":1.0},{"op":"translate","id":"left","child":"a","offset":[-0.5,0,0]},{"op":"box","id":"b","half_extent":[0.5,0.5,0.5]},{"op":"union","id":"both","left":"left","right":"b"}]}"#;
+    #[test]
+    fn primitive_bindings_update_cpu_bounds_and_reject_aliased_sites() {
+        let graph = compile_json(SOURCE.as_bytes()).unwrap();
+        let sphere = ParameterBinding {
+            node: "a".into(),
+            component: ParameterComponent::SphereRadius,
+        };
+        let box_x = ParameterBinding {
+            node: "b".into(),
+            component: ParameterComponent::BoxHalfX,
+        };
+        let changed = graph
+            .with_parameters(&[(sphere.clone(), 1.5), (box_x.clone(), 1.2)])
+            .unwrap();
+        assert_eq!(changed.revision(), graph.revision());
+        assert_eq!(changed.parameter_value(&box_x).unwrap(), 1.2);
+        assert!(changed.bounds().max.x() >= 1.2);
+        assert_eq!(
+            changed.parameter_site(&sphere, false).unwrap(),
+            v(-2.0, 0.0, 0.0)
+        );
+        assert_eq!(
+            changed.parameter_site(&box_x, true).unwrap(),
+            v(1.2, 0.0, 0.0)
+        );
+        assert!(graph.with_parameters(&[(box_x.clone(), f64::NAN)]).is_err());
+        assert!(
+            graph
+                .with_parameters(&[(box_x.clone(), 1.0), (box_x, 1.1)])
+                .is_err()
+        );
+        let shared = br#"{"format_version":1,"id":"shared","root":"u","nodes":[{"op":"sphere","id":"s","radius":0.5},{"op":"union","id":"u","left":"s","right":"s"}]}"#;
+        let shared = compile_json(shared).unwrap();
+        assert!(
+            shared
+                .parameter_site(
+                    &ParameterBinding {
+                        node: "s".into(),
+                        component: ParameterComponent::SphereRadius
+                    },
+                    true
+                )
+                .is_err()
+        );
+    }
     #[test]
     fn evaluated_graph_contract() {
         let g = compile_json(SOURCE.as_bytes()).unwrap();

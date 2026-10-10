@@ -6,7 +6,7 @@ use spatial_math::{Transform, Vec3};
 use std::sync::Arc;
 use world_authoring::{
     DefinitionRevision,
-    field_graph::{Bounds, Graph, compile_json},
+    field_graph::{Bounds, Graph, MAX_PARAMETER_CHANNELS, ParameterBinding, compile_json},
 };
 
 /// Maximum distinct visual graph revisions retained by one world.
@@ -15,6 +15,196 @@ pub const MAX_FIELD_DEFINITIONS: usize = 4;
 pub const MAX_FIELD_INSTANCES: usize = 8;
 /// Interpretation version of the persisted graph source.
 pub const FIELD_GRAPH_SEMANTICS_VERSION: u32 = 1;
+/// Version of the bounded runtime parameter and resource rule schema.
+pub const FIELD_PARAMETER_SCHEMA_VERSION: u32 = 1;
+
+/// One declarative resource-driven parameter rule on an authored primitive.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParameterRule {
+    /// Stable node ID and primitive component.
+    pub binding: ParameterBinding,
+    /// Source sample multiplier per second.
+    pub uptake: f64,
+    /// Parameter gain per unit allocated from the finite ledger.
+    pub gain_per_unit: f64,
+    /// Saturating parameter value.
+    pub maximum: f64,
+    /// Positive or negative primitive-axis surface feature.
+    pub positive_site: bool,
+    /// When false, the sample site remains at the authored initial geometry.
+    pub feedback: bool,
+}
+
+/// World-owned state of one resource-driven parameter channel.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParameterChannel {
+    rule: ParameterRule,
+    initial: f64,
+    current: f64,
+    total_allocated: f64,
+    last_allocated: f64,
+}
+impl ParameterChannel {
+    /// Declarative validated rule.
+    pub fn rule(&self) -> &ParameterRule {
+        &self.rule
+    }
+    /// Current authoritative geometric value.
+    pub fn current(&self) -> f64 {
+        self.current
+    }
+    /// Total units withdrawn for this channel.
+    pub fn total_allocated(&self) -> f64 {
+        self.total_allocated
+    }
+    /// Units withdrawn in the last completed tick.
+    pub fn last_allocated(&self) -> f64 {
+        self.last_allocated
+    }
+    /// Remaining resource units before saturation.
+    pub fn remaining_units(&self) -> f64 {
+        ((self.rule.maximum - self.current) / self.rule.gain_per_unit).max(0.0)
+    }
+}
+
+/// Bounded reusable runtime values, separate from immutable authored bytes.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FieldParameters {
+    schema_version: u32,
+    revision: u64,
+    channels: Vec<ParameterChannel>,
+}
+impl FieldParameters {
+    pub(crate) fn new(source: &Graph, rules: Vec<ParameterRule>) -> Result<Self, WorldError> {
+        if rules.is_empty() || rules.len() > MAX_PARAMETER_CHANNELS {
+            return Err(WorldError::Capacity);
+        }
+        let channels = rules
+            .into_iter()
+            .map(|rule| {
+                let initial = source
+                    .parameter_value(&rule.binding)
+                    .map_err(|_| WorldError::InvalidStructure)?;
+                let channel = ParameterChannel {
+                    rule,
+                    initial,
+                    current: initial,
+                    total_allocated: 0.0,
+                    last_allocated: 0.0,
+                };
+                source
+                    .parameter_site(&channel.rule.binding, channel.rule.positive_site)
+                    .map_err(|_| WorldError::InvalidStructure)?;
+                Ok(channel)
+            })
+            .collect::<Result<Vec<_>, WorldError>>()?;
+        let state = Self {
+            schema_version: FIELD_PARAMETER_SCHEMA_VERSION,
+            revision: 0,
+            channels,
+        };
+        state.validate(source)?;
+        Ok(state)
+    }
+    /// Stable channel order from the authored rule list.
+    pub fn channels(&self) -> &[ParameterChannel] {
+        &self.channels
+    }
+    /// Monotonic revision of changed runtime geometric values.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub(crate) fn graph(&self, source: &Graph) -> Result<Graph, WorldError> {
+        source
+            .with_parameters(
+                &self
+                    .channels
+                    .iter()
+                    .map(|channel| (channel.rule.binding.clone(), channel.current))
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|_| WorldError::InvalidStructure)
+    }
+    pub(crate) fn validate(&self, source: &Graph) -> Result<(), WorldError> {
+        if self.schema_version != FIELD_PARAMETER_SCHEMA_VERSION
+            || self.channels.is_empty()
+            || self.channels.len() > MAX_PARAMETER_CHANNELS
+        {
+            return Err(WorldError::InvalidStructure);
+        }
+        for (index, channel) in self.channels.iter().enumerate() {
+            let rule = &channel.rule;
+            if self.channels[..index]
+                .iter()
+                .any(|prior| prior.rule.binding == rule.binding)
+                || [
+                    channel.initial,
+                    channel.current,
+                    channel.total_allocated,
+                    channel.last_allocated,
+                    rule.uptake,
+                    rule.gain_per_unit,
+                    rule.maximum,
+                ]
+                .iter()
+                .any(|value| !value.is_finite())
+                || !(0.1..=2.0).contains(&channel.initial)
+                || !(channel.initial..=2.0).contains(&rule.maximum)
+                || !(0.0..=100.0).contains(&rule.uptake)
+                || !(0.001..=10.0).contains(&rule.gain_per_unit)
+                || channel.total_allocated < 0.0
+                || channel.total_allocated
+                    > (rule.maximum - channel.initial) / rule.gain_per_unit + 1e-9
+                || !(0.0..=channel.total_allocated).contains(&channel.last_allocated)
+                || (channel.current
+                    - (channel.initial + channel.total_allocated * rule.gain_per_unit)
+                        .min(rule.maximum))
+                .abs()
+                    > 1e-10
+                || source
+                    .parameter_value(&rule.binding)
+                    .map_err(|_| WorldError::InvalidStructure)?
+                    != channel.initial
+                || source
+                    .parameter_site(&rule.binding, rule.positive_site)
+                    .is_err()
+            {
+                return Err(WorldError::InvalidStructure);
+            }
+        }
+        self.graph(source)?;
+        Ok(())
+    }
+    pub(crate) fn grow(&mut self, amounts: &[f64], source: &Graph) -> Result<bool, WorldError> {
+        if amounts.len() != self.channels.len() {
+            return Err(WorldError::OutOfRange);
+        }
+        let mut changed = false;
+        for (channel, amount) in self.channels.iter_mut().zip(amounts) {
+            if !amount.is_finite() || *amount < 0.0 || *amount > channel.remaining_units() + 1e-12 {
+                return Err(WorldError::OutOfRange);
+            }
+            let old = channel.current;
+            channel.total_allocated += amount;
+            channel.last_allocated = *amount;
+            channel.current = (channel.initial
+                + channel.total_allocated * channel.rule.gain_per_unit)
+                .min(channel.rule.maximum);
+            changed |= channel.current != old;
+        }
+        if changed {
+            self.revision = self
+                .revision
+                .checked_add(1)
+                .ok_or(WorldError::IdExhausted)?;
+        }
+        self.validate(source)?;
+        Ok(changed)
+    }
+}
 
 /// Resource-coupled uniform growth of one visual field occurrence.
 /// The graph source stays immutable; its world-owned transform scale is the shape parameter.
@@ -264,6 +454,8 @@ pub struct FieldInstance {
     growth: Option<FieldGrowth>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     morphology: Option<FieldMorphology>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parameters: Option<FieldParameters>,
     #[serde(skip)]
     runtime_graph: Option<Arc<Graph>>,
 }
@@ -276,6 +468,7 @@ impl PartialEq for FieldInstance {
             && self.generation == other.generation
             && self.growth == other.growth
             && self.morphology == other.morphology
+            && self.parameters == other.parameters
     }
 }
 impl FieldInstance {
@@ -307,6 +500,10 @@ impl FieldInstance {
     pub fn morphology(&self) -> Option<&FieldMorphology> {
         self.morphology.as_ref()
     }
+    /// Generic resource-driven primitive parameter channels, if enabled.
+    pub fn parameters(&self) -> Option<&FieldParameters> {
+        self.parameters.as_ref()
+    }
     pub(crate) fn runtime_graph(&self) -> Option<&Graph> {
         self.runtime_graph.as_deref()
     }
@@ -319,6 +516,7 @@ impl FieldInstance {
             generation: 0,
             growth: None,
             morphology: None,
+            parameters: None,
             runtime_graph: None,
         }
     }
@@ -355,6 +553,7 @@ impl FieldInstance {
     pub(crate) fn enable_growth(&mut self, growth: FieldGrowth) -> Result<(), WorldError> {
         if self.growth.is_some()
             || self.morphology.is_some()
+            || self.parameters.is_some()
             || growth.initial_scale != self.transform.scale()
         {
             return Err(WorldError::InvalidStructure);
@@ -371,7 +570,7 @@ impl FieldInstance {
         morphology: FieldMorphology,
         source: &Graph,
     ) -> Result<(), WorldError> {
-        if self.growth.is_some() || self.morphology.is_some() {
+        if self.growth.is_some() || self.morphology.is_some() || self.parameters.is_some() {
             return Err(WorldError::InvalidStructure);
         }
         let graph = source
@@ -421,17 +620,57 @@ impl FieldInstance {
         }
         Ok(())
     }
+    pub(crate) fn enable_parameters(
+        &mut self,
+        state: FieldParameters,
+        source: &Graph,
+    ) -> Result<(), WorldError> {
+        if self.growth.is_some() || self.morphology.is_some() || self.parameters.is_some() {
+            return Err(WorldError::InvalidStructure);
+        }
+        let graph = state.graph(source)?;
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(WorldError::IdExhausted)?;
+        self.runtime_graph = Some(Arc::new(graph));
+        self.parameters = Some(state);
+        Ok(())
+    }
+    pub(crate) fn grow_parameters(
+        &mut self,
+        amounts: &[f64],
+        source: &Graph,
+    ) -> Result<(), WorldError> {
+        let state = self
+            .parameters
+            .as_mut()
+            .ok_or(WorldError::InvalidStructure)?;
+        if state.grow(amounts, source)? {
+            self.generation = self
+                .generation
+                .checked_add(1)
+                .ok_or(WorldError::IdExhausted)?;
+            self.runtime_graph = Some(Arc::new(state.graph(source)?));
+        }
+        Ok(())
+    }
     pub(crate) fn rebuild_runtime_graph(&mut self, source: &Graph) -> Result<(), WorldError> {
-        self.runtime_graph = match &self.morphology {
-            Some(morphology) => {
-                morphology.validate()?;
-                Some(Arc::new(
-                    source
-                        .with_two_lobe_radii(morphology.radii())
-                        .map_err(|_| WorldError::InvalidStructure)?,
-                ))
-            }
-            None => None,
+        if self.morphology.is_some() && self.parameters.is_some() {
+            return Err(WorldError::InvalidStructure);
+        }
+        self.runtime_graph = if let Some(morphology) = &self.morphology {
+            morphology.validate()?;
+            Some(Arc::new(
+                source
+                    .with_two_lobe_radii(morphology.radii())
+                    .map_err(|_| WorldError::InvalidStructure)?,
+            ))
+        } else if let Some(parameters) = &self.parameters {
+            parameters.validate(source)?;
+            Some(Arc::new(parameters.graph(source)?))
+        } else {
+            None
         };
         Ok(())
     }

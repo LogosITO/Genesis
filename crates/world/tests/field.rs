@@ -1,10 +1,78 @@
 //! World identity and read-only field occurrence regressions.
 use spatial_math::{Transform, Vec3};
-use world_state::{DeterministicSeed, MAX_FIELD_INSTANCES, WorldError, WorldState};
+use world_authoring::field_graph::{ParameterBinding, ParameterComponent};
+use world_state::{DeterministicSeed, MAX_FIELD_INSTANCES, ParameterRule, WorldError, WorldState};
 
 const TWIN: &[u8] = include_bytes!("../../../examples/field-graph/definitions/twin.json");
 const MORPH: &[u8] = include_bytes!("../../../examples/field-graph/definitions/morph-lobes.json");
 const PLINTH: &[u8] = include_bytes!("../../../examples/field-graph/definitions/plinth.json");
+const BOX: &[u8] = br#"{"format_version":1,"id":"grow_box","root":"offset","nodes":[{"op":"box","id":"body","half_extent":[0.4,0.3,0.3]},{"op":"translate","id":"offset","child":"body","offset":[0.2,0,0]}]}"#;
+
+fn rule(node: &str, component: ParameterComponent, positive_site: bool) -> ParameterRule {
+    ParameterRule {
+        binding: ParameterBinding {
+            node: node.into(),
+            component,
+        },
+        uptake: 1.0,
+        gain_per_unit: 0.2,
+        maximum: 1.2,
+        positive_site,
+        feedback: true,
+    }
+}
+
+#[test]
+fn generic_sphere_and_box_channels_share_validation_and_derived_bounds() {
+    let mut world = WorldState::new(DeterministicSeed(177));
+    let sphere = world.spawn_field(MORPH, Transform::identity()).unwrap();
+    let box_id = world
+        .spawn_field(BOX, Transform::new(v(3.0, 0.0, 0.0), 0.5).unwrap())
+        .unwrap();
+    world
+        .enable_field_parameters(
+            sphere,
+            vec![
+                rule("left_ball", ParameterComponent::SphereRadius, false),
+                rule("right_ball", ParameterComponent::SphereRadius, true),
+            ],
+        )
+        .unwrap();
+    world
+        .enable_field_parameters(
+            box_id,
+            vec![rule("body", ParameterComponent::BoxHalfX, true)],
+        )
+        .unwrap();
+    let before = world.clone();
+    let left = world.field_parameter_site(sphere, 0).unwrap();
+    let face = world.field_parameter_site(box_id, 0).unwrap();
+    world.grow_field_parameters(sphere, &[0.5, 0.25]).unwrap();
+    world.grow_field_parameters(box_id, &[0.5]).unwrap();
+    assert!(world.field_parameter_site(sphere, 0).unwrap().x() < left.x());
+    assert!(world.field_parameter_site(box_id, 0).unwrap().x() > face.x());
+    assert!(
+        world.field_bounds(box_id).unwrap().max.x() > before.field_bounds(box_id).unwrap().max.x()
+    );
+    assert_ne!(
+        world.field_sample(box_id, v(3.5, 0.0, 0.0)).unwrap(),
+        before.field_sample(box_id, v(3.5, 0.0, 0.0)).unwrap()
+    );
+    let stable = world.clone();
+    assert!(world.grow_field_parameters(box_id, &[f64::NAN]).is_err());
+    assert_eq!(world, stable);
+    assert!(
+        world
+            .enable_field_parameters(
+                box_id,
+                vec![rule("body", ParameterComponent::BoxHalfY, true)]
+            )
+            .is_err()
+    );
+    assert_eq!(world, stable);
+    assert!(world.field_parameter_site(box_id, 1).is_err());
+    assert!(world.replace_field(box_id, MORPH).is_err());
+}
 
 fn v(x: f64, y: f64, z: f64) -> Vec3 {
     Vec3::new(x, y, z).unwrap()

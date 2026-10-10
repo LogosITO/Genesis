@@ -11,6 +11,7 @@ struct Allocation {
     totals: Vec<f64>,
     field_ids: Vec<EntityId>,
     morph_ids: Vec<EntityId>,
+    parameter_ids: Vec<EntityId>,
 }
 
 // Each source allocates once across organisms. Demands are each organism's largest eligible
@@ -117,6 +118,36 @@ fn allocate_finite(
             raw.push(requests);
         }
     }
+    let parameter_ids = world
+        .field_instances()
+        .iter()
+        .filter(|field| field.parameters().is_some())
+        .map(|field| field.id())
+        .collect::<Vec<_>>();
+    for id in &parameter_ids {
+        let state = world
+            .field_instance(*id)
+            .and_then(|field| field.parameters())
+            .expect("parameters");
+        for (index, channel) in state.channels().iter().enumerate() {
+            let site = world
+                .field_parameter_site(*id, index)
+                .map_err(SimulationError::World)?;
+            let requests = sources
+                .iter()
+                .map(|source| {
+                    source
+                        .sample(site)
+                        .map(|sample| sample * channel.rule().uptake * step.seconds())
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(SimulationError::World)?;
+            if requests.iter().any(|value| !value.is_finite()) {
+                return Err(SimulationError::Math(spatial_math::MathError::NonFinite));
+            }
+            raw.push(requests);
+        }
+    }
     let mut demands = raw.clone();
     for (oi, organism) in world.organisms().iter().enumerate() {
         let sum: f64 = raw[oi].iter().sum();
@@ -165,6 +196,25 @@ fn allocate_finite(
             }
         }
     }
+    let mut parameter_row = morph_offset + 2 * morph_ids.len();
+    for id in &parameter_ids {
+        let state = world
+            .field_instance(*id)
+            .and_then(|field| field.parameters())
+            .expect("parameters");
+        for channel in state.channels() {
+            let sum: f64 = raw[parameter_row].iter().sum();
+            if !sum.is_finite() {
+                return Err(SimulationError::Math(spatial_math::MathError::NonFinite));
+            }
+            let headroom = channel.remaining_units();
+            let scale = if sum > headroom { headroom / sum } else { 1.0 };
+            for demand in &mut demands[parameter_row] {
+                *demand *= scale;
+            }
+            parameter_row += 1;
+        }
+    }
     let mut ratios = demands.clone();
     let mut totals = vec![0.0; raw.len()];
     for (si, source) in sources.iter().enumerate() {
@@ -198,6 +248,7 @@ fn allocate_finite(
         totals,
         field_ids,
         morph_ids,
+        parameter_ids,
     }))
 }
 
@@ -422,6 +473,19 @@ pub fn advance_life_cached(
                     ],
                 )
                 .map_err(SimulationError::World)?;
+        }
+        let mut row = offset + 2 * allocation.morph_ids.len();
+        for id in &allocation.parameter_ids {
+            let count = proposed
+                .field_instance(*id)
+                .and_then(|field| field.parameters())
+                .expect("parameters")
+                .channels()
+                .len();
+            proposed
+                .grow_field_parameters(*id, &allocation.totals[row..row + count])
+                .map_err(SimulationError::World)?;
+            row += count;
         }
     }
     let mut next_time = *time;

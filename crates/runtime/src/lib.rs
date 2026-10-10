@@ -379,10 +379,10 @@ mod tests {
         let good = runtime.save_bytes().unwrap();
         let original = runtime.clone();
         let mut value: serde_json::Value = serde_json::from_slice(&good).unwrap();
-        value["format_version"] = 10.into();
+        value["format_version"] = 11.into();
         assert!(matches!(
             runtime.load_into(&serde_json::to_vec(&value).unwrap()),
-            Err(PersistenceError::Version(10))
+            Err(PersistenceError::Version(11))
         ));
         value["format_version"] = 1.into();
         value["runtime"]["world"]["organisms"][0]
