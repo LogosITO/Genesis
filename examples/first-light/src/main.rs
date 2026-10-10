@@ -3,6 +3,9 @@
 mod hud;
 mod living;
 mod living_implicit;
+mod living_morph;
+#[cfg(test)]
+mod living_morph_oracle;
 mod passage;
 
 use analytic_field::{AxisAlignedBox, Capsule, Sphere};
@@ -357,11 +360,14 @@ struct App {
     life: bool,
     living: bool,
     living_implicit: bool,
+    living_morph: bool,
     passage: bool,
     fast: bool,
     last_save: Option<PathBuf>,
     living_scene_path: Option<PathBuf>,
     living_profile_tick: Option<u64>,
+    living_initial_save: Option<Vec<u8>>,
+    living_events: Vec<EnvironmentEvent>,
     mixed: bool,
     show_analytic: bool,
     show_fields: bool,
@@ -452,11 +458,14 @@ impl App {
             life,
             living: false,
             living_implicit: false,
+            living_morph: false,
             passage,
             fast: false,
             last_save: None,
             living_scene_path: None,
             living_profile_tick: None,
+            living_initial_save: None,
+            living_events: Vec::new(),
             mixed: false,
             show_analytic: true,
             show_fields: true,
@@ -529,7 +538,15 @@ impl App {
             .field_instances()
             .iter()
             .any(|field| field.growth().is_some());
-        app.mixed = app.living_implicit;
+        app.living_morph = app
+            .world
+            .field_instances()
+            .iter()
+            .any(|field| field.morphology().is_some());
+        app.mixed = app.living_implicit || app.living_morph;
+        if app.living_morph && runtime.time().ticks() == 0 {
+            app.living_initial_save = Some(runtime.save_bytes()?);
+        }
         app.status = "TWO STRATEGIES; MOVE THE RESOURCE TO CHANGE THEIR FUTURE".into();
         Ok(app)
     }
@@ -542,6 +559,8 @@ impl App {
     fn reset_living(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let reset = if let Some(path) = &self.living_scene_path {
             Self::living(living::read_scene(path, self.step)?)?
+        } else if self.living_morph {
+            Self::living(living_morph::initial(self.step, true)?)?
         } else if self.living_implicit {
             Self::living(living_implicit::initial(self.step)?)?
         } else {
@@ -552,6 +571,9 @@ impl App {
         self.source_id = reset.source_id;
         self.body_id = reset.body_id;
         self.living_implicit = reset.living_implicit;
+        self.living_morph = reset.living_morph;
+        self.living_initial_save = reset.living_initial_save;
+        self.living_events.clear();
         self.mixed = reset.mixed;
         self.contact_cache = None;
         self.selected = None;
@@ -577,6 +599,41 @@ impl App {
         self.last_save = Some(path);
         Ok(())
     }
+    fn save_living_bundle(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::Write;
+        if self.pending_move || self.pending_source_toggle || self.pending_prune.is_some() {
+            return Err("advance the pending intervention before exporting history".into());
+        }
+        let initial = self.living_initial_save.as_ref().ok_or(
+            "native history unavailable after loading a completed snapshot or exceeding its limit",
+        )?;
+        let final_state = Runtime::from_snapshot(self.world.clone(), self.time, self.step)?;
+        let bytes = living_morph::bundle(initial, &self.living_events, &final_state)?;
+        let directory = PathBuf::from("target/living-world-bundles");
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join(format!("tick-{}.json", self.time.ticks()));
+        let temp = path.with_extension(format!(
+            "tmp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            std::fs::hard_link(&temp, &path)?;
+            Ok(())
+        })();
+        let _ = std::fs::remove_file(&temp);
+        result?;
+        self.status = format!("HISTORY EXPORTED {}", path.display());
+        Ok(())
+    }
     fn load_living(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let path = self.last_save.as_ref().ok_or("NO SAVE IN THIS SESSION")?;
         let loaded = Self::living(Runtime::load_file(path)?)?;
@@ -585,6 +642,9 @@ impl App {
         self.source_id = loaded.source_id;
         self.body_id = loaded.body_id;
         self.living_implicit = loaded.living_implicit;
+        self.living_morph = loaded.living_morph;
+        self.living_initial_save = None;
+        self.living_events.clear();
         self.mixed = loaded.mixed;
         self.contact_cache = None;
         self.selected = None;
@@ -1022,6 +1082,14 @@ impl App {
             advance(&mut self.world, &mut self.time, self.step)
         };
         result?;
+        if self.living_morph && self.living_initial_save.is_some() {
+            if self.living_events.len() + events.len() > 4_096 || self.time.ticks() > 10_000 {
+                self.living_initial_save = None;
+                self.living_events.clear();
+            } else {
+                self.living_events.extend(events.iter().cloned());
+            }
+        }
         if self.living {
             for event in &events {
                 if let EnvironmentEventKind::MoveSource { id, position } = &event.kind {
@@ -1156,7 +1224,56 @@ impl App {
             self.snapshot_samples
                 .push(snapshot_started.elapsed().as_secs_f64() * 1000.0);
         }
-        let hud_lines = if self.living_implicit {
+        let hud_lines = if self.living_morph {
+            let field = self
+                .world
+                .field_instances()
+                .iter()
+                .find(|item| item.morphology().is_some())
+                .expect("morphology");
+            let morph = field.morphology().expect("morphology");
+            let path = self
+                .graphics
+                .as_ref()
+                .and_then(|graphics| graphics.renderer.compiler_stats())
+                .map(|stats| {
+                    format!(
+                        "{:?} pending:{} requests:{} hits:{}",
+                        stats.active, stats.pending, stats.requests, stats.cache_hits
+                    )
+                })
+                .unwrap_or_else(|| "GPU STATUS UNKNOWN".into());
+            Some([
+                "GENESIS LIVING WORLD 3 | EXPERIMENTAL".into(),
+                "SPACE PAUSE | . STEP | F FAST | M MOVE SOURCE".into(),
+                format!(
+                    "TICK {} | NODES {:?} | STOCK {:.3}/{:.3}",
+                    self.time.ticks(),
+                    self.world
+                        .organisms()
+                        .iter()
+                        .map(|tree| tree.nodes().len())
+                        .collect::<Vec<_>>(),
+                    self.world.sources()[0]
+                        .reservoir()
+                        .expect("finite")
+                        .stored(),
+                    self.world.sources()[1]
+                        .reservoir()
+                        .expect("finite")
+                        .stored()
+                ),
+                format!(
+                    "MORPH {} | RADII {:.3}/{:.3} | UNITS {:.3}/{:.3}",
+                    field.id().value(),
+                    morph.radii()[0],
+                    morph.radii()[1],
+                    morph.total_allocated()[0],
+                    morph.total_allocated()[1]
+                ),
+                format!("{path} | {}", self.status),
+            ])
+        } else if self.living_implicit {
             let field = self
                 .world
                 .field_instances()
@@ -1219,7 +1336,7 @@ impl App {
             Some([
                 "GENESIS LIVING WORLD | EXPERIMENTAL".into(),
                 "SPACE PAUSE | . STEP | F FAST | M MOVE SOURCE".into(),
-                "R RESET | F5 SAVE | F9 LOAD | ARROWS LOOK".into(),
+                "R RESET | F5 SAVE | F6 HISTORY | F9 LOAD | ARROWS LOOK".into(),
                 format!(
                     "TICK {} | NODES {counts:?} | STOCK {:.3}/{:.3}",
                     self.time.ticks(),
@@ -1454,7 +1571,12 @@ impl App {
                     background: [0.05, 0.075, 0.115],
                     light_direction: [0.5, 0.8, -0.6],
                 },
-                if self.living_implicit {
+                if self.living_morph {
+                    GpuFieldRenderMode {
+                        execution: GpuFieldExecution::Combined,
+                        spatial_guard: true,
+                    }
+                } else if self.living_implicit {
                     GpuFieldRenderMode {
                         execution: GpuFieldExecution::Structural,
                         spatial_guard: true,
@@ -1802,7 +1924,7 @@ impl ApplicationHandler for App {
                         KeyCode::Digit1 if self.mixed => self.show_analytic = !self.show_analytic,
                         KeyCode::Digit2 if self.mixed => self.show_fields = !self.show_fields,
                         KeyCode::Digit3 if self.mixed => self.diagnostic = !self.diagnostic,
-                        KeyCode::KeyT if self.mixed && !self.living_implicit => {
+                        KeyCode::KeyT if self.mixed && !self.living => {
                             if let Some(field) = self.world.field_instances().first() {
                                 let id = field.id();
                                 let position = field.transform().translation();
@@ -1850,6 +1972,11 @@ impl ApplicationHandler for App {
                         KeyCode::F5 if self.living => {
                             if let Err(error) = self.save_living() {
                                 self.status = format!("SAVE FAILED: {error}");
+                            }
+                        }
+                        KeyCode::F6 if self.living_morph => {
+                            if let Err(error) = self.save_living_bundle() {
+                                self.status = format!("HISTORY FAILED: {error}");
                             }
                         }
                         KeyCode::F9 if self.living => {
@@ -1958,6 +2085,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         return Ok(());
     }
+    if args.as_slice() == ["--living-morph-experiment"] {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&living_morph::experiment()?)?
+        );
+        return Ok(());
+    }
+    if args.as_slice() == ["--living-morph-measure"] {
+        println!("{}", living_morph::measure_cpu()?);
+        return Ok(());
+    }
+    if let [flag, path] = args.as_slice()
+        && flag == "--living-morph-replay"
+    {
+        println!("{}", living_morph::read_bundle(std::path::Path::new(path))?);
+        return Ok(());
+    }
     if args.as_slice() == ["--living-implicit-measure"] {
         println!("{}", living_implicit::measure_cpu()?);
         return Ok(());
@@ -1979,6 +2123,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [flag] if flag == "--living-implicit" => App::living(living_implicit::initial(
             SimulationStep::new(STEP.as_secs_f64())?,
         )?)?,
+        [flag] if flag == "--living-morph" => App::living(living_morph::initial(
+            SimulationStep::new(STEP.as_secs_f64())?,
+            true,
+        )?)?,
         [flag, path] if flag == "--living-scene" => App::living_scene(PathBuf::from(path))?,
         [flag, path] if flag == "--living-load" => App::living(Runtime::load_file(path)?)?,
         [flag] if flag == "--mixed" => App::mixed()?,
@@ -1986,7 +2134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [flag, path] if flag == "--authored-world" => App::authored_world(PathBuf::from(path))?,
         _ => {
             return Err(
-                "usage: first-light [--life|--living|--living-implicit|--living-implicit-experiment|--living-implicit-measure|--living-scene FILE|--living-load FILE|--living-experiment|--living-measure|--passage|--mixed|--authoring FILE|--authored-world FILE]"
+                "usage: first-light [--life|--living|--living-implicit|--living-morph|--living-morph-experiment|--living-morph-measure|--living-morph-replay FILE|--living-implicit-experiment|--living-implicit-measure|--living-scene FILE|--living-load FILE|--living-experiment|--living-measure|--passage|--mixed|--authoring FILE|--authored-world FILE]"
                     .into(),
             );
         }
@@ -2104,6 +2252,52 @@ mod app_tests {
         assert_eq!(app.world, *initial.world());
         assert_eq!(app.time, initial.time());
         assert!(app.living_implicit && app.mixed);
+    }
+
+    #[test]
+    fn living_morph_native_load_and_reset_preserve_parameters() {
+        let initial =
+            living_morph::initial(SimulationStep::new(STEP.as_secs_f64()).unwrap(), true).unwrap();
+        let mut app = App::living(initial.clone()).unwrap();
+        assert!(app.living_morph && app.mixed);
+        for _ in 0..120 {
+            app.simulation_tick().unwrap();
+        }
+        let saved = Runtime::from_snapshot(app.world.clone(), app.time, app.step)
+            .unwrap()
+            .save_bytes()
+            .unwrap();
+        let loaded = App::living(Runtime::load_bytes(&saved).unwrap()).unwrap();
+        assert!(loaded.living_morph && loaded.mixed);
+        assert_eq!(loaded.world, app.world);
+        assert_eq!(loaded.time, app.time);
+        app.reset_living().unwrap();
+        assert_eq!(app.world, *initial.world());
+        assert_eq!(app.time, initial.time());
+    }
+
+    #[test]
+    fn living_morph_native_events_replay_but_completed_save_has_no_history() {
+        let initial =
+            living_morph::initial(SimulationStep::new(STEP.as_secs_f64()).unwrap(), true).unwrap();
+        let mut app = App::living(initial).unwrap();
+        app.pending_move = true;
+        app.simulation_tick().unwrap();
+        assert_eq!(app.living_events.len(), 1);
+        let final_state = Runtime::from_snapshot(app.world.clone(), app.time, app.step).unwrap();
+        let bytes = living_morph::bundle(
+            app.living_initial_save.as_ref().unwrap(),
+            &app.living_events,
+            &final_state,
+        )
+        .unwrap();
+        assert_eq!(living_morph::replay_bundle(&bytes).unwrap()["equal"], true);
+        let saved = final_state.save_bytes().unwrap();
+        let mut loaded = App::living(Runtime::load_bytes(&saved).unwrap()).unwrap();
+        assert!(loaded.living_events.is_empty());
+        assert!(loaded.living_initial_save.is_none());
+        loaded.reset_living().unwrap();
+        assert!(loaded.living_initial_save.is_some());
     }
 
     #[test]

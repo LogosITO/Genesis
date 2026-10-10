@@ -84,3 +84,25 @@ The JSON contains the exact initial v8 snapshot, tick-61 event, checkpoints,
 and replay result. `--living-implicit-measure` measures local CPU stages.
 See the [Living World 2 research record](../research/living-world-2.md) for
 GPU captures and limits. The field is visual and is not a physical collider.
+
+## Living World 3: surface-coupled morphology
+
+Run `cargo run --release -p first-light --locked -- --living-morph` from the
+repository root. Two independent radii change with local resource allocation;
+their outer sampling sites move with the mathematical surface. A second
+implicit field retains the earlier scale-growth strategy. The common controls
+above apply. Press **F6** after a completed tick to export a bounded initial
+snapshot plus applied-event history to
+`target/living-world-bundles/tick-N.json`. Replay it with:
+
+```text
+cargo run --release -p first-light --locked -- --living-morph-replay target/living-world-bundles/tick-N.json
+```
+
+F5 still writes a completed v9 world snapshot; F9 loads that state without
+replaying already applied inputs. Loading a completed save ends native history
+collection until reset. F6 never overwrites an existing file. To inspect the
+same deterministic A/B rule without a GPU, use `--living-morph-experiment`;
+`--living-morph-measure` reports local CPU timing. See the
+[Living World 3 research record](../research/living-world-3.md) for results,
+numerical limits, and the tested GPU path.

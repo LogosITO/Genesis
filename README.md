@@ -63,6 +63,8 @@ Two organisms with different growth strategies share finite resources. The exper
 
 **Living World 2** adds a resource-coupled implicit Field Graph organism to the same world. Run `cargo run --release -p first-light --locked -- --living-implicit` for the native mixed view, or `cargo run --release -p first-light --locked -- --living-implicit-experiment` for self-contained A/B JSON and replay. Its changing world-owned scale reuses a compatible Structural GPU program. See the [guide](docs/guides/living-world.md) and [research record](docs/research/living-world-2.md). This remains an experimental visual field without implicit physical contact.
 
+**Living World 3** adds two independently growing implicit sphere radii whose moving surface sites sample the same finite resources as neighboring organisms. Run `cargo run --release -p first-light --locked -- --living-morph` for the native view, `--living-morph-experiment` for the reproducible CPU A/B experiment, or `--living-morph-replay PATH` for an exported F6 history bundle. See the [guide](docs/guides/living-world.md) and [research record](docs/research/living-world-3.md). The field is visual only; this is a bounded research model.
+
 Inspect an external mathematical definition on the CPU, then display it as analytic capsules:
 
 ```sh
