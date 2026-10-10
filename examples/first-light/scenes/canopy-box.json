@@ -1,0 +1,9 @@
+{
+  "format_version": 1,
+  "id": "canopy_box",
+  "root": "canopy",
+  "nodes": [
+    { "op": "box", "id": "body", "half_extent": [0.42, 0.30, 0.30] },
+    { "op": "translate", "id": "canopy", "child": "body", "offset": [0, 0.12, 0] }
+  ]
+}

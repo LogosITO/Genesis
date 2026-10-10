@@ -1,0 +1,23 @@
+{
+  "format_version": 1,
+  "base_scene": "living-world.json",
+  "fields": [
+    {
+      "definition": "morph-lobes.json",
+      "position": [-0.2, 0.75, -1.25],
+      "scale": 0.48,
+      "rules": [
+        { "binding": { "node": "left_ball", "component": "sphere_radius" }, "uptake": 1.4, "gain_per_unit": 0.32, "maximum": 1.15, "positive_site": false, "feedback": true },
+        { "binding": { "node": "right_ball", "component": "sphere_radius" }, "uptake": 0.85, "gain_per_unit": 0.48, "maximum": 1.25, "positive_site": true, "feedback": true }
+      ]
+    },
+    {
+      "definition": "canopy-box.json",
+      "position": [1.7, 0.7, -1.3],
+      "scale": 0.32,
+      "rules": [
+        { "binding": { "node": "body", "component": "box_half_x" }, "uptake": 1.1, "gain_per_unit": 0.26, "maximum": 1.1, "positive_site": true, "feedback": true }
+      ]
+    }
+  ]
+}

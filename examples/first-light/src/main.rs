@@ -6,6 +6,7 @@ mod living_implicit;
 mod living_morph;
 #[cfg(test)]
 mod living_morph_oracle;
+mod living_rules;
 mod passage;
 
 use analytic_field::{AxisAlignedBox, Capsule, Sphere};
@@ -361,10 +362,12 @@ struct App {
     living: bool,
     living_implicit: bool,
     living_morph: bool,
+    living_rules: bool,
     passage: bool,
     fast: bool,
     last_save: Option<PathBuf>,
     living_scene_path: Option<PathBuf>,
+    rules_scene_path: Option<PathBuf>,
     living_profile_tick: Option<u64>,
     living_initial_save: Option<Vec<u8>>,
     living_events: Vec<EnvironmentEvent>,
@@ -459,10 +462,12 @@ impl App {
             living: false,
             living_implicit: false,
             living_morph: false,
+            living_rules: false,
             passage,
             fast: false,
             last_save: None,
             living_scene_path: None,
+            rules_scene_path: None,
             living_profile_tick: None,
             living_initial_save: None,
             living_events: Vec::new(),
@@ -543,8 +548,13 @@ impl App {
             .field_instances()
             .iter()
             .any(|field| field.morphology().is_some());
-        app.mixed = app.living_implicit || app.living_morph;
-        if app.living_morph && runtime.time().ticks() == 0 {
+        app.living_rules = app
+            .world
+            .field_instances()
+            .iter()
+            .any(|field| field.parameters().is_some());
+        app.mixed = app.living_implicit || app.living_morph || app.living_rules;
+        if (app.living_morph || app.living_rules) && runtime.time().ticks() == 0 {
             app.living_initial_save = Some(runtime.save_bytes()?);
         }
         app.status = "TWO STRATEGIES; MOVE THE RESOURCE TO CHANGE THEIR FUTURE".into();
@@ -556,9 +566,19 @@ impl App {
         app.living_scene_path = Some(path);
         Ok(app)
     }
+    fn living_rules_scene(path: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
+        let runtime = living_rules::read_scene(&path, SimulationStep::new(STEP.as_secs_f64())?)?;
+        let mut app = Self::living(runtime)?;
+        app.rules_scene_path = Some(path);
+        Ok(app)
+    }
     fn reset_living(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let reset = if let Some(path) = &self.living_scene_path {
+        let reset = if let Some(path) = &self.rules_scene_path {
+            Self::living(living_rules::read_scene(path, self.step)?)?
+        } else if let Some(path) = &self.living_scene_path {
             Self::living(living::read_scene(path, self.step)?)?
+        } else if self.living_rules {
+            Self::living(living_rules::initial(self.step, true)?)?
         } else if self.living_morph {
             Self::living(living_morph::initial(self.step, true)?)?
         } else if self.living_implicit {
@@ -572,6 +592,7 @@ impl App {
         self.body_id = reset.body_id;
         self.living_implicit = reset.living_implicit;
         self.living_morph = reset.living_morph;
+        self.living_rules = reset.living_rules;
         self.living_initial_save = reset.living_initial_save;
         self.living_events.clear();
         self.mixed = reset.mixed;
@@ -643,6 +664,7 @@ impl App {
         self.body_id = loaded.body_id;
         self.living_implicit = loaded.living_implicit;
         self.living_morph = loaded.living_morph;
+        self.living_rules = loaded.living_rules;
         self.living_initial_save = None;
         self.living_events.clear();
         self.mixed = loaded.mixed;
@@ -1082,7 +1104,7 @@ impl App {
             advance(&mut self.world, &mut self.time, self.step)
         };
         result?;
-        if self.living_morph && self.living_initial_save.is_some() {
+        if (self.living_morph || self.living_rules) && self.living_initial_save.is_some() {
             if self.living_events.len() + events.len() > 4_096 || self.time.ticks() > 10_000 {
                 self.living_initial_save = None;
                 self.living_events.clear();
@@ -1224,7 +1246,60 @@ impl App {
             self.snapshot_samples
                 .push(snapshot_started.elapsed().as_secs_f64() * 1000.0);
         }
-        let hud_lines = if self.living_morph {
+        let hud_lines = if self.living_rules {
+            let fields = self
+                .world
+                .field_instances()
+                .iter()
+                .filter_map(|field| {
+                    field.parameters().map(|state| {
+                        format!(
+                            "{}:{:?}",
+                            field.id().value(),
+                            state
+                                .channels()
+                                .iter()
+                                .map(|channel| format!("{:.3}", channel.current()))
+                                .collect::<Vec<_>>()
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            let stocks = self
+                .world
+                .sources()
+                .iter()
+                .map(|source| source.reservoir().expect("finite").stored())
+                .collect::<Vec<_>>();
+            let compiler = self
+                .graphics
+                .as_ref()
+                .and_then(|graphics| graphics.renderer.compiler_stats())
+                .map(|stats| {
+                    format!(
+                        "{:?} pending:{} requests:{}",
+                        stats.active, stats.pending, stats.requests
+                    )
+                })
+                .unwrap_or_else(|| "GPU STATUS UNKNOWN".into());
+            Some([
+                "GENESIS LIVING WORLD 4 | EXPERIMENTAL".into(),
+                "SPACE PAUSE | . STEP | F FAST | M MOVE SOURCE".into(),
+                format!(
+                    "TICK {} | NODES {:?} | STOCK {:.3}/{:.3}",
+                    self.time.ticks(),
+                    self.world
+                        .organisms()
+                        .iter()
+                        .map(|tree| tree.nodes().len())
+                        .collect::<Vec<_>>(),
+                    stocks[0],
+                    stocks[1]
+                ),
+                format!("PARAMETERS {}", fields.join(" ")),
+                format!("{compiler} | {}", self.status),
+            ])
+        } else if self.living_morph {
             let field = self
                 .world
                 .field_instances()
@@ -1571,7 +1646,7 @@ impl App {
                     background: [0.05, 0.075, 0.115],
                     light_direction: [0.5, 0.8, -0.6],
                 },
-                if self.living_morph {
+                if self.living_morph || self.living_rules {
                     GpuFieldRenderMode {
                         execution: GpuFieldExecution::Combined,
                         spatial_guard: true,
@@ -1974,7 +2049,7 @@ impl ApplicationHandler for App {
                                 self.status = format!("SAVE FAILED: {error}");
                             }
                         }
-                        KeyCode::F6 if self.living_morph => {
+                        KeyCode::F6 if self.living_morph || self.living_rules => {
                             if let Err(error) = self.save_living_bundle() {
                                 self.status = format!("HISTORY FAILED: {error}");
                             }
@@ -2092,6 +2167,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         return Ok(());
     }
+    if args.as_slice() == ["--living-rules-experiment"] {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&living_rules::experiment()?)?
+        );
+        return Ok(());
+    }
     if args.as_slice() == ["--living-morph-measure"] {
         println!("{}", living_morph::measure_cpu()?);
         return Ok(());
@@ -2127,6 +2209,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             SimulationStep::new(STEP.as_secs_f64())?,
             true,
         )?)?,
+        [flag] if flag == "--living-rules" => App::living(living_rules::initial(
+            SimulationStep::new(STEP.as_secs_f64())?,
+            true,
+        )?)?,
+        [flag, path] if flag == "--living-rules-scene" => {
+            App::living_rules_scene(PathBuf::from(path))?
+        }
         [flag, path] if flag == "--living-scene" => App::living_scene(PathBuf::from(path))?,
         [flag, path] if flag == "--living-load" => App::living(Runtime::load_file(path)?)?,
         [flag] if flag == "--mixed" => App::mixed()?,
@@ -2134,7 +2223,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [flag, path] if flag == "--authored-world" => App::authored_world(PathBuf::from(path))?,
         _ => {
             return Err(
-                "usage: first-light [--life|--living|--living-implicit|--living-morph|--living-morph-experiment|--living-morph-measure|--living-morph-replay FILE|--living-implicit-experiment|--living-implicit-measure|--living-scene FILE|--living-load FILE|--living-experiment|--living-measure|--passage|--mixed|--authoring FILE|--authored-world FILE]"
+                "usage: first-light [--life|--living|--living-implicit|--living-morph|--living-rules|--living-rules-scene FILE|--living-rules-experiment|--living-morph-experiment|--living-morph-measure|--living-morph-replay FILE|--living-implicit-experiment|--living-implicit-measure|--living-scene FILE|--living-load FILE|--living-experiment|--living-measure|--passage|--mixed|--authoring FILE|--authored-world FILE]"
                     .into(),
             );
         }
@@ -2298,6 +2387,70 @@ mod app_tests {
         assert!(loaded.living_initial_save.is_none());
         loaded.reset_living().unwrap();
         assert!(loaded.living_initial_save.is_some());
+    }
+
+    #[test]
+    fn living_rules_native_history_reset_and_save_round_trip() {
+        let initial =
+            living_rules::initial(SimulationStep::new(STEP.as_secs_f64()).unwrap(), true).unwrap();
+        let mut app = App::living(initial.clone()).unwrap();
+        assert!(app.living_rules && app.mixed);
+        app.pending_move = true;
+        app.simulation_tick().unwrap();
+        let completed = Runtime::from_snapshot(app.world.clone(), app.time, app.step).unwrap();
+        let bundle = living_morph::bundle(
+            app.living_initial_save.as_ref().unwrap(),
+            &app.living_events,
+            &completed,
+        )
+        .unwrap();
+        assert_eq!(living_morph::replay_bundle(&bundle).unwrap()["equal"], true);
+        let saved = completed.save_bytes().unwrap();
+        assert_eq!(Runtime::load_bytes(&saved).unwrap(), completed);
+        app.reset_living().unwrap();
+        assert_eq!(app.world, *initial.world());
+        assert_eq!(app.time, initial.time());
+    }
+
+    #[test]
+    fn living_rules_external_reload_is_atomic() {
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../../target/living-rules-reload-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        for (name, bytes) in [
+            (
+                "living-world.json",
+                include_bytes!("../scenes/living-world.json").as_slice(),
+            ),
+            (
+                "morph-lobes.json",
+                include_bytes!("../scenes/morph-lobes.json").as_slice(),
+            ),
+            (
+                "canopy-box.json",
+                include_bytes!("../scenes/canopy-box.json").as_slice(),
+            ),
+        ] {
+            std::fs::write(directory.join(name), bytes).unwrap();
+        }
+        let path = directory.join("living-world-4.json");
+        let original = include_bytes!("../scenes/living-world-4.json");
+        std::fs::write(&path, original).unwrap();
+        let mut app = App::living_rules_scene(path.clone()).unwrap();
+        let initial = app.world.clone();
+        app.simulation_tick().unwrap();
+        let running = app.world.clone();
+        std::fs::write(&path, b"{bad json").unwrap();
+        assert!(app.reset_living().is_err());
+        assert_eq!(app.world, running);
+        let mut changed: serde_json::Value = serde_json::from_slice(original).unwrap();
+        changed["fields"][1]["rules"][0]["uptake"] = serde_json::json!(0.7);
+        std::fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+        app.reset_living().unwrap();
+        assert_ne!(app.world, initial);
+        assert_eq!(app.time.ticks(), 0);
     }
 
     #[test]

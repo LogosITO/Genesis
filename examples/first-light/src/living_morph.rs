@@ -175,7 +175,7 @@ pub fn replay_bundle(bytes: &[u8]) -> Result<Value, Box<dyn Error>> {
             .world()
             .field_instances()
             .iter()
-            .all(|field| field.morphology().is_none())
+            .all(|field| field.morphology().is_none() && field.parameters().is_none())
     {
         return Err("bundle initial state is not a fresh morph world".into());
     }
