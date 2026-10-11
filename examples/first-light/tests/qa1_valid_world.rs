@@ -3,11 +3,14 @@
 use analytic_field::Sphere;
 use analytic_renderer::{
     Bvh, Camera, DrawOptions, GpuFieldExecution, GpuFieldPath, GpuFieldRenderMode, GpuRenderer,
-    GpuTimer, MixedDrawOptions, Scene, field_graph_gpu::GraphTracePolicy,
+    GpuTimer, MixedDrawOptions, Scene,
+    field_graph_gpu::GraphTracePolicy,
+    material::{Material, MaterialPattern, MaterialSet},
 };
 use spatial_math::{Transform, Vec3};
 use std::{hint::black_box, time::Instant};
 use world_runtime::Runtime;
+use world_simulation::EnvironmentEventKind;
 use world_simulation::SimulationStep;
 use world_state::{
     DeterministicSeed, GrowthParameters, MAX_NODES, ParameterBinding, ParameterComponent,
@@ -260,6 +263,201 @@ fn dense_authored_world_reaches_combined_limits() {
         tree.depth(),
         save.len()
     );
+}
+
+#[test]
+#[ignore = "native GPU; dense dynamic Interpreter/Combined hit and material readback"]
+fn dense_dynamic_combined_diagnostic_parity() {
+    let mut runtime = Runtime::new(
+        world(512, MAX_NODES, true),
+        SimulationStep::new(0.016_666_667).unwrap(),
+    );
+    let source = runtime.world().sources()[0].id();
+    runtime
+        .schedule(
+            30,
+            EnvironmentEventKind::MoveSource {
+                id: source,
+                position: v(2.0, 1.0, 0.0),
+            },
+        )
+        .unwrap();
+    runtime
+        .schedule(
+            60,
+            EnvironmentEventKind::MoveSource {
+                id: source,
+                position: v(0.0, 2.0, 0.0),
+            },
+        )
+        .unwrap();
+    let adapter = pollster::block_on(
+        wgpu::Instance::default().request_adapter(&wgpu::RequestAdapterOptions::default()),
+    )
+    .unwrap();
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let renderer =
+        pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+    let camera =
+        Camera::look_at(v(-3.0, 0.0, -5.0), v(-3.0, 0.0, 0.0), v(0.0, 1.0, 0.0), 0.9).unwrap();
+    let mut materials = MaterialSet::default();
+    materials.set_field(
+        runtime.world().field_instances()[0].id(),
+        Material::new(
+            [0.8, 0.2, 0.1],
+            [0.0; 3],
+            [0.0; 3],
+            MaterialPattern::Constant,
+        )
+        .unwrap(),
+    );
+    let read = |world: &WorldState, execution| {
+        renderer
+            .diagnose_mixed_camera(
+                &device,
+                &queue,
+                world,
+                camera,
+                MixedDrawOptions {
+                    draw: DrawOptions {
+                        size: [17, 17],
+                        normal_debug: false,
+                        surface: None,
+                        timer: None,
+                    },
+                    policy: GraphTracePolicy::default(),
+                    show_analytic: true,
+                    show_fields: true,
+                    diagnostic: true,
+                    materials: Some(&materials),
+                    simulation_seconds: 0.0,
+                    background: [0.0; 3],
+                    light_direction: [0.0, 1.0, 0.0],
+                },
+                GpuFieldRenderMode {
+                    execution,
+                    spatial_guard: true,
+                },
+            )
+            .unwrap()
+    };
+    for tick in [0, 30, 60] {
+        while runtime.time().ticks() < tick {
+            runtime.tick().unwrap();
+        }
+        let reference = read(runtime.world(), GpuFieldExecution::Interpreter);
+        let mut compiled = None;
+        for _ in 0..200 {
+            let result = read(runtime.world(), GpuFieldExecution::Combined);
+            if result[0].path == GpuFieldPath::Combined {
+                compiled = Some(result);
+                break;
+            }
+            assert!(renderer.compiler_stats().unwrap().last_error.is_none());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let compiled = compiled.expect("Combined did not become active");
+        let mut field_hits = 0;
+        let mut material_hits = 0;
+        for (left, right) in reference.iter().zip(&compiled) {
+            assert_eq!(
+                (
+                    left.hit,
+                    left.field,
+                    left.uncertain,
+                    left.exhausted,
+                    left.ambiguous
+                ),
+                (
+                    right.hit,
+                    right.field,
+                    right.uncertain,
+                    right.exhausted,
+                    right.ambiguous
+                ),
+                "tick={tick}"
+            );
+            assert_eq!(
+                (left.identity, left.definition, left.material),
+                (right.identity, right.definition, right.material)
+            );
+            if let (Some(a), Some(b)) = (left.distance, right.distance) {
+                assert!((a - b).abs() < 0.02, "tick={tick} distance {a} != {b}");
+            }
+            if let (Some(a), Some(b)) = (left.normal, right.normal) {
+                assert!(a.into_iter().zip(b).all(|(x, y)| (x - y).abs() < 0.04));
+            }
+            field_hits += usize::from(left.hit && left.field);
+            if left.hit && left.field {
+                assert!(left.definition.is_some());
+                material_hits += usize::from(left.material.is_some());
+            }
+        }
+        assert!(field_hits > 0, "tick={tick} lacked field coverage");
+        assert!(
+            material_hits > 0,
+            "tick={tick} lacked assigned material coverage"
+        );
+        println!(
+            "AC1_DENSE_PARITY tick={tick} rays={} field_hits={field_hits} requests={}",
+            reference.len(),
+            renderer.compiler_stats().unwrap().requests
+        );
+    }
+    assert_eq!(renderer.compiler_stats().unwrap().requests, 1);
+}
+
+#[test]
+#[ignore = "release-profile dense scene delta at one scheduled source move"]
+fn dense_source_move_primitive_delta() {
+    let mut runtime = Runtime::new(
+        world(512, MAX_NODES, true),
+        SimulationStep::new(0.016_666_667).unwrap(),
+    );
+    runtime
+        .schedule(
+            30,
+            EnvironmentEventKind::MoveSource {
+                id: runtime.world().sources()[0].id(),
+                position: v(2.0, 1.0, 0.0),
+            },
+        )
+        .unwrap();
+    runtime
+        .schedule(
+            60,
+            EnvironmentEventKind::MoveSource {
+                id: runtime.world().sources()[0].id(),
+                position: v(0.0, 2.0, 0.0),
+            },
+        )
+        .unwrap();
+    for tick in [30, 60] {
+        while runtime.time().ticks() < tick - 1 {
+            runtime.tick().unwrap();
+        }
+        let before = Scene::from_world(runtime.world()).unwrap();
+        runtime.tick().unwrap();
+        let after = Scene::from_world(runtime.world()).unwrap();
+        assert_eq!(before.primitives().len(), 4993);
+        assert_eq!(after.primitives().len(), 4993);
+        let changed = before
+            .primitives()
+            .iter()
+            .zip(after.primitives())
+            .filter(|(a, b)| {
+                a.kind != b.kind
+                    || a.center() != b.center()
+                    || a.dimensions() != b.dimensions()
+                    || a.capsule_radius() != b.capsule_radius()
+                    || a.target() != b.target()
+            })
+            .map(|(_, b)| (b.id, b.target()))
+            .collect::<Vec<_>>();
+        assert!(!changed.is_empty());
+        println!("AC1_SOURCE_DELTA tick={tick} changed={changed:?}");
+    }
 }
 
 #[test]

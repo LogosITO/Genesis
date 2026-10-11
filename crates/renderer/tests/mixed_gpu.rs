@@ -2,7 +2,7 @@
 use analytic_field::Sphere;
 use analytic_renderer::{
     Camera, DrawOptions, GpuFieldExecution, GpuFieldPath, GpuFieldRenderMode, GpuRenderer,
-    MixedDrawOptions, MixedGpuIdentity,
+    MixedDrawOptions, MixedGpuIdentity, Scene,
     field_graph_gpu::{GraphGpuRenderer, GraphTracePolicy, WorldFieldGpuOutcome},
     material::{Material, MaterialPattern, MaterialSet},
     mixed::{MixedRenderOptions, MixedSource, render_mixed_rgba},
@@ -27,7 +27,7 @@ fn native_mixed_diagnostic_selects_nearest_mathematical_object() {
     let source = br#"{"format_version":1,"id":"diagnostic-sphere","root":"s","nodes":[{"op":"sphere","id":"s","radius":1.0}]}"#;
     let field = world.spawn_field(source, Transform::identity()).unwrap();
     let camera = Camera::look_at(v(0.0, 0.0, -4.0), Vec3::ZERO, v(0.0, 1.0, 0.0), 0.9).unwrap();
-    let diagnose = |world: &WorldState, camera: Camera| {
+    let diagnose = |world: &WorldState, camera: Camera, execution| {
         renderer
             .diagnose_mixed_camera(
                 &device,
@@ -51,13 +51,13 @@ fn native_mixed_diagnostic_selects_nearest_mathematical_object() {
                     light_direction: [0.0, 1.0, 0.0],
                 },
                 GpuFieldRenderMode {
-                    execution: GpuFieldExecution::Interpreter,
+                    execution,
                     spatial_guard: true,
                 },
             )
             .unwrap()[0]
     };
-    let implicit = diagnose(&world, camera);
+    let implicit = diagnose(&world, camera, GpuFieldExecution::Interpreter);
     assert!(implicit.hit && implicit.field && !implicit.uncertain && !implicit.exhausted);
     assert_eq!(
         implicit.identity,
@@ -78,7 +78,7 @@ fn native_mixed_diagnostic_selects_nearest_mathematical_object() {
             0.0,
         )
         .unwrap();
-    let analytic = diagnose(&world, camera);
+    let analytic = diagnose(&world, camera, GpuFieldExecution::Interpreter);
     assert!(analytic.hit && !analytic.field && !analytic.uncertain && !analytic.exhausted);
     assert_eq!(
         analytic.identity,
@@ -95,7 +95,7 @@ fn native_mixed_diagnostic_selects_nearest_mathematical_object() {
     only_field
         .spawn_field(source, Transform::identity())
         .unwrap();
-    let inside = diagnose(&only_field, inside_camera);
+    let inside = diagnose(&only_field, inside_camera, GpuFieldExecution::Interpreter);
     assert!(
         !inside.hit && inside.uncertain && !inside.exhausted,
         "{inside:?}"
@@ -107,7 +107,7 @@ fn native_mixed_diagnostic_selects_nearest_mathematical_object() {
         .unwrap();
     let box_camera =
         Camera::look_at(v(1.0, 0.0, -4.0), v(1.0, 0.0, 0.0), v(0.0, 1.0, 0.0), 0.9).unwrap();
-    let box_hit = diagnose(&box_world, box_camera);
+    let box_hit = diagnose(&box_world, box_camera, GpuFieldExecution::Interpreter);
     assert_eq!(
         box_hit.identity,
         Some(MixedGpuIdentity::FieldInstance(box_id.value()))
@@ -149,8 +149,8 @@ fn native_mixed_diagnostic_selects_nearest_mathematical_object() {
         Camera::look_at(v(-1.0, 0.0, -4.0), v(-1.0, 0.0, 0.0), v(0.0, 1.0, 0.0), 0.9).unwrap();
     let right_camera =
         Camera::look_at(v(1.0, 0.0, -4.0), v(1.0, 0.0, 0.0), v(0.0, 1.0, 0.0), 0.9).unwrap();
-    let first = diagnose(&shared_world, left_camera);
-    let second = diagnose(&shared_world, right_camera);
+    let first = diagnose(&shared_world, left_camera, GpuFieldExecution::Interpreter);
+    let second = diagnose(&shared_world, right_camera, GpuFieldExecution::Interpreter);
     assert_eq!(
         first.identity,
         Some(MixedGpuIdentity::FieldInstance(left.value()))
@@ -164,6 +164,46 @@ fn native_mixed_diagnostic_selects_nearest_mathematical_object() {
         (second.distance.unwrap() - 3.25).abs() < 0.003,
         "{second:?}"
     );
+    let combined = |world: &WorldState, camera: Camera| {
+        for _ in 0..200 {
+            let result = diagnose(world, camera, GpuFieldExecution::Combined);
+            if result.path == GpuFieldPath::Combined {
+                return result;
+            }
+            let fallback = diagnose(world, camera, GpuFieldExecution::Interpreter);
+            assert_eq!(result.identity, fallback.identity);
+            assert_eq!(result.definition, fallback.definition);
+            assert!((result.distance.unwrap() - fallback.distance.unwrap()).abs() < 0.003);
+            assert!(renderer.compiler_stats().unwrap().last_error.is_none());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("Combined diagnostic shader did not become ready");
+    };
+    let compiled_before = combined(&shared_world, right_camera);
+    assert_eq!(compiled_before.identity, second.identity);
+    assert!((compiled_before.distance.unwrap() - second.distance.unwrap()).abs() < 0.003);
+    let uploads_before = renderer.field_cache_stats().unwrap().node_uploads;
+    shared_world.grow_field_parameters(right, &[0.5]).unwrap();
+    let changed = diagnose(&shared_world, right_camera, GpuFieldExecution::Interpreter);
+    assert!(changed.distance.unwrap() < second.distance.unwrap() - 0.1);
+    assert!(renderer.field_cache_stats().unwrap().node_uploads > uploads_before);
+    let compiled_after = combined(&shared_world, right_camera);
+    assert_eq!(compiled_after.identity, changed.identity);
+    assert_eq!(compiled_after.definition, changed.definition);
+    assert_eq!(compiled_after.material, changed.material);
+    assert_eq!(compiled_after.hit, changed.hit);
+    assert_eq!(compiled_after.uncertain, changed.uncertain);
+    assert_eq!(compiled_after.exhausted, changed.exhausted);
+    assert!((compiled_after.distance.unwrap() - changed.distance.unwrap()).abs() < 0.003);
+    assert!(
+        compiled_after
+            .normal
+            .unwrap()
+            .into_iter()
+            .zip(changed.normal.unwrap())
+            .all(|(a, b)| (a - b).abs() < 0.04)
+    );
+    assert_eq!(renderer.compiler_stats().unwrap().requests, 1);
     eprintln!(
         "mixed_spatial_oracle={}",
         serde_json::json!({
@@ -207,11 +247,12 @@ fn native_compiler_revision_lifecycle() {
         .unwrap();
     let mut materials = MaterialSet::default();
     let draw = |world: &WorldState, camera: Camera, materials: &MaterialSet, execution, guard| {
+        let scene = Scene::from_world(world).unwrap();
         let image = renderer
-            .draw_mixed_with_execution(
+            .draw_mixed_prepared(
                 &device,
                 &queue,
-                world,
+                (world, &scene),
                 camera,
                 MixedDrawOptions {
                     draw: DrawOptions {
@@ -244,6 +285,35 @@ fn native_compiler_revision_lifecycle() {
         GpuFieldExecution::Interpreter,
         true,
     );
+    let legacy = renderer
+        .draw_mixed_with_execution(
+            &device,
+            &queue,
+            &world,
+            camera,
+            MixedDrawOptions {
+                draw: DrawOptions {
+                    size,
+                    normal_debug: false,
+                    surface: None,
+                    timer: None,
+                },
+                policy: GraphTracePolicy::default(),
+                show_analytic: true,
+                show_fields: true,
+                diagnostic: true,
+                materials: Some(&materials),
+                simulation_seconds: 0.0,
+                background: [0.05, 0.075, 0.115],
+                light_direction: [0.5, 0.8, -0.6],
+            },
+            GpuFieldRenderMode {
+                execution: GpuFieldExecution::Interpreter,
+                spatial_guard: true,
+            },
+        )
+        .unwrap();
+    assert_eq!(reference, rgba(&device, &queue, &legacy, size));
     let first_auto = draw(&world, camera, &materials, GpuFieldExecution::Auto, true);
     assert_eq!(
         renderer.compiler_stats().unwrap().active,

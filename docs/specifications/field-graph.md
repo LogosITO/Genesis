@@ -197,6 +197,15 @@ not a certified bound on GPU rounding.
 
 CPU uses `f64`; GPU interprets the validated node buffer in `f32` with a bounded 16-frame iterative stack and 256-operation guard per sample. No shader recursion, generated WGSL, mesh, voxel, or primitive-list lowering is used. The GPU normal is a finite difference at the approximate hit, not an analytic gradient. Red pixels signal uncertainty; yellow pixels signal budget exhaustion. Both remain visible diagnostics. Conversion to `f32`, cancellation at small relative scales, branch ties, and grazing rays can disagree with CPU. No formally certified floating-point hit/miss guarantee or cross-adapter bitwise identity exists.
 
+The native mixed viewport's `spatial_guard` is a visual acceleration. A
+`MixedGpuResult` with `bounds_culled=true` reports that at least one field
+instance was **not traced**. A missing hit in that result is not a certified
+mathematical absence, and false `uncertain`/`exhausted` flags cannot rule out
+what the skipped tracer would have reported. Set `diagnostic=true` when actual
+tracer status is required: this disables the visual cull, even if
+`spatial_guard=true`. The CPU field query's `BoundsMiss` has a separate
+contract and must not be inferred from a GPU visual skip.
+
 The GPU preview accepts 1–4096 pixels per image dimension with at most 3,686,400 pixels total (the 2560×1440 budget), 65,536 ray queries or 4,096 diagnostic point samples per call, and validates query storage against adapter limits before allocation. An image has `width × height × 4` output bytes plus row-aligned readback storage. Each frame currently uploads the small node buffer and allocates output/readback buffers; there is no reuse cache. At the 32-node ceiling the node payload is 1024 bytes, excluding GPU allocation overhead. Camera motion re-evaluates the graph; no camera-dependent field cache is retained.
 
 ## Integration boundary

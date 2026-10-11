@@ -431,4 +431,8 @@ fn visual_guard_exhaustion_contract() {
         adapter.get_info()
     );
     assert!(culls > 0);
+    assert!(
+        hidden > 0,
+        "the visual path must expose the uncertainty gap"
+    );
 }

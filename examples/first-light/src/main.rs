@@ -419,11 +419,21 @@ struct Qa2Profile {
     mode: &'static str,
     output: PathBuf,
     resolution: [u32; 2],
+    start_tick: u64,
     frames: usize,
     seen: usize,
     resize_recoveries: u32,
     last_presented_start: Option<Instant>,
     records: Vec<serde_json::Value>,
+}
+impl Qa2Profile {
+    fn dynamic(&self) -> bool {
+        matches!(self.mode, "dynamic" | "dynamic-combined")
+    }
+
+    fn tick_due(&self, time: SimulationTime) -> bool {
+        self.dynamic() && self.start_tick.checked_add(self.seen as u64) == Some(time.ticks())
+    }
 }
 impl App {
     fn new(life: bool, passage: bool) -> Result<Self, Box<dyn std::error::Error>> {
@@ -572,12 +582,13 @@ impl App {
         app.source_id = Some(app.world.sources()[0].id());
         app.body_id = app.world.body().map(|body| body.id());
         app.mixed = true;
-        app.paused = mode != "dynamic";
+        app.paused = !matches!(mode, "dynamic" | "dynamic-combined");
         app.measure = true;
         app.qa2_profile = Some(Qa2Profile {
             mode,
             output,
             resolution: [size.width, size.height],
+            start_tick: runtime.time().ticks(),
             frames,
             seen: 0,
             resize_recoveries: 0,
@@ -1074,10 +1085,7 @@ impl App {
         if self.paused {
             return Ok(());
         }
-        if self
-            .qa2_profile
-            .as_ref()
-            .is_some_and(|profile| profile.mode == "dynamic")
+        if self.qa2_profile.as_ref().is_some_and(Qa2Profile::dynamic)
             && (self.time.ticks() + 1).is_multiple_of(30)
         {
             self.pending_move = true;
@@ -1299,7 +1307,18 @@ impl App {
         if self.measure && self.frames > 0 {
             self.interval_samples.push(elapsed.as_secs_f64() * 1000.0);
         }
-        if !self.paused {
+        if self.qa2_profile.as_ref().is_some_and(Qa2Profile::dynamic) {
+            if self
+                .qa2_profile
+                .as_ref()
+                .is_some_and(|profile| profile.tick_due(self.time))
+                && let Err(error) = self.simulation_tick()
+            {
+                eprintln!("simulation failed: {error}");
+                event_loop.exit();
+                return;
+            }
+        } else if !self.paused {
             let multiplier = if self.living && self.fast { 4 } else { 1 };
             let max_steps = 4 * multiplier;
             self.accumulator += elapsed.min(Duration::from_millis(250)) * multiplier;
@@ -1743,10 +1762,10 @@ impl App {
             timer: sampled_timer,
         };
         let rendered = if self.mixed {
-            graphics.renderer.draw_mixed_with_execution(
+            graphics.renderer.draw_mixed_prepared(
                 &graphics.device,
                 &graphics.queue,
-                &self.world,
+                (&self.world, &scene),
                 camera,
                 MixedDrawOptions {
                     draw: draw_options,
@@ -1761,10 +1780,9 @@ impl App {
                 },
                 if self.living_morph
                     || self.living_rules
-                    || self
-                        .qa2_profile
-                        .as_ref()
-                        .is_some_and(|profile| profile.mode == "combined")
+                    || self.qa2_profile.as_ref().is_some_and(|profile| {
+                        matches!(profile.mode, "combined" | "dynamic-combined")
+                    })
                 {
                     GpuFieldRenderMode {
                         execution: GpuFieldExecution::Combined,
@@ -1848,12 +1866,20 @@ impl App {
             }
         }
         if let Some(profile) = &mut self.qa2_profile {
+            if profile.dynamic()
+                && profile.start_tick.checked_add(profile.seen as u64 + 1)
+                    != Some(self.time.ticks())
+            {
+                eprintln!("profile tick diverged from recorded frame sequence");
+                std::process::exit(1);
+            }
             let presented_interval_ms = profile
                 .last_presented_start
                 .map(|previous| frame_started.duration_since(previous).as_secs_f64() * 1000.0);
             profile.last_presented_start = Some(frame_started);
             let draw = graphics.renderer.last_draw_stats();
             let upload = graphics.renderer.last_upload_stats();
+            let field_upload = graphics.renderer.field_cache_stats();
             let acceleration = graphics.renderer.acceleration_stats();
             let compiler = graphics.renderer.compiler_stats();
             profile.records.push(serde_json::json!({
@@ -1877,7 +1903,12 @@ impl App {
                 "pipeline_selection_ms": draw.map(|value| value.pipeline_selection_ms),
                 "encode_submit_ms": draw.map(|value| value.encode_submit_ms),
                 "upload_enqueue_ms": upload.map(|value| value.enqueue_ms),
+                "primitive_upload_bytes": upload.map(|value| value.primitive_bytes),
+                "bvh_upload_bytes": upload.map(|value| value.bvh_bytes),
                 "bvh_build_ms": upload.map(|value| value.bvh_build_ms),
+                "field_node_uploads": field_upload.map(|value| value.node_uploads),
+                "field_material_uploads": field_upload.map(|value| value.material_uploads),
+                "field_node_enqueue_ms": field_upload.map(|value| value.last_node_enqueue_ms),
                 "bvh_rebuilds": acceleration.map(|value| value.rebuilds),
                 "bvh_nodes": acceleration.map(|value| value.node_count),
                 "active": compiler.as_ref().map(|value| format!("{:?}", value.active)),
@@ -1902,10 +1933,13 @@ impl App {
                             "resolution": [size.width, size.height],
                             "warmup": 64,
                             "samples": profile.frames,
+                            "start_tick": profile.start_tick,
+                            "dynamic_schedule": "one_tick_per_recorded_frame",
                             "resize_recoveries": profile.resize_recoveries,
                             "adapter": graphics.adapter.get_info().name,
                             "backend": format!("{:?}", graphics.adapter.get_info().backend),
                             "present_mode": format!("{:?}", graphics.config.present_mode),
+                            "final_world": self.world,
                         }),
                     )?;
                     writeln!(writer)?;
@@ -2441,9 +2475,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mode = match mode.as_str() {
                 "static" => "static",
                 "dynamic" => "dynamic",
+                "dynamic-combined" => "dynamic-combined",
                 "combined" => "combined",
                 "unguarded" => "unguarded",
-                _ => return Err("QA-2 mode must be static, dynamic, combined, or unguarded".into()),
+                _ => return Err("profile mode must be static, dynamic, dynamic-combined, combined, or unguarded".into()),
             };
             App::qa2_profile(Runtime::load_file(path)?, mode, PathBuf::from(output))?
         }
@@ -2512,6 +2547,33 @@ mod app_tests {
     use analytic_renderer::{GpuTraversal, Ray};
     use std::{path::Path, sync::mpsc};
     use world_simulation::advance_life;
+
+    #[test]
+    fn profile_step_waits_for_a_recorded_frame_after_resize_skip() {
+        let mut app = App::new(true, false).unwrap();
+        for _ in 0..3 {
+            app.simulation_tick().unwrap();
+        }
+        app.qa2_profile = Some(Qa2Profile {
+            mode: "dynamic-combined",
+            output: PathBuf::new(),
+            resolution: [1280, 720],
+            start_tick: app.time.ticks(),
+            frames: 1,
+            seen: 0,
+            resize_recoveries: 0,
+            last_presented_start: None,
+            records: Vec::new(),
+        });
+        assert!(app.qa2_profile.as_ref().unwrap().tick_due(app.time));
+        app.simulation_tick().unwrap();
+        assert!(!app.qa2_profile.as_ref().unwrap().tick_due(app.time));
+        // A skipped resize redraw leaves `seen` unchanged.
+        app.qa2_profile.as_mut().unwrap().resize_recoveries += 1;
+        assert!(!app.qa2_profile.as_ref().unwrap().tick_due(app.time));
+        app.qa2_profile.as_mut().unwrap().seen += 1;
+        assert!(app.qa2_profile.as_ref().unwrap().tick_due(app.time));
+    }
 
     #[test]
     fn living_native_state_uses_same_laws_and_resets_exactly() {

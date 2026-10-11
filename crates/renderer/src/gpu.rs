@@ -214,6 +214,8 @@ pub struct MixedGpuResult {
     /// Competing hits were within the shader's depth ambiguity band.
     pub ambiguous: bool,
     /// At least one field occurrence was skipped by the visual bounds guard.
+    /// Such an occurrence was not traced: `!hit` is not a certified numerical miss,
+    /// and `!uncertain && !exhausted` cannot rule out hidden tracer uncertainty.
     pub bounds_culled: bool,
     /// Field instance ID or frame-local analytic primitive ID; `None` on a miss.
     pub identity: Option<MixedGpuIdentity>,
@@ -299,7 +301,9 @@ pub enum GpuFieldExecution {
 pub struct GpuFieldRenderMode {
     /// Select automatic revision specialization or the reference interpreter.
     pub execution: GpuFieldExecution,
-    /// Skip field tracing for rays outside the expanded visual field bounds.
+    /// Skip field tracing outside expanded visual bounds. This is an empirical
+    /// image acceleration, not a certified floating-point exclusion. Set
+    /// `diagnostic=true` to preserve actual tracer uncertainty; that disables culling.
     pub spatial_guard: bool,
 }
 
@@ -1763,9 +1767,51 @@ impl GpuRenderer {
         let scene_started = Instant::now();
         let scene = Scene::from_world(world)?;
         let scene_ms = scene_started.elapsed().as_secs_f64() * 1000.0;
-        self.draw_internal(
+        self.draw_mixed_prepared_internal(
             (device, queue),
-            &scene,
+            (world, &scene),
+            camera,
+            options,
+            render_mode,
+            scene_ms,
+        )
+    }
+
+    /// Draws a mixed frame using a scene derived from the same current world.
+    /// The caller owns the snapshot and must refresh it after every world change.
+    /// `Scene::from_world` performs world validation when constructing the snapshot.
+    pub fn draw_mixed_prepared(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        world_scene: (&WorldState, &Scene),
+        camera: Camera,
+        options: MixedDrawOptions<'_>,
+        render_mode: GpuFieldRenderMode,
+    ) -> Result<wgpu::Texture, RenderError> {
+        self.draw_mixed_prepared_internal(
+            (device, queue),
+            world_scene,
+            camera,
+            options,
+            render_mode,
+            0.0,
+        )
+    }
+
+    fn draw_mixed_prepared_internal(
+        &self,
+        gpu: (&wgpu::Device, &wgpu::Queue),
+        world_scene: (&WorldState, &Scene),
+        camera: Camera,
+        options: MixedDrawOptions<'_>,
+        render_mode: GpuFieldRenderMode,
+        scene_ms: f64,
+    ) -> Result<wgpu::Texture, RenderError> {
+        let (world, scene) = world_scene;
+        self.draw_internal(
+            gpu,
+            scene,
             camera,
             options.draw,
             DrawMode::Mixed(
