@@ -2,9 +2,11 @@
 
 **Decision: CONDITIONAL research result; NO-GO for production collision or a public query API.**
 11 October 2026, branch `living-world`. Starting HEAD:
-`b31e0fc496e2dcae1c0b5c32f5909f83074dadb9`. The implementation and this
-report are in the local GR-4 commits; use `git log --oneline b31e0fc..HEAD` for
-the final revision. Raw local runs are in ignored `target/gr4-review/`.
+`b31e0fc496e2dcae1c0b5c32f5909f83074dadb9`. Final implementation
+revision: `27d193b` (`test(research): qualify WorldState field snapshots`).
+The report was first committed as `bbdb1d1`; use
+`git log --oneline b31e0fc..HEAD` for subsequent report corrections. Raw local
+runs are in ignored `target/gr4-review/`.
 
 ## Scope and architecture
 
