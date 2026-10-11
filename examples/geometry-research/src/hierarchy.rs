@@ -419,9 +419,11 @@ impl Hierarchy {
             } => {
                 let child = self.node(child)?;
                 let mut current = pose;
-                for _ in 0..*count {
+                for iteration in 0..*count {
                     self.emit(child, current, depth + 1, out)?;
-                    current = current.then(*step)?;
+                    if iteration + 1 < *count {
+                        current = current.then(*step)?;
+                    }
                 }
             }
         }
@@ -588,5 +590,17 @@ mod tests {
         assert!((primitives[1].center().y() - 2.0).abs() < 1e-12);
         assert!((primitives[0].dimensions().x() - 0.25).abs() < 1e-12);
         assert!((primitives[1].dimensions().x() - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn unused_repeat_step_does_not_reject_last_valid_instance() {
+        let source = br#"{"format_version":1,"root":"line","definitions":[{"kind":"sphere","id":"s","radius":0.1,"color":[1,1,1]}],"nodes":[{"kind":"leaf","id":"leaf","definition":"s"},{"kind":"repeat","id":"line","child":"leaf","count":10,"step":{"at":[1000,0,0]}}]}"#;
+        let scene = Hierarchy::parse(source)
+            .unwrap()
+            .materialize(1.0)
+            .unwrap()
+            .scene;
+        assert_eq!(scene.primitives().len(), 10);
+        assert_eq!(scene.primitives()[9].center().x(), 9000.0);
     }
 }
