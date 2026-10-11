@@ -67,8 +67,10 @@ for methodology and limitations.
 The research-only `heterogeneous-auto` and `heterogeneous-combined` profile
 scenarios add one validated box to the in-memory showcase before rendering.
 They share the same 600-frame camera, material, transform, revision, temporary
-topology, and rejected-edit sequence. The `Combined` path remains opt-in;
-these profile scenarios do not modify the scene file or persistence contract.
+topology, and rejected-edit sequence. Explicit `Combined` remains available
+for comparison. `Auto` now selects Combined for compatible enabled runtime
+parameter graphs; immutable heterogeneous graphs still use Interpreter.
+These profile scenarios do not modify the scene file or persistence contract.
 
 Numerical diagnostic colors expose uncertain field tracing. Normal display
 is an approximate GPU `f32` visualization, not certified occupancy or

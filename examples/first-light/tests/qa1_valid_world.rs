@@ -266,7 +266,7 @@ fn dense_authored_world_reaches_combined_limits() {
 }
 
 #[test]
-#[ignore = "native GPU; dense dynamic Interpreter/Combined hit and material readback"]
+#[ignore = "native GPU; dense dynamic Interpreter/Combined/Auto diagnostic readback"]
 fn dense_dynamic_combined_diagnostic_parity() {
     let mut runtime = Runtime::new(
         world(512, MAX_NODES, true),
@@ -347,6 +347,15 @@ fn dense_dynamic_combined_diagnostic_parity() {
             runtime.tick().unwrap();
         }
         let reference = read(runtime.world(), GpuFieldExecution::Interpreter);
+        if tick == 0 {
+            let pending = read(runtime.world(), GpuFieldExecution::Auto);
+            assert_eq!(pending[0].path, GpuFieldPath::Interpreter);
+            assert!(renderer.compiler_stats().unwrap().pending);
+            assert_eq!(
+                renderer.compiler_stats().unwrap().fallback_reason,
+                Some("compilation pending")
+            );
+        }
         let mut compiled = None;
         for _ in 0..200 {
             let result = read(runtime.world(), GpuFieldExecution::Combined);
@@ -358,6 +367,10 @@ fn dense_dynamic_combined_diagnostic_parity() {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let compiled = compiled.expect("Combined did not become active");
+        let automatic = read(runtime.world(), GpuFieldExecution::Auto);
+        assert_eq!(automatic[0].path, GpuFieldPath::Combined);
+        assert_eq!(renderer.compiler_stats().unwrap().requests, 1);
+        assert_eq!(renderer.compiler_stats().unwrap().fallback_reason, None);
         let mut field_hits = 0;
         let mut material_hits = 0;
         for (left, right) in reference.iter().zip(&compiled) {
@@ -393,6 +406,33 @@ fn dense_dynamic_combined_diagnostic_parity() {
                 assert!(left.definition.is_some());
                 material_hits += usize::from(left.material.is_some());
             }
+        }
+        for (left, right) in compiled.iter().zip(&automatic) {
+            assert_eq!(
+                (
+                    left.hit,
+                    left.field,
+                    left.uncertain,
+                    left.exhausted,
+                    left.ambiguous,
+                    left.identity,
+                    left.definition,
+                    left.material
+                ),
+                (
+                    right.hit,
+                    right.field,
+                    right.uncertain,
+                    right.exhausted,
+                    right.ambiguous,
+                    right.identity,
+                    right.definition,
+                    right.material
+                ),
+                "Auto mismatch at tick={tick}"
+            );
+            assert_eq!(left.distance, right.distance);
+            assert_eq!(left.normal, right.normal);
         }
         assert!(field_hits > 0, "tick={tick} lacked field coverage");
         assert!(

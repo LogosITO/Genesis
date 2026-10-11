@@ -182,6 +182,9 @@ fn native_mixed_diagnostic_selects_nearest_mathematical_object() {
     let compiled_before = combined(&shared_world, right_camera);
     assert_eq!(compiled_before.identity, second.identity);
     assert!((compiled_before.distance.unwrap() - second.distance.unwrap()).abs() < 0.003);
+    let auto_before = diagnose(&shared_world, right_camera, GpuFieldExecution::Auto);
+    assert_eq!(auto_before.path, GpuFieldPath::Combined);
+    assert_eq!(auto_before.distance, compiled_before.distance);
     let uploads_before = renderer.field_cache_stats().unwrap().node_uploads;
     shared_world.grow_field_parameters(right, &[0.5]).unwrap();
     let changed = diagnose(&shared_world, right_camera, GpuFieldExecution::Interpreter);
@@ -203,7 +206,84 @@ fn native_mixed_diagnostic_selects_nearest_mathematical_object() {
             .zip(changed.normal.unwrap())
             .all(|(a, b)| (a - b).abs() < 0.04)
     );
+    let auto_after = diagnose(&shared_world, right_camera, GpuFieldExecution::Auto);
+    assert_eq!(auto_after.path, GpuFieldPath::Combined);
+    assert_eq!(auto_after.distance, compiled_after.distance);
+    let unchanged_left = diagnose(&shared_world, left_camera, GpuFieldExecution::Auto);
+    assert_eq!(unchanged_left.path, GpuFieldPath::Combined);
+    assert!((unchanged_left.distance.unwrap() - first.distance.unwrap()).abs() < 0.003);
     assert_eq!(renderer.compiler_stats().unwrap().requests, 1);
+    let added_box = shared_world
+        .spawn_field(box_source, Transform::new(v(5.0, 0.0, 0.0), 1.0).unwrap())
+        .unwrap();
+    let obsolete = diagnose(&shared_world, right_camera, GpuFieldExecution::Auto);
+    assert_eq!(obsolete.path, GpuFieldPath::Interpreter);
+    let translated = br#"{"format_version":1,"id":"translated","root":"t","nodes":[{"op":"sphere","id":"s","radius":0.3},{"op":"translate","id":"t","child":"s","offset":[0.2,0,0]}]}"#;
+    let translated_id = shared_world
+        .spawn_field(translated, Transform::new(v(6.0, 0.0, 0.0), 1.0).unwrap())
+        .unwrap();
+    assert_eq!(
+        diagnose(&shared_world, right_camera, GpuFieldExecution::Auto).path,
+        GpuFieldPath::Interpreter,
+        "obsolete two-topology program selected for three topologies"
+    );
+    let current_reference = diagnose(&shared_world, right_camera, GpuFieldExecution::Interpreter);
+    let mut current_compiled = None;
+    for _ in 0..200 {
+        let result = diagnose(&shared_world, right_camera, GpuFieldExecution::Auto);
+        if result.path == GpuFieldPath::Combined {
+            current_compiled = Some(result);
+            break;
+        }
+        assert!(renderer.compiler_stats().unwrap().last_error.is_none());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let current_compiled = current_compiled.expect("current topology did not compile");
+    assert_eq!(current_compiled.identity, current_reference.identity);
+    assert_eq!(current_compiled.definition, current_reference.definition);
+    assert_eq!(current_compiled.material, current_reference.material);
+    assert_eq!(current_compiled.distance, current_reference.distance);
+    shared_world.set_field_enabled(added_box, false).unwrap();
+    shared_world
+        .set_field_enabled(translated_id, false)
+        .unwrap();
+    let requests = renderer.compiler_stats().unwrap().requests;
+    let restored = diagnose(&shared_world, right_camera, GpuFieldExecution::Auto);
+    assert_eq!(restored.path, GpuFieldPath::Combined);
+    assert_eq!(restored.distance, auto_after.distance);
+    assert_eq!(renderer.compiler_stats().unwrap().requests, requests);
+    box_world
+        .enable_field_parameters(
+            box_id,
+            vec![world_state::ParameterRule {
+                binding: ParameterBinding {
+                    node: "b".into(),
+                    component: ParameterComponent::BoxHalfZ,
+                },
+                uptake: 1.0,
+                gain_per_unit: 0.5,
+                maximum: 1.0,
+                positive_site: true,
+                feedback: true,
+            }],
+        )
+        .unwrap();
+    let box_before = diagnose(&box_world, box_camera, GpuFieldExecution::Interpreter);
+    let _ = combined(&box_world, box_camera);
+    assert_eq!(
+        diagnose(&box_world, box_camera, GpuFieldExecution::Auto).distance,
+        box_before.distance
+    );
+    box_world.grow_field_parameters(box_id, &[0.2]).unwrap();
+    assert!((box_world.field_graph(box_id).unwrap().bounds().max.z() - 0.4).abs() < 1e-12);
+    let box_changed = diagnose(&box_world, box_camera, GpuFieldExecution::Interpreter);
+    let box_auto = diagnose(&box_world, box_camera, GpuFieldExecution::Auto);
+    assert_eq!(box_auto.path, GpuFieldPath::Combined);
+    assert_eq!(box_auto.identity, box_changed.identity);
+    assert_eq!(box_auto.definition, box_changed.definition);
+    assert_eq!(box_auto.normal, box_changed.normal);
+    assert_eq!(box_auto.distance, box_changed.distance);
+    assert!(box_auto.distance.unwrap() < box_before.distance.unwrap() - 0.09);
     eprintln!(
         "mixed_spatial_oracle={}",
         serde_json::json!({

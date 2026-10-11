@@ -32,8 +32,11 @@ rejected. Applying values derives a new CPU graph and recomputes outward
 bounds; GPU node storage is refreshed from that derived graph. A dynamic
 occurrence cannot share numeric GPU nodes with another occurrence merely
 because source bytes match. Structural and Combined shaders read current
-numbers from storage, while `Auto` uses interpreter fallback for such
-occurrences. These parameters remain visual and do not authorize contacts.
+numbers from storage. `Auto` now selects the bounded Combined compiler when
+an enabled occurrence has runtime morphology or parameters; it interprets
+until a compatible program is ready and on unsupported or failed compilation.
+Immutable occurrences retain exact-revision selection. These parameters
+remain visual and do not authorize contacts.
 The [authoring guide](../guides/living-world.md) specifies the bounded rule
 and sampling-site vocabulary.
 

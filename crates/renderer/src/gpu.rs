@@ -286,7 +286,9 @@ pub struct MixedDrawOptions<'a> {
 /// Select the native Field Graph interpreter or a bounded compiled evaluator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GpuFieldExecution {
-    /// Interpret until a validated specialized pipeline for the current definition is ready.
+    /// Use exact revision specialization for immutable fields and storage-backed
+    /// combined specialization when any enabled field has runtime parameters.
+    /// Interpret while compilation is pending or unsupported.
     Auto,
     /// Experimentally compile node topology and read validated parameters from GPU storage.
     Structural,
@@ -299,7 +301,7 @@ pub enum GpuFieldExecution {
 /// Native mixed-field execution and visual bounds controls.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GpuFieldRenderMode {
-    /// Select automatic revision specialization or the reference interpreter.
+    /// Select automatic compatible specialization or the reference interpreter.
     pub execution: GpuFieldExecution,
     /// Skip field tracing outside expanded visual bounds. This is an empirical
     /// image acceleration, not a certified floating-point exclusion. Set
@@ -338,6 +340,8 @@ pub struct GpuCompilerStats {
     pub cached_pipelines: usize,
     /// One compilation may be in flight.
     pub pending: bool,
+    /// Why the most recent draw used the interpreter, if it did.
+    pub fallback_reason: Option<&'static str>,
     /// Number of worker compilation requests.
     pub requests: u64,
     /// Number of ready-cache selections.
@@ -550,6 +554,7 @@ struct CompilerCache {
     entries: VecDeque<CompiledPipeline>,
     pending: Option<PendingCompilation>,
     active: GpuFieldPath,
+    fallback_reason: Option<&'static str>,
     requests: u64,
     cache_hits: u64,
     failures: u64,
@@ -565,6 +570,7 @@ impl Default for CompilerCache {
             entries: VecDeque::new(),
             pending: None,
             active: GpuFieldPath::Interpreter,
+            fallback_reason: None,
             requests: 0,
             cache_hits: 0,
             failures: 0,
@@ -672,6 +678,7 @@ impl GpuRenderer {
                 .filter(|entry| entry.result.is_ok())
                 .count(),
             pending: state.pending.is_some(),
+            fallback_reason: state.fallback_reason,
             requests: state.requests,
             cache_hits: state.cache_hits,
             failures: state.failures,
@@ -696,6 +703,7 @@ impl GpuRenderer {
             .lock()
             .map_err(|_| RenderError::Gpu("compiler cache lock poisoned".into()))?;
         state.active = GpuFieldPath::Interpreter;
+        state.fallback_reason = None;
         let finished =
             state
                 .pending
@@ -712,17 +720,18 @@ impl GpuRenderer {
             state.insert(pending.key, finished.unwrap_or_else(Err));
         }
         if execution == GpuFieldExecution::Interpreter {
+            state.fallback_reason = Some("interpreter requested");
             return Ok(None);
         }
-        // Exact programs inline numbers from an immutable revision; dynamic values require storage-backed compilation.
-        if execution == GpuFieldExecution::Auto
-            && world
-                .field_instances()
-                .iter()
-                .any(|item| item.morphology().is_some() || item.parameters().is_some())
-        {
-            return Ok(None);
-        }
+        // Exact programs inline numbers; current runtime values must come from GPU storage.
+        let execution = if execution == GpuFieldExecution::Auto
+            && world.field_instances().iter().any(|item| {
+                item.enabled() && (item.morphology().is_some() || item.parameters().is_some())
+            }) {
+            GpuFieldExecution::Combined
+        } else {
+            execution
+        };
         let mut selected = None;
         let mut graphs = Vec::new();
         if execution == GpuFieldExecution::Combined {
@@ -732,11 +741,13 @@ impl GpuRenderer {
                     .field_graph(instance.id())
                     .ok_or(RenderError::InvalidInput("missing field graph"))?;
                 let Some(schema) = structural_key(current) else {
+                    state.fallback_reason = Some("unsupported runtime graph parameters");
                     return Ok(None);
                 };
                 topologies.entry(schema).or_insert_with(|| current.clone());
             }
             if topologies.len() > 4 {
+                state.fallback_reason = Some("too many distinct graph topologies");
                 return Ok(None);
             }
             if !topologies.is_empty() {
@@ -758,6 +769,7 @@ impl GpuRenderer {
                     },
                     GpuFieldExecution::Structural => {
                         let Some(schema) = structural_key(current) else {
+                            state.fallback_reason = Some("unsupported runtime graph parameters");
                             return Ok(None);
                         };
                         CompilerKey::Structure {
@@ -768,6 +780,7 @@ impl GpuRenderer {
                     GpuFieldExecution::Interpreter | GpuFieldExecution::Combined => unreachable!(),
                 };
                 if selected.as_ref().is_some_and(|old| old != &key) {
+                    state.fallback_reason = Some("incompatible graph definitions");
                     return Ok(None);
                 }
                 selected = Some(key);
@@ -777,6 +790,7 @@ impl GpuRenderer {
             }
         }
         let Some(key) = selected else {
+            state.fallback_reason = Some("no enabled field graphs");
             return Ok(None);
         };
         if let Some(index) = state.entries.iter().position(|entry| entry.key == key) {
@@ -795,6 +809,8 @@ impl GpuRenderer {
                     CompilerKey::Structure { .. } => GpuFieldPath::Structural,
                     CompilerKey::Combined { .. } => GpuFieldPath::Combined,
                 };
+            } else {
+                state.fallback_reason = Some("cached compilation failure");
             }
             return Ok(pipeline);
         }
@@ -813,10 +829,27 @@ impl GpuRenderer {
                 Ok(_) => {
                     state.requests = state.requests.saturating_add(1);
                     state.pending = Some(PendingCompilation { key, receiver });
+                    state.fallback_reason = Some("compilation pending");
+                    return Ok(None);
                 }
-                Err(error) => state.insert(key, Err(error.to_string())),
+                Err(error) => {
+                    state.insert(key, Err(error.to_string()));
+                    state.fallback_reason = Some("compilation worker unavailable");
+                    return Ok(None);
+                }
             }
         }
+        state.fallback_reason = Some(
+            if state
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.key == key)
+            {
+                "compilation pending"
+            } else {
+                "another compilation pending"
+            },
+        );
         Ok(None)
     }
     /// Inspect whether presentation-only edits avoided graph node uploads.
