@@ -39,7 +39,8 @@ struct GpuOutcome {
     meta: [u32; 4],
 }
 
-/// Bounded GPU sphere-tracing policy. All values are world units except counts and safety.
+/// Bounded GPU sphere-tracing policy. Tolerance and normal delta are applied in graph-local
+/// units; an instance's uniform scale multiplies their effective world-space size.
 #[derive(Clone, Copy, Debug)]
 pub struct GraphTracePolicy {
     /// Approximate positive hit threshold (0.00001..=0.1).

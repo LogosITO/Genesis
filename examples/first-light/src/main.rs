@@ -17,6 +17,7 @@ use analytic_renderer::{
 };
 use spatial_math::{Transform, Vec3};
 use std::{
+    io::{BufWriter, Write},
     path::PathBuf,
     sync::{
         Arc,
@@ -306,7 +307,19 @@ impl Graphics {
         let config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .ok_or("surface configuration unavailable")?;
-        let config = wgpu::SurfaceConfiguration { format, ..config };
+        let mut config = wgpu::SurfaceConfiguration { format, ..config };
+        if let Ok(requested) = std::env::var("GENESIS_QA2_PRESENT") {
+            let mode = match requested.as_str() {
+                "fifo" => wgpu::PresentMode::Fifo,
+                "immediate" => wgpu::PresentMode::Immediate,
+                "mailbox" => wgpu::PresentMode::Mailbox,
+                _ => return Err("GENESIS_QA2_PRESENT must be fifo, immediate, or mailbox".into()),
+            };
+            if !capabilities.present_modes.contains(&mode) {
+                return Err("requested QA-2 present mode is unsupported by this surface".into());
+            }
+            config.present_mode = mode;
+        }
         surface.configure(&device, &config);
         let renderer = GpuRenderer::new(&device, format).await?;
         let timer = GpuTimer::new(&device);
@@ -380,6 +393,7 @@ struct App {
     status: String,
     measure: bool,
     benchmark_scenario: Option<BenchmarkScenario>,
+    qa2_profile: Option<Qa2Profile>,
     frame_samples: Vec<f64>,
     interval_samples: Vec<f64>,
     acquire_samples: Vec<f64>,
@@ -400,6 +414,16 @@ struct App {
     selected: Option<SemanticTarget>,
     cursor: Option<winit::dpi::PhysicalPosition<f64>>,
     last_camera: Option<Camera>,
+}
+struct Qa2Profile {
+    mode: &'static str,
+    output: PathBuf,
+    resolution: [u32; 2],
+    frames: usize,
+    seen: usize,
+    resize_recoveries: u32,
+    last_presented_start: Option<Instant>,
+    records: Vec<serde_json::Value>,
 }
 impl App {
     fn new(life: bool, passage: bool) -> Result<Self, Box<dyn std::error::Error>> {
@@ -484,6 +508,7 @@ impl App {
             },
             measure: std::env::var_os("GENESIS_MEASURE").is_some() || benchmark_scenario.is_some(),
             benchmark_scenario,
+            qa2_profile: None,
             frame_samples: Vec::new(),
             interval_samples: Vec::new(),
             acquire_samples: Vec::new(),
@@ -505,6 +530,61 @@ impl App {
             cursor: None,
             last_camera: None,
         })
+    }
+    fn qa2_profile(
+        runtime: Runtime,
+        mode: &'static str,
+        output: PathBuf,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        if runtime.step() != SimulationStep::new(STEP.as_secs_f64())?
+            || !runtime.pending_events().is_empty()
+        {
+            return Err(
+                "QA-2 requires the native fixed-step dense save without pending events".into(),
+            );
+        }
+        let world = runtime.world();
+        world.validate()?;
+        if world.entities().len() != 512
+            || world.organisms().len() != 4
+            || world.sources().len() != 4
+            || world.field_instances().len() != 8
+            || world.authored_instances().len() != 8
+            || world.authored_capsules()?.len() != 4096
+            || Scene::from_world(world)?.primitives().len() != 4993
+        {
+            return Err("QA-2 save is not the validated 4993-primitive dense world".into());
+        }
+        let frames = std::env::var("GENESIS_QA2_FRAMES")
+            .ok()
+            .map(|value| value.parse::<usize>())
+            .transpose()?
+            .unwrap_or(1000);
+        if !(1..=5000).contains(&frames) {
+            return Err("GENESIS_QA2_FRAMES must be 1..=5000".into());
+        }
+        let size = requested_window_size(&std::env::var("GENESIS_WINDOW_SIZE")?)
+            .ok_or("QA-2 requires a valid GENESIS_WINDOW_SIZE")?;
+        let mut app = Self::new(true, false)?;
+        app.world = world.clone();
+        app.time = runtime.time();
+        app.step = runtime.step();
+        app.source_id = Some(app.world.sources()[0].id());
+        app.body_id = app.world.body().map(|body| body.id());
+        app.mixed = true;
+        app.paused = mode != "dynamic";
+        app.measure = true;
+        app.qa2_profile = Some(Qa2Profile {
+            mode,
+            output,
+            resolution: [size.width, size.height],
+            frames,
+            seen: 0,
+            resize_recoveries: 0,
+            last_presented_start: None,
+            records: Vec::with_capacity(frames),
+        });
+        Ok(app)
     }
     fn living(runtime: Runtime) -> Result<Self, Box<dyn std::error::Error>> {
         if runtime.step() != SimulationStep::new(STEP.as_secs_f64())?
@@ -994,6 +1074,14 @@ impl App {
         if self.paused {
             return Ok(());
         }
+        if self
+            .qa2_profile
+            .as_ref()
+            .is_some_and(|profile| profile.mode == "dynamic")
+            && (self.time.ticks() + 1).is_multiple_of(30)
+        {
+            self.pending_move = true;
+        }
         if self.living
             && self
                 .living_profile_tick
@@ -1207,6 +1295,7 @@ impl App {
         let now = Instant::now();
         let elapsed = now.duration_since(self.previous);
         self.previous = now;
+        let step_samples_before = self.step_samples.len();
         if self.measure && self.frames > 0 {
             self.interval_samples.push(elapsed.as_secs_f64() * 1000.0);
         }
@@ -1232,6 +1321,9 @@ impl App {
             }
             // shortcut: bound catch-up work per frame; use a simulation worker if sustained load exceeds this budget.
             self.accumulator = self.accumulator.min(STEP * max_steps);
+        }
+        if let Some(profile) = &self.qa2_profile {
+            self.yaw = (profile.seen as f64 * 0.007).sin() * 0.25;
         }
         let snapshot_started = Instant::now();
         let scene = match self.scene() {
@@ -1485,6 +1577,27 @@ impl App {
             return;
         };
         let size = graphics.window.inner_size();
+        if let Some(profile) = &mut self.qa2_profile
+            && [size.width, size.height] != profile.resolution
+        {
+            profile.resize_recoveries += 1;
+            eprintln!(
+                "QA-2 window resolution changed (recovery {}): expected {:?}, got {}x{}",
+                profile.resize_recoveries, profile.resolution, size.width, size.height
+            );
+            if profile.resize_recoveries > 6 {
+                std::process::exit(1);
+            }
+            graphics.window.set_minimized(false);
+            graphics.window.set_maximized(false);
+            let _ = graphics
+                .window
+                .request_inner_size(winit::dpi::PhysicalSize::new(
+                    profile.resolution[0],
+                    profile.resolution[1],
+                ));
+            return;
+        }
         if size.width == 0 || size.height == 0 {
             return;
         }
@@ -1646,7 +1759,13 @@ impl App {
                     background: [0.05, 0.075, 0.115],
                     light_direction: [0.5, 0.8, -0.6],
                 },
-                if self.living_morph || self.living_rules {
+                if self.living_morph
+                    || self.living_rules
+                    || self
+                        .qa2_profile
+                        .as_ref()
+                        .is_some_and(|profile| profile.mode == "combined")
+                {
                     GpuFieldRenderMode {
                         execution: GpuFieldExecution::Combined,
                         spatial_guard: true,
@@ -1657,7 +1776,13 @@ impl App {
                         spatial_guard: true,
                     }
                 } else {
-                    GpuFieldRenderMode::default()
+                    GpuFieldRenderMode {
+                        spatial_guard: self
+                            .qa2_profile
+                            .as_ref()
+                            .is_none_or(|profile| profile.mode != "unguarded"),
+                        ..GpuFieldRenderMode::default()
+                    }
                 },
             )
         } else {
@@ -1706,6 +1831,7 @@ impl App {
         }
         let present_started = Instant::now();
         graphics.queue.present(frame);
+        let mut gpu_sample_ms = None;
         if self.measure {
             self.present_samples
                 .push(present_started.elapsed().as_secs_f64() * 1000.0);
@@ -1713,9 +1839,90 @@ impl App {
                 .push(frame_started.elapsed().as_secs_f64() * 1000.0);
             if let Some(timer) = sampled_timer {
                 match timer.read_ms(&graphics.device, &graphics.queue) {
-                    Ok(ms) => self.gpu_samples.push(ms),
+                    Ok(ms) => {
+                        self.gpu_samples.push(ms);
+                        gpu_sample_ms = Some(ms);
+                    }
                     Err(error) => eprintln!("GPU timing unavailable: {error}"),
                 }
+            }
+        }
+        if let Some(profile) = &mut self.qa2_profile {
+            let presented_interval_ms = profile
+                .last_presented_start
+                .map(|previous| frame_started.duration_since(previous).as_secs_f64() * 1000.0);
+            profile.last_presented_start = Some(frame_started);
+            let draw = graphics.renderer.last_draw_stats();
+            let upload = graphics.renderer.last_upload_stats();
+            let acceleration = graphics.renderer.acceleration_stats();
+            let compiler = graphics.renderer.compiler_stats();
+            profile.records.push(serde_json::json!({
+                    "frame": profile.seen,
+                    "warmup": profile.seen < 64,
+                    "tick": self.time.ticks(),
+                    "yaw": self.yaw,
+                    "primitives": scene.primitives().len(),
+                    "resolution": [size.width, size.height],
+                "presented_interval_ms": presented_interval_ms,
+                "update_elapsed_ms": elapsed.as_secs_f64() * 1000.0,
+                "frame_cpu_ms": frame_started.elapsed().as_secs_f64() * 1000.0,
+                "step_ms": self.step_samples[step_samples_before..].iter().sum::<f64>(),
+                "snapshot_ms": self.snapshot_samples.last(),
+                "acquire_ms": self.acquire_samples.last(),
+                "present_call_ms": self.present_samples.last(),
+                "gpu_compute_ms": gpu_sample_ms,
+                "renderer_scene_ms": draw.map(|value| value.scene_ms),
+                "analytic_binding_ms": draw.map(|value| value.analytic_binding_ms),
+                "field_binding_ms": draw.map(|value| value.field_binding_ms),
+                "pipeline_selection_ms": draw.map(|value| value.pipeline_selection_ms),
+                "encode_submit_ms": draw.map(|value| value.encode_submit_ms),
+                "upload_enqueue_ms": upload.map(|value| value.enqueue_ms),
+                "bvh_build_ms": upload.map(|value| value.bvh_build_ms),
+                "bvh_rebuilds": acceleration.map(|value| value.rebuilds),
+                "bvh_nodes": acceleration.map(|value| value.node_count),
+                "active": compiler.as_ref().map(|value| format!("{:?}", value.active)),
+                "compiler_requests": compiler.as_ref().map(|value| value.requests),
+                "compiler_pending": compiler.as_ref().map(|value| value.pending),
+                "compiler_failures": compiler.as_ref().map(|value| value.failures),
+                "compiler_source_ms": compiler.as_ref().and_then(|value| value.source_ms),
+                "compiler_pipeline_ms": compiler.as_ref().and_then(|value| value.pipeline_ms),
+                    "source_stored": self.world.sources()[0].reservoir().map(|value| value.stored()),
+                    "source_x": self.world.sources()[0].position().x(),
+            }));
+            profile.seen += 1;
+            if profile.seen == profile.frames + 64 {
+                let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+                    let file = std::fs::File::create(&profile.output)?;
+                    let mut writer = BufWriter::new(file);
+                    serde_json::to_writer(
+                        &mut writer,
+                        &serde_json::json!({
+                            "kind": "qa2-native-profile",
+                            "mode": profile.mode,
+                            "resolution": [size.width, size.height],
+                            "warmup": 64,
+                            "samples": profile.frames,
+                            "resize_recoveries": profile.resize_recoveries,
+                            "adapter": graphics.adapter.get_info().name,
+                            "backend": format!("{:?}", graphics.adapter.get_info().backend),
+                            "present_mode": format!("{:?}", graphics.config.present_mode),
+                        }),
+                    )?;
+                    writeln!(writer)?;
+                    for record in &profile.records {
+                        serde_json::to_writer(&mut writer, record)?;
+                        writeln!(writer)?;
+                    }
+                    writer.flush()?;
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    eprintln!("QA-2 profile write failed: {error}");
+                    std::process::exit(1);
+                }
+                eprintln!("QA-2 profile written: {}", profile.output.display());
+                event_loop.exit();
+                return;
             }
         }
         self.last_camera = Some(camera);
@@ -1857,36 +2064,48 @@ impl ApplicationHandler for App {
         if self.graphics.is_some() {
             return;
         }
-        let window = match event_loop.create_window(
-            Window::default_attributes()
-                .with_title(if self.living {
-                    "Genesis Living World — Experimental"
-                } else if self.passage {
-                    "The Passage — Genesis Experimental Demo"
-                } else if self.authored.is_some() {
-                    "Genesis Authoring Preview — Experimental"
-                } else if self.life {
-                    "First Life — Experimental / Research Stage"
-                } else {
-                    "First Light — Experimental / Research Stage"
-                })
-                .with_inner_size(match std::env::var("GENESIS_WINDOW_SIZE") {
-                    Ok(value) => match requested_window_size(&value) {
-                        Some(size) => size,
-                        None => {
-                            eprintln!("invalid GENESIS_WINDOW_SIZE; expected WIDTHxHEIGHT");
-                            event_loop.exit();
-                            return;
-                        }
-                    },
-                    Err(std::env::VarError::NotPresent) => winit::dpi::PhysicalSize::new(1280, 720),
-                    Err(error) => {
-                        eprintln!("invalid GENESIS_WINDOW_SIZE: {error}");
+        let size = if let Some(profile) = &self.qa2_profile {
+            winit::dpi::PhysicalSize::new(profile.resolution[0], profile.resolution[1])
+        } else {
+            match std::env::var("GENESIS_WINDOW_SIZE") {
+                Ok(value) => match requested_window_size(&value) {
+                    Some(size) => size,
+                    None => {
+                        eprintln!("invalid GENESIS_WINDOW_SIZE; expected WIDTHxHEIGHT");
                         event_loop.exit();
                         return;
                     }
-                }),
-        ) {
+                },
+                Err(std::env::VarError::NotPresent) => winit::dpi::PhysicalSize::new(1280, 720),
+                Err(error) => {
+                    eprintln!("invalid GENESIS_WINDOW_SIZE: {error}");
+                    event_loop.exit();
+                    return;
+                }
+            }
+        };
+        let attributes = Window::default_attributes()
+            .with_resizable(self.qa2_profile.is_none())
+            .with_title(if self.living {
+                "Genesis Living World — Experimental"
+            } else if self.passage {
+                "The Passage — Genesis Experimental Demo"
+            } else if self.authored.is_some() {
+                "Genesis Authoring Preview — Experimental"
+            } else if self.life {
+                "First Life — Experimental / Research Stage"
+            } else {
+                "First Light — Experimental / Research Stage"
+            })
+            .with_inner_size(size);
+        let attributes = if self.qa2_profile.is_some() {
+            attributes
+                .with_min_inner_size(size)
+                .with_max_inner_size(size)
+        } else {
+            attributes
+        };
+        let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(error) => {
                 eprintln!("window creation failed: {error}");
@@ -1916,7 +2135,7 @@ impl ApplicationHandler for App {
         if graphics.window.id() != id {
             return;
         }
-        if self.benchmark_scenario.is_some() {
+        if self.benchmark_scenario.is_some() || self.qa2_profile.is_some() {
             if let WindowEvent::KeyboardInput { event, .. } = &event {
                 if event.state == ElementState::Pressed
                     && event.physical_key == PhysicalKey::Code(KeyCode::Escape)
@@ -2218,6 +2437,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         [flag, path] if flag == "--living-scene" => App::living_scene(PathBuf::from(path))?,
         [flag, path] if flag == "--living-load" => App::living(Runtime::load_file(path)?)?,
+        [flag, path, mode, output] if flag == "--qa2-profile" => {
+            let mode = match mode.as_str() {
+                "static" => "static",
+                "dynamic" => "dynamic",
+                "combined" => "combined",
+                "unguarded" => "unguarded",
+                _ => return Err("QA-2 mode must be static, dynamic, combined, or unguarded".into()),
+            };
+            App::qa2_profile(Runtime::load_file(path)?, mode, PathBuf::from(output))?
+        }
         [flag] if flag == "--mixed" => App::mixed()?,
         [flag, path] if flag == "--authoring" => App::authoring(PathBuf::from(path))?,
         [flag, path] if flag == "--authored-world" => App::authored_world(PathBuf::from(path))?,

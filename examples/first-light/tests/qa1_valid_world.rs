@@ -237,6 +237,15 @@ fn dense_authored_world_reaches_combined_limits() {
     let scene = Scene::from_world(&world).unwrap();
     let runtime = Runtime::new(world.clone(), SimulationStep::new(0.1).unwrap());
     let save = runtime.save_bytes().unwrap();
+    if let Some(path) = std::env::var_os("GENESIS_QA2_FIXTURE_OUT") {
+        std::fs::write(
+            path,
+            Runtime::new(world.clone(), SimulationStep::new(0.016_666_667).unwrap())
+                .save_bytes()
+                .unwrap(),
+        )
+        .unwrap();
+    }
     let loaded = Runtime::load_bytes(&save).unwrap();
     assert_eq!(loaded, runtime);
     let validate = measure(|| world.validate().unwrap(), 11);

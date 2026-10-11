@@ -188,6 +188,13 @@ The graph intentionally excludes difference and intersection. Existing `Field::d
 
 CPU and GPU queries use explicit near/far distances, positive hit tolerance, safety fraction, and iteration cap. CPU `TraceOptions` accepts tolerance `[0.00001,0.1]`, safety `(0,1]`, and 1–512 iterations. GPU `GraphTracePolicy` has the same numeric ranges in `f32`. A ray direction is normalized. From an exterior point, a positive sample within tolerance is an **approximate hit**. The ideal step `sample/L × safety` passes far for an ideal-model miss. A negative sample, nonprogress, invalid arithmetic, or undefined GPU normal yields **uncertain**, with a typed diagnostic reason. Reaching the sample budget yields **exhausted**, never miss. Interior-start exits and exact tangencies are not solved in this tracer; the analytic primitive renderer remains available separately.
 
+For transformed GPU instances, near/far distances are divided by the positive uniform
+instance scale, while the current shader applies `GraphTracePolicy.tolerance` and its
+finite-difference normal delta unchanged in graph-local units. Their effective
+world-space size therefore grows with instance scale. The policy is not a
+scale-independent world-unit tolerance; this is a documented numerical limit,
+not a certified bound on GPU rounding.
+
 CPU uses `f64`; GPU interprets the validated node buffer in `f32` with a bounded 16-frame iterative stack and 256-operation guard per sample. No shader recursion, generated WGSL, mesh, voxel, or primitive-list lowering is used. The GPU normal is a finite difference at the approximate hit, not an analytic gradient. Red pixels signal uncertainty; yellow pixels signal budget exhaustion. Both remain visible diagnostics. Conversion to `f32`, cancellation at small relative scales, branch ties, and grazing rays can disagree with CPU. No formally certified floating-point hit/miss guarantee or cross-adapter bitwise identity exists.
 
 The GPU preview accepts 1–4096 pixels per image dimension with at most 3,686,400 pixels total (the 2560×1440 budget), 65,536 ray queries or 4,096 diagnostic point samples per call, and validates query storage against adapter limits before allocation. An image has `width × height × 4` output bytes plus row-aligned readback storage. Each frame currently uploads the small node buffer and allocates output/readback buffers; there is no reuse cache. At the 32-node ceiling the node payload is 1024 bytes, excluding GPU allocation overhead. Camera motion re-evaluates the graph; no camera-dependent field cache is retained.
