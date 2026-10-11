@@ -230,7 +230,7 @@ impl App {
                     let prepared = scene
                         .camera(scene.yaw, scene.elevation, scene.distance)
                         .and_then(|camera| {
-                            Ok(graphics.renderer.draw_mixed(
+                            Ok(graphics.renderer.draw_mixed_with_execution(
                                 &graphics.device,
                                 &graphics.queue,
                                 &scene.world,
@@ -250,6 +250,10 @@ impl App {
                                     simulation_seconds: 0.0,
                                     background: scene.background,
                                     light_direction: scene.light_direction,
+                                },
+                                GpuFieldRenderMode {
+                                    execution: self.gpu_execution(),
+                                    spatial_guard: true,
                                 },
                             )?)
                         });
@@ -275,6 +279,11 @@ impl App {
                 eprintln!("World Lab: reload rejected; previous scene retained: {error}");
             }
         }
+    }
+
+    fn gpu_execution(&self) -> GpuFieldExecution {
+        self.profile_execution
+            .unwrap_or(GpuFieldExecution::Authoring)
     }
 
     fn profile_tick(&mut self) -> Result<(), Box<dyn Error>> {
@@ -373,6 +382,7 @@ impl App {
             return;
         }
         let profile_update_ms = redraw_started.elapsed().as_secs_f64() * 1000.0;
+        let execution = self.gpu_execution();
         let Some(graphics) = self.graphics.as_mut() else {
             return;
         };
@@ -440,9 +450,7 @@ impl App {
                 light_direction: self.scene.light_direction,
             },
             GpuFieldRenderMode {
-                execution: self
-                    .profile_execution
-                    .unwrap_or(GpuFieldExecution::Authoring),
+                execution,
                 spatial_guard: true,
             },
         );
@@ -883,7 +891,17 @@ mod tests {
         std::fs::copy(original.join("bridge.json"), &graph).unwrap();
         let mut app = App::new(path.clone()).unwrap();
         let original_source = std::fs::read(&graph).unwrap();
+        assert_eq!(app.gpu_execution(), GpuFieldExecution::Authoring);
         let original_revision = app.scene.world.field_definitions()[0].revision();
+        let reload = |app: &mut App, edit: &str| {
+            let started = Instant::now();
+            app.reload();
+            println!(
+                "AC4_EXTERNAL_RELOAD edit={edit} elapsed_ms={:.4} status={}",
+                started.elapsed().as_secs_f64() * 1000.0,
+                app.status
+            );
+        };
         let instance = wgpu::Instance::default();
         let adapter =
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
@@ -946,7 +964,7 @@ mod tests {
             .unwrap()
             .replace("\"radius\": 0.8", "\"radius\": 1.1");
         std::fs::write(&graph, changed).unwrap();
-        app.reload();
+        reload(&mut app, "radius");
         assert_eq!(app.status, "RELOAD OK");
         assert_ne!(
             original_revision,
@@ -969,7 +987,7 @@ mod tests {
         numerical["nodes"][0]["radius"] = serde_json::json!(0.6);
         numerical["nodes"][3]["width"] = serde_json::json!(0.3);
         std::fs::write(&graph, serde_json::to_vec(&numerical).unwrap()).unwrap();
-        app.reload();
+        reload(&mut app, "radius_width");
         assert_eq!(app.status, "RELOAD OK");
         draw(&app.scene, &second);
         assert_eq!(
@@ -979,7 +997,7 @@ mod tests {
         assert_eq!(renderer.compiler_stats().unwrap().requests, requests);
 
         std::fs::write(&graph, br#"{"format_version":1,"id":"box","root":"b","nodes":[{"op":"box","id":"b","half_extent":[0.4,0.5,0.6]}]}"#).unwrap();
-        app.reload();
+        reload(&mut app, "topology");
         assert_eq!(app.status, "RELOAD OK");
         draw(&app.scene, &second);
         assert_eq!(
@@ -1000,7 +1018,7 @@ mod tests {
         assert_eq!(renderer.compiler_stats().unwrap().requests, requests + 1);
         let box_revision = app.scene.world.field_definitions()[0].revision();
         std::fs::write(&graph, b"invalid graph").unwrap();
-        app.reload();
+        reload(&mut app, "invalid_json");
         assert!(app.status.starts_with("RELOAD ERROR"));
         assert_eq!(
             app.scene.world.field_definitions()[0].revision(),
@@ -1012,7 +1030,7 @@ mod tests {
             GpuFieldPath::Structural
         );
         std::fs::write(&graph, original_source).unwrap();
-        app.reload();
+        reload(&mut app, "restore");
         assert_eq!(app.status, "RELOAD OK");
         assert_eq!(
             app.scene.world.field_definitions()[0].revision(),

@@ -143,6 +143,16 @@ fn compile_mixed_pipeline(
     let source = mixed_shader_source(&field);
     let source_bytes = source.len();
     let source_ms = started.elapsed().as_secs_f64() * 1000.0;
+    compile_mixed_source(device, layout, source, source_ms, source_bytes)
+}
+
+fn compile_mixed_source(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    source: String,
+    source_ms: f64,
+    source_bytes: usize,
+) -> Result<CompiledArtifact, String> {
     let started = Instant::now();
     let oom_scope = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
     let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -2312,6 +2322,289 @@ impl GpuRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spatial_math::{Transform, Vec3};
+    use world_state::DeterministicSeed;
+
+    fn compiler_world(radius: f64) -> WorldState {
+        let source = format!(
+            r#"{{"format_version":1,"id":"ac4","root":"s","nodes":[{{"op":"sphere","id":"s","radius":{radius}}}]}}"#
+        );
+        let mut world = WorldState::new(DeterministicSeed(4));
+        world
+            .spawn_field(source.as_bytes(), Transform::identity())
+            .unwrap();
+        world
+    }
+
+    fn exact_key(world: &WorldState) -> CompilerKey {
+        CompilerKey::Exact {
+            revision: world.field_instances()[0].revision(),
+            semantics: SEMANTICS_VERSION,
+        }
+    }
+
+    fn completed_program(renderer: &GpuRenderer, world: &WorldState) -> CompiledArtifact {
+        let graph = world.field_graph(world.field_instances()[0].id()).unwrap();
+        compile_mixed_pipeline(
+            &renderer.device,
+            &renderer.mixed_pipeline_layout,
+            std::slice::from_ref(graph),
+            false,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    #[ignore = "requires native GPU; controlled successful worker completions"]
+    fn obsolete_successful_completions_follow_current_world_key() {
+        let adapter = pollster::block_on(
+            wgpu::Instance::default().request_adapter(&wgpu::RequestAdapterOptions::default()),
+        )
+        .unwrap();
+        let (device, _) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        let renderer =
+            pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+        let worlds = [
+            compiler_world(0.5),
+            compiler_world(0.6),
+            compiler_world(0.7),
+        ];
+        let keys = worlds.each_ref().map(exact_key);
+        for index in 0..2 {
+            let (sender, receiver) = mpsc::sync_channel(1);
+            {
+                let mut state = renderer.compiler.lock().unwrap();
+                state.pending = Some(PendingCompilation {
+                    key: keys[index].clone(),
+                    receiver,
+                });
+                // Prevent the selection call from starting an unrelated OS-scheduled worker.
+                state.insert(keys[index + 1].clone(), Err("test barrier".into()));
+            }
+            sender
+                .send(Ok(completed_program(&renderer, &worlds[index])))
+                .unwrap();
+            assert!(
+                renderer
+                    .compiled_pipeline(&device, &worlds[index + 1], GpuFieldExecution::Auto)
+                    .unwrap()
+                    .is_none()
+            );
+            let mut state = renderer.compiler.lock().unwrap();
+            assert_eq!(state.active, GpuFieldPath::Interpreter);
+            assert_eq!(
+                state
+                    .entries
+                    .iter()
+                    .find(|entry| entry.key == keys[index])
+                    .unwrap()
+                    .key,
+                keys[index]
+            );
+            state.entries.retain(|entry| entry.key != keys[index + 1]);
+        }
+        let (sender, receiver) = mpsc::sync_channel(1);
+        renderer.compiler.lock().unwrap().pending = Some(PendingCompilation {
+            key: keys[2].clone(),
+            receiver,
+        });
+        sender
+            .send(Ok(completed_program(&renderer, &worlds[2])))
+            .unwrap();
+        assert!(
+            renderer
+                .compiled_pipeline(&device, &worlds[2], GpuFieldExecution::Auto)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            renderer.compiler_stats().unwrap().active,
+            GpuFieldPath::Specialized
+        );
+        let requests = renderer.compiler_stats().unwrap().requests;
+        assert!(
+            renderer
+                .compiled_pipeline(&device, &worlds[0], GpuFieldExecution::Auto)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(renderer.compiler_stats().unwrap().requests, requests);
+        assert_eq!(renderer.compiler_stats().unwrap().cached_pipelines, 3);
+        for index in 0..300 {
+            assert!(
+                renderer
+                    .compiled_pipeline(
+                        &device,
+                        &worlds[index % worlds.len()],
+                        GpuFieldExecution::Auto
+                    )
+                    .unwrap()
+                    .is_some()
+            );
+            assert_eq!(renderer.compiler_stats().unwrap().cached_pipelines, 3);
+        }
+        assert_eq!(renderer.compiler_stats().unwrap().requests, requests);
+    }
+
+    #[test]
+    #[ignore = "requires native GPU; real wgpu validation error scope"]
+    fn real_validation_error_falls_back_without_poisoning_next_world() {
+        let adapter = pollster::block_on(
+            wgpu::Instance::default().request_adapter(&wgpu::RequestAdapterOptions::default()),
+        )
+        .unwrap();
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        let renderer =
+            pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+        let failed_world = compiler_world(0.5);
+        let good_world = compiler_world(0.7);
+        let camera = Camera::look_at(
+            Vec3::new(0.0, 0.0, -4.0).unwrap(),
+            Vec3::ZERO,
+            Vec3::new(0.0, 1.0, 0.0).unwrap(),
+            0.9,
+        )
+        .unwrap();
+        let draw = |world: &WorldState| {
+            renderer
+                .diagnose_mixed_camera(
+                    &device,
+                    &queue,
+                    world,
+                    camera,
+                    MixedDrawOptions {
+                        draw: DrawOptions {
+                            size: [1, 1],
+                            normal_debug: false,
+                            surface: None,
+                            timer: None,
+                        },
+                        policy: GraphTracePolicy::default(),
+                        show_analytic: false,
+                        show_fields: true,
+                        diagnostic: true,
+                        materials: None,
+                        simulation_seconds: 0.0,
+                        background: [0.0; 3],
+                        light_direction: [0.0, 1.0, 0.0],
+                    },
+                    GpuFieldRenderMode {
+                        execution: GpuFieldExecution::Auto,
+                        spatial_guard: true,
+                    },
+                )
+                .unwrap()[0]
+        };
+        let (sender, receiver) = mpsc::sync_channel(1);
+        renderer.compiler.lock().unwrap().pending = Some(PendingCompilation {
+            key: exact_key(&failed_world),
+            receiver,
+        });
+        let worker_device = device.clone();
+        let worker_layout = renderer.mixed_pipeline_layout.clone();
+        std::thread::spawn(move || {
+            sender
+                .send(compile_mixed_source(
+                    &worker_device,
+                    &worker_layout,
+                    "this is invalid WGSL".into(),
+                    0.0,
+                    20,
+                ))
+                .unwrap();
+        })
+        .join()
+        .unwrap();
+        assert!(
+            renderer
+                .compiled_pipeline(&device, &failed_world, GpuFieldExecution::Auto)
+                .unwrap()
+                .is_none()
+        );
+        let stats = renderer.compiler_stats().unwrap();
+        assert_eq!(stats.active, GpuFieldPath::Interpreter);
+        assert!(
+            stats
+                .last_error
+                .as_ref()
+                .is_some_and(|error| !error.is_empty())
+        );
+        assert_eq!(stats.failures, 1);
+        let failed_hit = draw(&failed_world);
+        assert!(failed_hit.hit && !failed_hit.uncertain && !failed_hit.exhausted);
+        assert_eq!(failed_hit.path, GpuFieldPath::Interpreter);
+        assert_eq!(renderer.compiler_stats().unwrap().requests, 0);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        renderer.compiler.lock().unwrap().pending = Some(PendingCompilation {
+            key: exact_key(&good_world),
+            receiver,
+        });
+        sender
+            .send(Ok(completed_program(&renderer, &good_world)))
+            .unwrap();
+        assert!(
+            renderer
+                .compiled_pipeline(&device, &good_world, GpuFieldExecution::Auto)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            renderer.compiler_stats().unwrap().active,
+            GpuFieldPath::Specialized
+        );
+        assert_eq!(renderer.compiler_stats().unwrap().failures, 1);
+        assert_eq!(renderer.compiler_stats().unwrap().requests, 0);
+        let recovered_hit = draw(&good_world);
+        assert!(recovered_hit.hit && !recovered_hit.uncertain && !recovered_hit.exhausted);
+        assert_eq!(recovered_hit.path, GpuFieldPath::Specialized);
+        assert!((recovered_hit.distance.unwrap() - 3.3).abs() < 0.003);
+    }
+
+    #[test]
+    #[ignore = "requires native GPU; renderer and device-scoped compiler ownership"]
+    fn renderer_recreation_does_not_inherit_old_completion() {
+        let adapter = pollster::block_on(
+            wgpu::Instance::default().request_adapter(&wgpu::RequestAdapterOptions::default()),
+        )
+        .unwrap();
+        let (old_device, _) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        let old = pollster::block_on(GpuRenderer::new(
+            &old_device,
+            wgpu::TextureFormat::Rgba8Unorm,
+        ))
+        .unwrap();
+        let world = compiler_world(0.5);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        old.compiler.lock().unwrap().pending = Some(PendingCompilation {
+            key: exact_key(&world),
+            receiver,
+        });
+        let obsolete = completed_program(&old, &world);
+        drop(old);
+        assert!(sender.send(Ok(obsolete)).is_err());
+
+        let (new_device, _) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        let new = pollster::block_on(GpuRenderer::new(
+            &new_device,
+            wgpu::TextureFormat::Rgba8Unorm,
+        ))
+        .unwrap();
+        assert_eq!(new.compiler_stats().unwrap().cached_pipelines, 0);
+        assert!(
+            new.compiled_pipeline(&old_device, &world, GpuFieldExecution::Auto)
+                .is_err()
+        );
+        assert!(
+            new.compiled_pipeline(&new_device, &world, GpuFieldExecution::Auto)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(new.compiler_stats().unwrap().requests, 1);
+    }
     #[test]
     fn gpu_layout_and_shader_validation() {
         assert_eq!(std::mem::size_of::<GpuCamera>(), 112);
