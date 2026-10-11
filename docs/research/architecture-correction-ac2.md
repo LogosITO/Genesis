@@ -192,7 +192,10 @@ finished program may be cached but is never selected for a different current
 key. A failed key remains a cached failure until eviction, preventing
 per-frame retries for that key; alternating more than four failed keys could
 still cause recompilation. Shader validation failure injection and actual
-device-loss recovery were not exercised in AC-2. The new fallback reason
+device-loss recovery were not exercised in AC-2. Nor was a several-thousand-tick
+multi-definition GPU checkpoint run: the native sequences reached tick 1,064
+and existing longer CPU saturation tests ran in the opt-in suite. The new
+fallback reason
 distinguishes pending, unsupported graph, incompatible definitions, no fields,
 cached compilation failure and unavailable worker. It is a last-draw
 diagnostic, not an authoritative world result.

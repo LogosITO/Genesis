@@ -327,7 +327,7 @@ pub enum GpuFieldPath {
     Specialized,
     /// A structural shader reads current numerical parameters from the field-node buffer.
     Structural,
-    /// One shader dispatches among several validated graph topologies.
+    /// Storage-backed shader keyed by one or more validated graph topologies.
     Combined,
 }
 
