@@ -3623,7 +3623,14 @@ mod app_tests {
         let size = [640, 480];
         let mut captures = Vec::new();
         let mut rebuilds = Vec::new();
-        for (name, source) in [("branch-a", BRANCH_A), ("branch-b", BRANCH_B)] {
+        for (name, source) in [
+            ("branch-a", BRANCH_A),
+            ("branch-b", BRANCH_B),
+            (
+                "gr1-branching",
+                &include_bytes!("../../authoring/gr1-branching.json")[..],
+            ),
+        ] {
             let preview = AuthoredPreview::from_structure(
                 PathBuf::from(name),
                 world_authoring::compile_json(source).unwrap(),
@@ -3676,6 +3683,10 @@ mod app_tests {
         assert_ne!(
             captures[0], captures[1],
             "different rules rendered identically"
+        );
+        assert_ne!(
+            captures[0], captures[2],
+            "GR-1 branching rendered identically"
         );
         assert_eq!(rebuilds[1], rebuilds[0] + 1);
     }

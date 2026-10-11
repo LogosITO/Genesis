@@ -1,0 +1,21 @@
+{
+  "format_version": 1,
+  "id": "gr1-branching",
+  "revision": 1,
+  "axiom": "X",
+  "rules": [
+    { "symbol": "X", "replacement": "F[+X]F[-X][&X]" }
+  ],
+  "iterations": 4,
+  "step_length": 0.35,
+  "yaw_degrees": 32.0,
+  "pitch_degrees": 27.0,
+  "branch_radius": 0.035,
+  "budgets": {
+    "max_symbols": 8192,
+    "max_stack_depth": 16,
+    "max_segments": 256,
+    "max_work": 20000
+  },
+  "instance": { "origin": [0.0, 0.0, 0.0] }
+}

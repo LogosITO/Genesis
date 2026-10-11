@@ -1,0 +1,14 @@
+{
+  "format_version": 1,
+  "id": "gr1_arch",
+  "root": "arch",
+  "nodes": [
+    { "op": "box", "id": "column", "half_extent": [0.12, 0.8, 0.12] },
+    { "op": "translate", "id": "left", "child": "column", "offset": [-0.7, 0.0, 0.0] },
+    { "op": "translate", "id": "right", "child": "column", "offset": [0.7, 0.0, 0.0] },
+    { "op": "box", "id": "lintel", "half_extent": [0.82, 0.12, 0.16] },
+    { "op": "translate", "id": "top", "child": "lintel", "offset": [0.0, 0.8, 0.0] },
+    { "op": "union", "id": "pillars", "left": "left", "right": "right" },
+    { "op": "union", "id": "arch", "left": "pillars", "right": "top" }
+  ]
+}

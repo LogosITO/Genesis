@@ -1,0 +1,23 @@
+{
+  "format_version": 1,
+  "id": "gr1_organic_loop",
+  "root": "loop",
+  "nodes": [
+    { "op": "sphere", "id": "ball", "radius": 0.8 },
+    { "op": "translate", "id": "p0", "child": "ball", "offset": [1.4, 0.0, 0.0] },
+    { "op": "translate", "id": "p1", "child": "ball", "offset": [1.0, 1.0, 0.0] },
+    { "op": "translate", "id": "p2", "child": "ball", "offset": [0.0, 1.4, 0.0] },
+    { "op": "translate", "id": "p3", "child": "ball", "offset": [-1.0, 1.0, 0.0] },
+    { "op": "translate", "id": "p4", "child": "ball", "offset": [-1.4, 0.0, 0.0] },
+    { "op": "translate", "id": "p5", "child": "ball", "offset": [-1.0, -1.0, 0.0] },
+    { "op": "translate", "id": "p6", "child": "ball", "offset": [0.0, -1.4, 0.0] },
+    { "op": "translate", "id": "p7", "child": "ball", "offset": [1.0, -1.0, 0.0] },
+    { "op": "smooth_union", "id": "pair01", "left": "p0", "right": "p1", "width": 0.45 },
+    { "op": "smooth_union", "id": "pair23", "left": "p2", "right": "p3", "width": 0.45 },
+    { "op": "smooth_union", "id": "pair45", "left": "p4", "right": "p5", "width": 0.45 },
+    { "op": "smooth_union", "id": "pair67", "left": "p6", "right": "p7", "width": 0.45 },
+    { "op": "union", "id": "half0", "left": "pair01", "right": "pair23" },
+    { "op": "union", "id": "half1", "left": "pair45", "right": "pair67" },
+    { "op": "union", "id": "loop", "left": "half0", "right": "half1" }
+  ]
+}

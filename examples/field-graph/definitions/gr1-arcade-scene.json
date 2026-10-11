@@ -1,0 +1,25 @@
+{
+  "format_version": 1,
+  "name": "GR1 Repeated Mathematical Arcade",
+  "definitions": [
+    { "name": "arch", "path": "gr1-arch.json" }
+  ],
+  "materials": [
+    { "name": "stone", "base": [0.08, 0.50, 0.68], "alternate": [0.27, 0.82, 0.94], "emission": [0.0, 0.0, 0.0], "pattern": { "kind": "gradient", "axis": [0.0, 1.0, 0.0], "frequency": 0.6, "phase": 0.2, "speed": 0.0 } }
+  ],
+  "spheres": [],
+  "fields": [
+    { "definition": "arch", "translation": [-3.0, 0.0, -1.5], "scale": 1.0, "material": "stone" },
+    { "definition": "arch", "translation": [-1.0, 0.0, -1.5], "scale": 1.0, "material": "stone" },
+    { "definition": "arch", "translation": [1.0, 0.0, -1.5], "scale": 1.0, "material": "stone" },
+    { "definition": "arch", "translation": [3.0, 0.0, -1.5], "scale": 1.0, "material": "stone" },
+    { "definition": "arch", "translation": [-3.0, 0.0, 1.5], "scale": 1.0, "material": "stone" },
+    { "definition": "arch", "translation": [-1.0, 0.0, 1.5], "scale": 1.0, "material": "stone" },
+    { "definition": "arch", "translation": [1.0, 0.0, 1.5], "scale": 1.0, "material": "stone" },
+    { "definition": "arch", "translation": [3.0, 0.0, 1.5], "scale": 1.0, "material": "stone" }
+  ],
+  "camera": { "target": [0.0, 0.0, 0.0], "distance": 10.0, "yaw": 0.15, "elevation": 0.30, "fov_radians": 0.9 },
+  "render": { "show_analytic": false, "show_fields": true, "diagnostic": false, "normals": false },
+  "background": [0.02, 0.03, 0.06],
+  "light_direction": [0.5, 0.8, -0.6]
+}

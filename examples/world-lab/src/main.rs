@@ -788,6 +788,173 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires native GPU; GR-1 repeated mathematical definition capture"]
+    fn gr1_arcade_renders_and_updates_shared_definition() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../field-graph/definitions/gr1-arcade-scene.json");
+        let mut scene = LabScene::load(&path).unwrap();
+        assert_eq!(scene.world.field_definitions().len(), 1);
+        assert_eq!(scene.world.field_instances().len(), 8);
+        let adapter = pollster::block_on(
+            wgpu::Instance::default().request_adapter(&wgpu::RequestAdapterOptions::default()),
+        )
+        .unwrap();
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+            ..Default::default()
+        }))
+        .unwrap();
+        let renderer =
+            pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+        let size = [320, 180];
+        let draw = |scene: &LabScene| {
+            let camera = scene
+                .camera(scene.yaw, scene.elevation, scene.distance)
+                .unwrap();
+            renderer
+                .draw_mixed_with_execution(
+                    &device,
+                    &queue,
+                    &scene.world,
+                    camera,
+                    MixedDrawOptions {
+                        draw: DrawOptions {
+                            size,
+                            normal_debug: false,
+                            surface: None,
+                            timer: None,
+                        },
+                        policy: GraphTracePolicy::default(),
+                        show_analytic: false,
+                        show_fields: true,
+                        diagnostic: false,
+                        materials: Some(&scene.materials),
+                        simulation_seconds: 0.0,
+                        background: scene.background,
+                        light_direction: scene.light_direction,
+                    },
+                    GpuFieldRenderMode {
+                        execution: GpuFieldExecution::Authoring,
+                        spatial_guard: true,
+                    },
+                )
+                .unwrap()
+        };
+        let output = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/gr1-review");
+        std::fs::create_dir_all(&output).unwrap();
+        let image = draw(&scene);
+        capture_bmp(
+            &device,
+            &queue,
+            &image,
+            size,
+            &output.join("arcade-interpreter.bmp"),
+        )
+        .unwrap();
+        for _ in 0..200 {
+            if renderer.compiler_stats().unwrap().active == GpuFieldPath::Structural {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            draw(&scene);
+        }
+        assert_eq!(
+            renderer.compiler_stats().unwrap().active,
+            GpuFieldPath::Structural
+        );
+        let requests = renderer.compiler_stats().unwrap().requests;
+        let image = draw(&scene);
+        let compiled = output.join("arcade-compiled.bmp");
+        capture_bmp(&device, &queue, &image, size, &compiled).unwrap();
+        let id = scene.world.field_instances()[0].id();
+        scene
+            .world
+            .set_field_transform(
+                id,
+                spatial_math::Transform::new(
+                    spatial_math::Vec3::new(-3.0, 0.0, -1.5).unwrap(),
+                    1.25,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let image = draw(&scene);
+        let updated = output.join("arcade-updated.bmp");
+        capture_bmp(&device, &queue, &image, size, &updated).unwrap();
+        assert_eq!(renderer.compiler_stats().unwrap().requests, requests);
+        assert_ne!(
+            std::fs::read(compiled).unwrap(),
+            std::fs::read(updated).unwrap()
+        );
+        println!(
+            "GR1_ARCADE adapter={:?} instances=8 unique_definitions=1 requests={requests} active={:?}",
+            adapter.get_info(),
+            renderer.compiler_stats().unwrap().active
+        );
+        if let Some(timer) = GpuTimer::new(&device) {
+            for size in [[320, 180], [1280, 720]] {
+                for execution in [GpuFieldExecution::Authoring, GpuFieldExecution::Structural] {
+                    let mut gpu_ms = Vec::new();
+                    let mut submit_ms = Vec::new();
+                    for sample in 0..14 {
+                        let started = Instant::now();
+                        let _image = renderer
+                            .draw_mixed_with_execution(
+                                &device,
+                                &queue,
+                                &scene.world,
+                                scene
+                                    .camera(scene.yaw, scene.elevation, scene.distance)
+                                    .unwrap(),
+                                MixedDrawOptions {
+                                    draw: DrawOptions {
+                                        size,
+                                        normal_debug: false,
+                                        surface: None,
+                                        timer: Some(&timer),
+                                    },
+                                    policy: GraphTracePolicy::default(),
+                                    show_analytic: false,
+                                    show_fields: true,
+                                    diagnostic: false,
+                                    materials: Some(&scene.materials),
+                                    simulation_seconds: 0.0,
+                                    background: scene.background,
+                                    light_direction: scene.light_direction,
+                                },
+                                GpuFieldRenderMode {
+                                    execution,
+                                    spatial_guard: true,
+                                },
+                            )
+                            .unwrap();
+                        let submit = started.elapsed().as_secs_f64() * 1000.0;
+                        let gpu = timer.read_ms(&device, &queue).unwrap();
+                        if sample >= 3 {
+                            submit_ms.push(submit);
+                            gpu_ms.push(gpu);
+                        }
+                    }
+                    gpu_ms.sort_by(f64::total_cmp);
+                    submit_ms.sort_by(f64::total_cmp);
+                    println!(
+                        "GR1_ARCADE_BENCH {}",
+                        serde_json::json!({
+                            "execution": format!("{execution:?}"), "size": size,
+                            "gpu_median_ms": gpu_ms[gpu_ms.len()/2],
+                            "gpu_p95_ms": gpu_ms[(gpu_ms.len()*95).div_ceil(100)-1],
+                            "cpu_submit_median_ms": submit_ms[submit_ms.len()/2],
+                            "source_generation_ms": renderer.compiler_stats().unwrap().source_ms,
+                            "pipeline_ms": renderer.compiler_stats().unwrap().pipeline_ms,
+                            "source_bytes": renderer.compiler_stats().unwrap().source_bytes,
+                        })
+                    );
+                }
+            }
+        }
+    }
     #[test]
     fn profile_scenario_changes_authoritative_revision_and_rejects_invalid_edit() {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scenes/showcase.json");
