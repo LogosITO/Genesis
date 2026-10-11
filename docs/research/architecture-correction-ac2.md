@@ -4,7 +4,9 @@
 adapter; broader backend and long-run reliability remain conditional.
 **Starting state:** clean `living-world` at
 `1cc4017629fd7ab82ed33bac61dd6f452ea96d49`.
-**Implementation commit:** `2ff0943b65d18412b6f1b9fd33c7b7d67e42b172`.
+**Dynamic Auto implementation commit:** `2ff0943b65d18412b6f1b9fd33c7b7d67e42b172`.
+**Bounded high-update measurement commit:**
+`61bb7cd74768bf0e9152de9eea7916f39433fa08`.
 The report commit cannot contain its own hash; use `git log -2` for the final
 local history. `main` and `efficiency-research` were not changed. There was no
 push, merge, rebase, tag, release, deployment or GitHub settings change.
@@ -124,6 +126,24 @@ many invalidation paths without a measured need. In the candidate 1080p run,
 the 967 other frames ranged 1.90–13.42 ms. This is correlation only, not a
 proof that BVH work cannot affect other workloads. Full rebuild remains.
 
+To test a different update rate without changing normal gameplay, the QA-2
+profile now accepts `GENESIS_QA2_SOURCE_MOVE_INTERVAL` from 1 to 30; default
+30 is preserved and zero is rejected. With interval 1, two additional matched
+1080p runs moved the same source every tick for 1,000 measured frames.
+Auto and explicit Combined each used Combined on all measured frames, made one
+compile request, rebuilt the BVH 1,064 times total, uploaded field nodes 137
+times and ended with the same serialized world SHA-256
+`499ec35b85adf53c48fcc320d047b9a9bb2fd5341625ebc22ed454000a18839c`.
+This state differs from the 30-tick schedule, as expected. Auto interval
+p50/p95/p99 was 5.965/7.851/8.855 ms (maximum 10.457); explicit Combined was
+5.964/7.548/8.329 ms (maximum 10.917). No measured interval exceeded 16.7
+ms. Auto's BVH build p50/p95 was 3.94/5.13 ms and analytical binding
+p50/p95 was 4.04/5.27 ms. Sparse GPU compute p50/p95 was 1.335/2.072 ms
+(36 samples). Thus every-tick rebuilding is a real ~4 ms CPU cost, but did
+not dominate presented frame tails on this reference machine. That is not a
+guarantee for a slower CPU, more expensive scene or different presentation
+mode; a safe refit still needs a measured target beyond this fixture.
+
 A separate current-code 600-frame World Lab showcase profile exposed a
 **different, existing** exact-revision churn risk. `Auto` selected a compiled
 program for 349 frames, interpreted/compiled for 251 and made five requests
@@ -219,15 +239,15 @@ All commands below were actually run on this change unless qualified:
 | `cargo doc --workspace --no-deps --locked` | Pass |
 | `cargo deny check advisories licenses` | Pass |
 | Release dense readback and focused A→B→C→A / parameter GPU readback | Pass |
+| High-update 1080p native Auto/Combined, 1,000 measured frames each | Pass; equal final world, 1,064 rebuilds per run |
+| Profile default/invalid interval control | Default 30 passed; interval 0 rejected before rendering |
 | Living World 1–4 CLI experiments and LW4 replay | Exit 0 each |
 | WSL `cargo test --workspace --locked` (single job) | 176 passed, 0 failed, 83 ignored |
 | DX12 default FXC targeted diagnostic | **Fail**, expected `X3511`; preserved as blocker |
 | `cd site; npm run build; npm run check-links` | Pass: 208 pages, 21,336 local links |
 
-The normal/opt-in totals were collected before the final focused A→B→C→A and
-box extent additions; that affected release GPU test and the ordinary suite
-were rerun and passed afterward. The full opt-in set was not rerun a second
-time after those additions. Historical v7–v10 save tests, replay, GPU BVH,
+The normal and opt-in totals above were rerun after the A→B→C→A, box extent
+and measurement changes. Historical v7–v10 save tests, replay, GPU BVH,
 World Lab external reload and The Passage automated tests are in the executed
 workspace suites. The four Living World CLI commands and the LW4 history
 replay also exited 0. The site build reported the existing nonfatal sitemap
@@ -242,7 +262,7 @@ playtesting, a second physical GPU and Linux native GPU were not run.
 | Dynamic `Auto` through existing Combined path | **ACCEPT, bounded** | Matched 720p/1080p gain, dense and mutable-parameter readback, current-key lifecycle. Limited to validated graphs on one Vulkan GPU. |
 | Interpreter fallback and reason | **ACCEPT for tested transitions** | Pending and obsolete-key fallback passed GPU tests. No-field/unsupported reasons follow the source branches; failure injection is still open. |
 | Persistent CPU scene/field cache | **REJECT for now** | Prepared scene already shared; measured remaining CPU costs do not justify invalidation complexity. |
-| BVH refit | **REJECT for now** | 33 source moves did not dominate measured Combined frame tails; high-frequency update fixture is still absent. |
+| BVH refit | **REJECT for now** | Even 1,000 consecutive measured rebuild frames stayed below 16.7 ms here, despite ~4 ms CPU work each. Lower-tier CPU headroom is untested. |
 | Static exact-revision Auto churn | **CONDITIONAL** | World Lab measured five requests and 251 fallback frames versus Structural's one request and 61 fallback frames; static policy unchanged pending qualified A/B. |
 | Certified visual guard | **NO-GO** | No rigorous f32 enclosure; diagnostic mode bypasses culling. |
 | FXC shader rewrite | **INCONCLUSIVE** | Reproduced `X3511`; no qualified source-level correction. |
@@ -262,6 +282,8 @@ physical authority from the present evidence.
 $env:GENESIS_WINDOW_SIZE = '1920x1080'
 $env:GENESIS_QA2_FRAMES = '1000'
 cargo run --release -p first-light --locked -- --qa2-profile target/qa2/dense-world.json dynamic target/ac2/new-auto-1080.jsonl
+$env:GENESIS_QA2_SOURCE_MOVE_INTERVAL = '1' # bounded every-tick BVH stress
+cargo run --release -p first-light --locked -- --qa2-profile target/qa2/dense-world.json dynamic target/ac2/high-update-auto-1080.jsonl
 cargo test --release -p first-light --test qa1_valid_world --locked dense_dynamic_combined_diagnostic_parity -- --ignored --nocapture
 cargo test --release -p analytic-renderer --test mixed_gpu --locked native_mixed_diagnostic_selects_nearest_mathematical_object -- --ignored --nocapture
 cargo test --workspace --locked -- --ignored --test-threads=1 --nocapture
