@@ -881,7 +881,9 @@ mod tests {
         let graph = folder.join("bridge.json");
         std::fs::copy(original.join("showcase.json"), &path).unwrap();
         std::fs::copy(original.join("bridge.json"), &graph).unwrap();
-        let before = LabScene::load(&path).unwrap();
+        let mut app = App::new(path.clone()).unwrap();
+        let original_source = std::fs::read(&graph).unwrap();
+        let original_revision = app.scene.world.field_definitions()[0].revision();
         let instance = wgpu::Instance::default();
         let adapter =
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
@@ -896,7 +898,7 @@ mod tests {
                 .camera(scene.yaw, scene.elevation, scene.distance)
                 .unwrap();
             let image = renderer
-                .draw_mixed(
+                .draw_mixed_with_execution(
                     &device,
                     &queue,
                     &scene.world,
@@ -917,61 +919,114 @@ mod tests {
                         background: scene.background,
                         light_direction: scene.light_direction,
                     },
+                    GpuFieldRenderMode {
+                        execution: GpuFieldExecution::Authoring,
+                        spatial_guard: true,
+                    },
                 )
                 .unwrap();
             capture_bmp(&device, &queue, &image, size, output).unwrap();
         };
         let first = folder.join("before.bmp");
-        draw(&before, &first);
+        draw(&app.scene, &first);
         for _ in 0..200 {
-            if renderer.compiler_stats().unwrap().active == GpuFieldPath::Specialized {
+            if renderer.compiler_stats().unwrap().active == GpuFieldPath::Structural {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
-            draw(&before, &first);
+            draw(&app.scene, &first);
         }
         assert_eq!(
             renderer.compiler_stats().unwrap().active,
-            GpuFieldPath::Specialized
+            GpuFieldPath::Structural
         );
         let uploads = renderer.field_cache_stats().unwrap().node_uploads;
+        let requests = renderer.compiler_stats().unwrap().requests;
         let changed = std::fs::read_to_string(&graph)
             .unwrap()
             .replace("\"radius\": 0.8", "\"radius\": 1.1");
         std::fs::write(&graph, changed).unwrap();
-        let after = LabScene::load(&path).unwrap();
+        app.reload();
+        assert_eq!(app.status, "RELOAD OK");
         assert_ne!(
-            before.world.field_definitions()[0].revision(),
-            after.world.field_definitions()[0].revision()
+            original_revision,
+            app.scene.world.field_definitions()[0].revision()
         );
         let second = folder.join("after.bmp");
-        draw(&after, &second);
+        draw(&app.scene, &second);
+        assert_eq!(
+            renderer.compiler_stats().unwrap().active,
+            GpuFieldPath::Structural
+        );
+        assert_eq!(renderer.compiler_stats().unwrap().requests, requests);
+        assert!(renderer.field_cache_stats().unwrap().node_uploads > uploads);
+        assert_ne!(
+            std::fs::read(&first).unwrap(),
+            std::fs::read(&second).unwrap()
+        );
+        let mut numerical: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&graph).unwrap()).unwrap();
+        numerical["nodes"][0]["radius"] = serde_json::json!(0.6);
+        numerical["nodes"][3]["width"] = serde_json::json!(0.3);
+        std::fs::write(&graph, serde_json::to_vec(&numerical).unwrap()).unwrap();
+        app.reload();
+        assert_eq!(app.status, "RELOAD OK");
+        draw(&app.scene, &second);
+        assert_eq!(
+            renderer.compiler_stats().unwrap().active,
+            GpuFieldPath::Structural
+        );
+        assert_eq!(renderer.compiler_stats().unwrap().requests, requests);
+
+        std::fs::write(&graph, br#"{"format_version":1,"id":"box","root":"b","nodes":[{"op":"box","id":"b","half_extent":[0.4,0.5,0.6]}]}"#).unwrap();
+        app.reload();
+        assert_eq!(app.status, "RELOAD OK");
+        draw(&app.scene, &second);
         assert_eq!(
             renderer.compiler_stats().unwrap().active,
             GpuFieldPath::Interpreter
         );
         for _ in 0..200 {
-            if renderer.compiler_stats().unwrap().active == GpuFieldPath::Specialized {
+            draw(&app.scene, &second);
+            if renderer.compiler_stats().unwrap().active == GpuFieldPath::Structural {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
-            draw(&after, &second);
         }
         assert_eq!(
             renderer.compiler_stats().unwrap().active,
-            GpuFieldPath::Specialized
+            GpuFieldPath::Structural
         );
-        assert!(renderer.field_cache_stats().unwrap().node_uploads > uploads);
-        assert_ne!(
-            std::fs::read(first).unwrap(),
-            std::fs::read(&second).unwrap()
-        );
+        assert_eq!(renderer.compiler_stats().unwrap().requests, requests + 1);
+        let box_revision = app.scene.world.field_definitions()[0].revision();
         std::fs::write(&graph, b"invalid graph").unwrap();
-        assert!(LabScene::load(&path).is_err());
-        draw(&after, &second);
+        app.reload();
+        assert!(app.status.starts_with("RELOAD ERROR"));
+        assert_eq!(
+            app.scene.world.field_definitions()[0].revision(),
+            box_revision
+        );
+        draw(&app.scene, &second);
         assert_eq!(
             renderer.compiler_stats().unwrap().active,
-            GpuFieldPath::Specialized
+            GpuFieldPath::Structural
+        );
+        std::fs::write(&graph, original_source).unwrap();
+        app.reload();
+        assert_eq!(app.status, "RELOAD OK");
+        assert_eq!(
+            app.scene.world.field_definitions()[0].revision(),
+            original_revision
+        );
+        draw(&app.scene, &second);
+        assert_eq!(
+            renderer.compiler_stats().unwrap().active,
+            GpuFieldPath::Structural
+        );
+        assert_eq!(renderer.compiler_stats().unwrap().requests, requests + 1);
+        assert_eq!(
+            std::fs::read(&first).unwrap(),
+            std::fs::read(&second).unwrap()
         );
         std::fs::remove_dir_all(folder).unwrap();
     }

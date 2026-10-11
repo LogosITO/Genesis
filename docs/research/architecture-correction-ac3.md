@@ -157,11 +157,17 @@ not establish that every real wgpu validation failure is recoverable; nor
 does it inject a successful obsolete completion in a controlled worker
 ordering. Existing key-gated GPU tests cover stale selection in naturally
 observed transitions, with scheduling dependence. Queue delay, cache memory
-and worst-case shader first-use latency were not separately measured. Real
-external-file reload and invalid-input rollback pass their existing tests;
-the 600-frame native performance scenario edits `WorldState` directly and is
-not a substitute for timed end-to-end external reload. Human keyboard/mouse
-usability was not tested.
+and worst-case shader first-use latency were not separately measured. The
+expanded World Lab GPU test now calls the normal `App::reload` on an external
+copied JSON definition: it accepts one radius edit, accepts a second
+radius-plus-width edit without a new shader request, compiles a changed box
+topology, rejects invalid JSON while retaining the last valid image, then
+returns to the original source and reuses its cached Structural pipeline.
+The original and restored BMP bytes match; the first edited BMP differs.
+This validates the parser/reload path and actual offscreen image, but does
+not time native window presentation during external file edits. The 600-frame
+native performance scenario still edits `WorldState` directly. Human
+keyboard/mouse usability was not tested.
 
 ## Numerical, backend and architecture decisions
 
