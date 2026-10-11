@@ -1,0 +1,56 @@
+{
+  "baseline": "b3f688b",
+  "final_head": "2cd2913effb178832d7a6f9a0b82a7dd319af1c0",
+  "branch": "living-world",
+  "commits": [
+    "2cd2913effb178832d7a6f9a0b82a7dd319af1c0 test(renderer): record native mixed spatial results",
+    "abceaea2fcb76d4ba9e981bae685cca3e3380acd docs(research): record living world 4 contracts and results",
+    "79ba3e18106a6d4784d5472fe4e810af1aeb4491 feat(first-light): run declarative living rules scene",
+    "6f9ff405543667be654ded7ddc4939ceedc54586 feat(renderer): expose native mixed hit diagnostics",
+    "81ea2c0f0ff6d8f09229684d0aa7f7519582d47a feat(world): add bounded authored field parameter channels"
+  ],
+  "files": [
+    {
+      "path": "examples/first-light/scenes/living-world-4.json",
+      "sha256": "316e05a25a85f88cb3af852740dd39e4a3773e5ca1fc18a5bf29065f0abd990d"
+    },
+    {
+      "path": "examples/first-light/scenes/morph-lobes.json",
+      "sha256": "c8051eaf9ac2962b7471cb61bab435da33d95b95b4403f22166417e853d809dd"
+    },
+    {
+      "path": "examples/first-light/scenes/canopy-box.json",
+      "sha256": "f90cffe24bbf98b6d26f8b904954dae075b7f53f67ff258335a54607ee8e1a1f"
+    },
+    {
+      "path": "crates/authoring/src/field_graph.rs",
+      "sha256": "86de2751f16467246abb84be717f98146bac8399711c7813a0ab3a5d7b171a96"
+    },
+    {
+      "path": "crates/world/src/field.rs",
+      "sha256": "88422dd6789c801448de56bd69253b695275ec2ed6641a800dbe9a4beadd7b36"
+    },
+    {
+      "path": "crates/renderer/shaders/mixed.wgsl",
+      "sha256": "0ac8c9652866eb6d4c612a642783e2371c401bdd9aa5b523144144337f69f606"
+    },
+    {
+      "path": "crates/renderer/src/gpu.rs",
+      "sha256": "061f757c7451705db677c86a92784aa390109e7bc47c76ab4522200444dd34ef"
+    },
+    {
+      "path": "crates/renderer/tests/mixed_gpu.rs",
+      "sha256": "04fed7fda1da81a17fd1998fa6ea32b235a0da5e64dd8575a1666b60fd9d8da7"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "26e69743e1c97ae94a74374c02d791f159095f7ccbfa0c31a08da8fcb0984196"
+    },
+    {
+      "path": "rust-toolchain.toml",
+      "sha256": "f2e51a6af181e326180b4ce05bcb0db5f14397edddbb4325d57be1540bc4f24f"
+    }
+  ],
+  "adapter": "NVIDIA GeForce RTX 4070 SUPER / Vulkan / driver 591.86",
+  "profile": "release benchmark; dev correctness tests"
+}

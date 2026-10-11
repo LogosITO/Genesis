@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running unittests src\main.rs (target\debug\deps\first_light-ace30ac4a5ff7817.exe)
+
+running 1 test
+living_world_4_adapter=AdapterInfo { name: "NVIDIA GeForce RTX 4070 SUPER", vendor: 4318, device: 10115, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "591.86", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+living_world_4_compared_pixels=40960 compiler_requests=1
+test living_rules::tests::two_topologies_native_gpu_identity_and_images ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.86s

@@ -204,3 +204,19 @@ Set `GENESIS_LW4_CAPTURE_DIR` to an absolute local directory before the GPU
 identity/image test to write BMP captures. The ignored local
 `target/living-world-4-review/` package holds logs, source/revision metadata,
 experiment JSON and captures when reproduced; it is not published.
+
+## QA-0 evidence reconciliation (2026-10-11)
+
+The committed report above was recovered from `2cd2913` after the local
+working copy had been replaced by a 19-line summary. The summary is preserved
+only in the ignored `target/qa0/` working package. QA-0 verified all ten
+source hashes in the original manifest, reran the release A/B experiment with
+structurally identical JSON, replayed the retained v10 history bundle, and
+regenerated all ten BMPs with hashes identical to the original captures on
+the same adapter. The original text data and fresh GPU
+timings are now retained in [the evidence directory](evidence/living-world-4/README.md).
+
+The fresh GPU timings are measurements from one Windows/Vulkan adapter, not
+proof of general numerical correctness or interactive frame rate. The
+[QA-0 qualification](architecture-qualification-qa0.md) records current tests,
+architecture risks and gaps separately from the original LW4 experiment.
