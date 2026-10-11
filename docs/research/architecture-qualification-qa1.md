@@ -320,6 +320,26 @@ cargo run --release -p first-light -- --living-morph-replay docs/research/eviden
 cd site && npm run build && npm run check-links
 ```
 
+For the bounded Windows World Lab profile, run these PowerShell commands
+from the repository root, once with `heterogeneous-auto` and once with
+`heterogeneous-combined` (each process exits after 600 frames):
+
+```powershell
+New-Item -ItemType Directory -Force target/qa1 | Out-Null
+$env:GENESIS_WORLD_LAB_PROFILE_FRAMES = '600'
+$env:GENESIS_WORLD_LAB_PROFILE_SCENARIO = 'heterogeneous-auto'
+$env:GENESIS_WORLD_LAB_PROFILE = 'target/qa1/world-lab-heterogeneous-auto.jsonl'
+cargo run --release -p world-lab -- examples/world-lab/scenes/showcase.json
+```
+
+The targeted DX12 control uses
+`cargo test --release -p analytic-renderer --test mixed_gpu native_mixed_diagnostic_selects_nearest_mathematical_object --locked -- --ignored --nocapture --test-threads=1`
+with `GENESIS_TEST_GPU_BACKEND=dx12`. Without `GENESIS_TEST_DXC_PATH`, this
+machine selected FXC and reproduced `X3511`; setting that variable to the
+full path of an already installed Windows SDK `dxcompiler.dll` selected
+DynamicDxc and passed. This is a diagnostic control, not a recommended
+system-wide change.
+
 The complete Windows opt-in command includes expensive GPU tests and requires
 a native adapter; ordinary tests alone do not run them. WSL checks use
 `CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/genesis-qa0-target`
