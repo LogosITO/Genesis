@@ -16,7 +16,7 @@ pub use gpu::{
 
 use analytic_field::{AxisAlignedBox, Capsule, Sphere};
 use spatial_math::{Transform, Vec3};
-use std::fmt;
+use std::{collections::HashSet, fmt};
 use world_state::{CONNECTION_RADIUS_RATIO, EntityId, WorldState};
 
 /// Supported world-coordinate magnitude for the first GPU prototype.
@@ -419,6 +419,7 @@ impl Primitive {
 #[derive(Clone, Debug, Default)]
 pub struct Scene {
     primitives: Vec<Primitive>,
+    ids: HashSet<u32>,
 }
 impl Scene {
     /// Copies all world geometry into a snapshot. Numeric primitive IDs are renderer data;
@@ -537,12 +538,16 @@ impl Scene {
         if self.primitives.len() >= u32::MAX as usize {
             return Err(RenderError::TooManyObjects);
         }
-        if self.primitives.iter().any(|p| p.id == primitive.id) {
+        if self.ids.contains(&primitive.id) {
             return Err(RenderError::DuplicateId);
         }
         self.primitives
             .try_reserve(1)
             .map_err(|_| RenderError::TooManyObjects)?;
+        self.ids
+            .try_reserve(1)
+            .map_err(|_| RenderError::TooManyObjects)?;
+        self.ids.insert(primitive.id);
         self.primitives.push(primitive);
         Ok(())
     }
@@ -921,6 +926,26 @@ mod tests {
         assert_eq!(
             s.push(s.primitives()[0]).unwrap_err().to_string(),
             RenderError::DuplicateId.to_string()
+        );
+        let mut cloned = s.clone();
+        assert!(matches!(
+            cloned.push(s.primitives()[0]),
+            Err(RenderError::DuplicateId)
+        ));
+        cloned
+            .push(
+                Primitive::sphere(
+                    0,
+                    Sphere::new(1.0).unwrap(),
+                    Transform::identity(),
+                    [1.0; 3],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            cloned.primitives().iter().map(|p| p.id).collect::<Vec<_>>(),
+            [7, 8, 0]
         );
     }
     #[test]
