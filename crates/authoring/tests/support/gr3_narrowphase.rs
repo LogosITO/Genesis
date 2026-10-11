@@ -4,6 +4,9 @@
 use super::*;
 use std::collections::BTreeMap;
 
+#[path = "gr4_world.rs"]
+mod gr4_world;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Enclosure {
     lo: f64,
@@ -209,7 +212,6 @@ enum NarrowIssue {
     UnsupportedOrOverflow,
     StartsInside,
     BoundaryOrTangent,
-    AmbiguousFirst,
     WorkBudget,
 }
 
@@ -232,6 +234,10 @@ struct PrimitiveHit {
 enum NarrowOutcome {
     Miss,
     Hit(QualifiedHit),
+    HitAmbiguous {
+        parameter: Enclosure,
+        position: [Enclosure; 3],
+    },
     Indeterminate(NarrowIssue),
 }
 
@@ -584,10 +590,24 @@ impl ResearchScene {
             .iter()
             .any(|other| first.parameter.hi >= other.parameter.lo)
         {
-            return (
-                NarrowOutcome::Indeterminate(NarrowIssue::AmbiguousFirst),
-                work,
-            );
+            // Every candidate proved an exterior entry; the earliest union entry exists
+            // even when interval overlap prevents identifying its owner.
+            let parameter = hits
+                .iter()
+                .fold(first.parameter, |acc, hit| acc.min(hit.parameter));
+            return match ray_point(ray, parameter) {
+                Some(position) => (
+                    NarrowOutcome::HitAmbiguous {
+                        parameter,
+                        position,
+                    },
+                    work,
+                ),
+                None => (
+                    NarrowOutcome::Indeterminate(NarrowIssue::UnsupportedOrOverflow),
+                    work,
+                ),
+            };
         }
         (NarrowOutcome::Hit(first), work)
     }
@@ -752,10 +772,15 @@ fn unions_transforms_identity_and_mutation() {
         Some([-1.0, 0.0, 0.0]),
     );
     let scene = ResearchScene::new(vec![instance(19, &coincident, Vec3::ZERO, 1.0)]);
-    assert_eq!(
-        scene.query(front, Path::Hierarchy, 256).outcome,
-        NarrowOutcome::Indeterminate(NarrowIssue::AmbiguousFirst)
-    );
+    let NarrowOutcome::HitAmbiguous {
+        parameter,
+        position,
+    } = scene.query(front, Path::Hierarchy, 256).outcome
+    else {
+        panic!("coincident surfaces must retain a qualified geometric hit");
+    };
+    assert!(parameter.contains(2.0));
+    assert!(position[0].contains(-1.0));
     let single = Arc::new(compile_json(SPHERE).unwrap());
     let separate_instances = ResearchScene::new(vec![
         instance(91, &single, Vec3::ZERO, 1.0),
@@ -813,10 +838,10 @@ fn near_ties_overflow_and_budget_never_become_miss() {
         instance(2, &sphere, v(1e-15, 0.0, 0.0), 1.0),
     ]);
     let ray = Ray::new(v(-3.0, 0.0, 0.0), v(1.0, 0.0, 0.0), 0.0, 6.0).unwrap();
-    assert_eq!(
+    assert!(matches!(
         scene.query(ray, Path::Hierarchy, 256).outcome,
-        NarrowOutcome::Indeterminate(NarrowIssue::AmbiguousFirst)
-    );
+        NarrowOutcome::HitAmbiguous { parameter, .. } if parameter.contains(2.0)
+    ));
     assert_eq!(
         scene.query(ray, Path::Hierarchy, 0).outcome,
         NarrowOutcome::Indeterminate(NarrowIssue::Broadphase(Issue::WorkBudget))
@@ -932,6 +957,7 @@ fn benchmark_method(
     let mut fallback = 0;
     let mut indeterminate = 0;
     let mut hits = 0;
+    let mut ambiguous_hits = 0;
     for repetition in 0..7 {
         let started = Instant::now();
         let mut broad_ns = 0;
@@ -949,6 +975,8 @@ fn benchmark_method(
                 indeterminate +=
                     usize::from(matches!(record.outcome, NarrowOutcome::Indeterminate(_)));
                 hits += usize::from(matches!(record.outcome, NarrowOutcome::Hit(_)));
+                ambiguous_hits +=
+                    usize::from(matches!(record.outcome, NarrowOutcome::HitAmbiguous { .. }));
             }
             black_box(record.outcome);
         }
@@ -962,7 +990,8 @@ fn benchmark_method(
     serde_json::json!({
         "method":label,"full_median_ms":full[3],"broad_median_ms":broad[3],"narrow_median_ms":narrow[3],
         "candidates":candidates,"node_tests":node_tests,"leaf_tests":leaf_tests,"shape_tests":shape_tests,
-        "field_evaluations":0,"fallback":fallback,"indeterminate":indeterminate,"hits":hits
+        "field_evaluations":0,"fallback":fallback,"indeterminate":indeterminate,"hits":hits,
+        "ambiguous_hits":ambiguous_hits
     })
 }
 
