@@ -7,6 +7,12 @@ This is a test-only CPU experiment. No production renderer, simulation, physics,
 `WorldState`, GPU shader or budget was changed. Raw local data and commands are
 in ignored `target/gr3-review/`.
 
+**Historical result:** GR-4 later added a qualified geometric hit with
+ambiguous owner for supported coincident exterior entries and a WorldState
+snapshot adapter. See [GR-4](geometry-research-gr4.md) for the current
+research-only result semantics; the measurements below remain the GR-3
+baseline.
+
 ## Question and result
 
 Can a finite ray be given a justified first exterior hit, miss, identity and
