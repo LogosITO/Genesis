@@ -1,0 +1,26 @@
+{
+  "format_version": 1,
+  "root": "tower",
+  "definitions": [
+    {"kind":"capsule","id":"column","a":[0,0,0],"b":[0,1.8,0],"radius":0.09,"color":[0.68,0.70,0.78]},
+    {"kind":"capsule","id":"beam","a":[-0.72,0,0],"b":[0.72,0,0],"radius":0.10,"color":[0.82,0.74,0.56]},
+    {"kind":"sphere","id":"keystone","radius":0.16,"color":[0.94,0.82,0.54]}
+  ],
+  "nodes": [
+    {"kind":"leaf","id":"column_leaf","definition":"column"},
+    {"kind":"leaf","id":"beam_leaf","definition":"beam"},
+    {"kind":"leaf","id":"stone_leaf","definition":"keystone"},
+    {"kind":"group","id":"archway","children":[
+      {"node":"column_leaf","at":[-0.72,0,0]},
+      {"node":"column_leaf","at":[0.72,0,0]},
+      {"node":"beam_leaf","at":[0,1.8,0]},
+      {"node":"stone_leaf","at":[0,1.8,0]}
+    ]},
+    {"kind":"repeat","id":"arcade","child":"archway","count":7,"step":{"at":[1.75,0,0]}},
+    {"kind":"group","id":"tower","children":[
+      {"node":"arcade","at":[-5.25,-2.7,0]},
+      {"node":"arcade","at":[-4.45,-0.5,0],"scale":0.85},
+      {"node":"arcade","at":[-3.65,1.4,0],"scale":0.70}
+    ]}
+  ]
+}

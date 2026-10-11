@@ -1,0 +1,39 @@
+{
+  "format_version": 1,
+  "root": "level_4",
+  "definitions": [
+    {"kind":"capsule","id":"stem","a":[0,0,0],"b":[0,1,0],"radius":0.09,"color":[0.28,0.72,0.48]},
+    {"kind":"sphere","id":"tip","radius":0.13,"color":[0.68,0.90,0.54]}
+  ],
+  "nodes": [
+    {"kind":"leaf","id":"stem_leaf","definition":"stem"},
+    {"kind":"leaf","id":"tip_leaf","definition":"tip"},
+    {"kind":"group","id":"level_0","children":[
+      {"node":"stem_leaf"},{"node":"tip_leaf","at":[0,1,0]}
+    ]},
+    {"kind":"group","id":"level_1","children":[
+      {"node":"stem_leaf"},{"node":"tip_leaf","at":[0,1,0]},
+      {"node":"level_0","at":[0,1,0],"angle_deg":-38,"scale":0.65},
+      {"node":"level_0","at":[0,1,0],"scale":0.68},
+      {"node":"level_0","at":[0,1,0],"angle_deg":38,"scale":0.65}
+    ]},
+    {"kind":"group","id":"level_2","children":[
+      {"node":"stem_leaf"},{"node":"tip_leaf","at":[0,1,0]},
+      {"node":"level_1","at":[0,1,0],"angle_deg":-38,"scale":0.65},
+      {"node":"level_1","at":[0,1,0],"scale":0.68},
+      {"node":"level_1","at":[0,1,0],"angle_deg":38,"scale":0.65}
+    ]},
+    {"kind":"group","id":"level_3","children":[
+      {"node":"stem_leaf"},{"node":"tip_leaf","at":[0,1,0]},
+      {"node":"level_2","at":[0,1,0],"angle_deg":-38,"scale":0.65},
+      {"node":"level_2","at":[0,1,0],"scale":0.68},
+      {"node":"level_2","at":[0,1,0],"angle_deg":38,"scale":0.65}
+    ]},
+    {"kind":"group","id":"level_4","children":[
+      {"node":"stem_leaf"},{"node":"tip_leaf","at":[0,1,0]},
+      {"node":"level_3","at":[0,1,0],"angle_deg":-38,"scale":0.65},
+      {"node":"level_3","at":[0,1,0],"scale":0.68},
+      {"node":"level_3","at":[0,1,0],"angle_deg":38,"scale":0.65}
+    ]}
+  ]
+}
