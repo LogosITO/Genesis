@@ -421,6 +421,7 @@ struct Qa2Profile {
     resolution: [u32; 2],
     start_tick: u64,
     frames: usize,
+    source_move_interval: u64,
     seen: usize,
     resize_recoveries: u32,
     last_presented_start: Option<Instant>,
@@ -573,6 +574,14 @@ impl App {
         if !(1..=5000).contains(&frames) {
             return Err("GENESIS_QA2_FRAMES must be 1..=5000".into());
         }
+        let source_move_interval = std::env::var("GENESIS_QA2_SOURCE_MOVE_INTERVAL")
+            .ok()
+            .map(|value| value.parse::<u64>())
+            .transpose()?
+            .unwrap_or(30);
+        if !(1..=30).contains(&source_move_interval) {
+            return Err("GENESIS_QA2_SOURCE_MOVE_INTERVAL must be 1..=30".into());
+        }
         let size = requested_window_size(&std::env::var("GENESIS_WINDOW_SIZE")?)
             .ok_or("QA-2 requires a valid GENESIS_WINDOW_SIZE")?;
         let mut app = Self::new(true, false)?;
@@ -590,6 +599,7 @@ impl App {
             resolution: [size.width, size.height],
             start_tick: runtime.time().ticks(),
             frames,
+            source_move_interval,
             seen: 0,
             resize_recoveries: 0,
             last_presented_start: None,
@@ -1085,9 +1095,10 @@ impl App {
         if self.paused {
             return Ok(());
         }
-        if self.qa2_profile.as_ref().is_some_and(Qa2Profile::dynamic)
-            && (self.time.ticks() + 1).is_multiple_of(30)
-        {
+        if self.qa2_profile.as_ref().is_some_and(|profile| {
+            profile.dynamic()
+                && (self.time.ticks() + 1).is_multiple_of(profile.source_move_interval)
+        }) {
             self.pending_move = true;
         }
         if self.living
@@ -1933,6 +1944,7 @@ impl App {
                             "resolution": [size.width, size.height],
                             "warmup": 64,
                             "samples": profile.frames,
+                            "source_move_interval": profile.source_move_interval,
                             "start_tick": profile.start_tick,
                             "dynamic_schedule": "one_tick_per_recorded_frame",
                             "resize_recoveries": profile.resize_recoveries,
@@ -2560,6 +2572,7 @@ mod app_tests {
             resolution: [1280, 720],
             start_tick: app.time.ticks(),
             frames: 1,
+            source_move_interval: 30,
             seen: 0,
             resize_recoveries: 0,
             last_presented_start: None,
