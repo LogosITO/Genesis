@@ -170,6 +170,13 @@ a new lazy GPU hierarchy would need a matched correctness and speed result
 against it. The current grammar cannot express smooth multi-part fields or
 arbitrary 3D orientation (rotation is around Z); it has no authoritative
 identity, world updates, persistence, replay or collision integration.
+Option B was not implemented: the current analytic WGSL consumes flat
+`GpuPrimitive` records and a derived BVH, while the Field Graph mixed path
+consumes at most eight WorldState-owned occurrences. A new GPU node/instance
+buffer would need checked traversal capacity, spatial bounds with explicit
+numeric uncertainty, nearest-hit identity parity and an exhaustion outcome.
+None of those properties follows from the existing GR-2/3/4 CPU experiments;
+adding a second shader traversal without them would risk a false Miss.
 No new optimization was accepted after measurement: the measured large-scene
 bottleneck already has the existing BVH path, while adding another traversal
 would duplicate machinery without a proven gain. Incremental refitting,
