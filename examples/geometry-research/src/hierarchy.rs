@@ -2,6 +2,7 @@
 
 use analytic_field::{Capsule, Sphere};
 use analytic_renderer::{Primitive, Scene};
+use bytemuck::{Pod, Zeroable};
 use serde::Deserialize;
 use spatial_math::{Transform, Vec3};
 use std::{collections::HashMap, fmt};
@@ -197,6 +198,39 @@ impl Bounds {
             self.max[axis] = self.max[axis].max(value + radius);
         }
     }
+    fn union(&mut self, other: Self) {
+        for axis in 0..3 {
+            self.min[axis] = self.min[axis].min(other.min[axis]);
+            self.max[axis] = self.max[axis].max(other.max[axis]);
+        }
+    }
+    fn transformed(self, pose: Pose) -> Self {
+        let mut result = Self {
+            min: [f64::INFINITY; 3],
+            max: [f64::NEG_INFINITY; 3],
+        };
+        for corner in 0..8 {
+            let point = [
+                if corner & 1 == 0 {
+                    self.min[0]
+                } else {
+                    self.max[0]
+                },
+                if corner & 2 == 0 {
+                    self.min[1]
+                } else {
+                    self.max[1]
+                },
+                if corner & 4 == 0 {
+                    self.min[2]
+                } else {
+                    self.max[2]
+                },
+            ];
+            result.include(pose.point(point), 0.0);
+        }
+        result
+    }
 }
 
 /// Validated source DAG. It is not a `WorldState` object or a collision authority.
@@ -214,7 +248,188 @@ pub struct Materialized {
     pub visits: usize,
 }
 
+/// Compact shader inputs: no record is stored per derived primitive.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct GpuDefinition {
+    pub a_kind: [f32; 4],
+    pub b_radius: [f32; 4],
+    pub color: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct GpuNode {
+    /// Kind (0 leaf, 1 group, 2 repeat), first edge, count, definition index.
+    pub info: [u32; 4],
+    pub lower: [f32; 4],
+    pub upper: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct GpuEdge {
+    pub child: [u32; 4],
+    pub at_scale: [f32; 4],
+    pub angle: [f32; 4],
+}
+
+pub struct GpuProgram {
+    pub definitions: Vec<GpuDefinition>,
+    pub nodes: Vec<GpuNode>,
+    pub edges: Vec<GpuEdge>,
+    pub root: u32,
+}
+
+fn merge_bounds(total: &mut Option<Bounds>, next: Option<Bounds>) {
+    if let Some(next) = next {
+        match total {
+            Some(total) => total.union(next),
+            None => *total = Some(next),
+        }
+    }
+}
+
+fn gpu_edge(child: usize, placement: Placement) -> GpuEdge {
+    GpuEdge {
+        child: [child as u32, 0, 0, 0],
+        at_scale: [
+            placement.at[0] as f32,
+            placement.at[1] as f32,
+            placement.at[2] as f32,
+            placement.scale as f32,
+        ],
+        angle: [placement.angle_deg.to_radians() as f32, 0.0, 0.0, 0.0],
+    }
+}
+
 impl Hierarchy {
+    /// Packs the validated DAG; repeat instances are generated in the shader.
+    pub fn gpu_program(&self) -> Result<GpuProgram, HierarchyError> {
+        let definitions = self
+            .source
+            .definitions
+            .iter()
+            .map(|definition| match definition {
+                Definition::Sphere { radius, color, .. } => GpuDefinition {
+                    a_kind: [0.0, 0.0, 0.0, 0.0],
+                    b_radius: [0.0, 0.0, 0.0, *radius as f32],
+                    color: [color[0], color[1], color[2], 0.0],
+                },
+                Definition::Capsule {
+                    a,
+                    b,
+                    radius,
+                    color,
+                    ..
+                } => GpuDefinition {
+                    a_kind: [a[0] as f32, a[1] as f32, a[2] as f32, 2.0],
+                    b_radius: [b[0] as f32, b[1] as f32, b[2] as f32, *radius as f32],
+                    color: [color[0], color[1], color[2], 0.0],
+                },
+            })
+            .collect();
+        let mut nodes = Vec::with_capacity(self.source.nodes.len());
+        let mut edges = Vec::new();
+        for (i, node) in self.source.nodes.iter().enumerate() {
+            let first = edges.len() as u32;
+            let (local_bounds, leaf_count) = self.subtree(i, 1)?;
+            let info = match node {
+                Node::Leaf { definition, .. } => [0, first, 0, self.definitions[definition] as u32],
+                Node::Group { children, .. } => {
+                    for child in children {
+                        edges.push(gpu_edge(self.nodes[&child.node], child.placement));
+                    }
+                    [1, first, children.len() as u32, leaf_count]
+                }
+                Node::Repeat {
+                    child, count, step, ..
+                } => {
+                    edges.push(gpu_edge(self.nodes[child], *step));
+                    [2, first, *count as u32, leaf_count]
+                }
+            };
+            let (lower, upper) = if let Some(bounds) = local_bounds {
+                let mut lower = [0.0; 4];
+                let mut upper = [0.0; 4];
+                for axis in 0..3 {
+                    let pad = 64.0
+                        * f32::EPSILON as f64
+                        * bounds.min[axis].abs().max(bounds.max[axis].abs()).max(1.0);
+                    lower[axis] = (bounds.min[axis] - pad) as f32;
+                    upper[axis] = (bounds.max[axis] + pad) as f32;
+                }
+                (lower, upper)
+            } else {
+                ([1.0, 1.0, 1.0, 0.0], [-1.0, -1.0, -1.0, 0.0])
+            };
+            nodes.push(GpuNode { info, lower, upper });
+        }
+        Ok(GpuProgram {
+            definitions,
+            nodes,
+            edges,
+            root: self.root as u32,
+        })
+    }
+
+    fn subtree(&self, i: usize, depth: usize) -> Result<(Option<Bounds>, u32), HierarchyError> {
+        if depth > MAX_DEPTH {
+            return Err(HierarchyError::Budget("GPU subtree depth"));
+        }
+        match &self.source.nodes[i] {
+            Node::Leaf { definition, .. } => {
+                let mut bounds = Bounds {
+                    min: [f64::INFINITY; 3],
+                    max: [f64::NEG_INFINITY; 3],
+                };
+                match &self.source.definitions[self.definitions[definition]] {
+                    Definition::Sphere { radius, .. } => bounds.include([0.0; 3], *radius),
+                    Definition::Capsule { a, b, radius, .. } => {
+                        bounds.include(*a, *radius);
+                        bounds.include(*b, *radius);
+                    }
+                }
+                Ok((Some(bounds), 1))
+            }
+            Node::Group { children, .. } => {
+                let mut bounds = None;
+                let mut leaves = 0_u32;
+                for child in children {
+                    let (next, count) = self.subtree(self.node(&child.node)?, depth + 1)?;
+                    leaves = leaves
+                        .checked_add(count)
+                        .ok_or(HierarchyError::Budget("GPU subtree count"))?;
+                    if let Some(next) = next {
+                        merge_bounds(
+                            &mut bounds,
+                            Some(next.transformed(Pose::IDENTITY.then(child.placement)?)),
+                        );
+                    }
+                }
+                Ok((bounds, leaves))
+            }
+            Node::Repeat {
+                child, count, step, ..
+            } => {
+                let (next, child_leaves) = self.subtree(self.node(child)?, depth + 1)?;
+                let leaves = child_leaves
+                    .checked_mul(*count as u32)
+                    .ok_or(HierarchyError::Budget("GPU subtree count"))?;
+                let mut bounds = None;
+                let mut pose = Pose::IDENTITY;
+                for iteration in 0..*count {
+                    if let Some(next) = next {
+                        merge_bounds(&mut bounds, Some(next.transformed(pose)));
+                    }
+                    if iteration + 1 < *count {
+                        pose = pose.then(*step)?;
+                    }
+                }
+                Ok((bounds, leaves))
+            }
+        }
+    }
     pub fn parse(bytes: &[u8]) -> Result<Self, HierarchyError> {
         if bytes.len() > MAX_SOURCE_BYTES {
             return Err(HierarchyError::Budget("source bytes"));
@@ -467,6 +682,27 @@ mod tests {
             }
             assert_ne!(original.bounds.unwrap().max, grown.bounds.unwrap().max);
             assert_eq!(original.visits, grown.visits);
+        }
+    }
+
+    #[test]
+    fn compact_program_preserves_leaf_ordinals_without_leaf_records() {
+        for (source, leaves) in [(BRANCH, 242), (ARCADE, 84)] {
+            let hierarchy = Hierarchy::parse(source).unwrap();
+            let program = hierarchy.gpu_program().unwrap();
+            assert_eq!(program.nodes.len(), hierarchy.node_count());
+            assert_eq!(program.definitions.len(), hierarchy.definition_count());
+            assert_eq!(program.nodes[program.root as usize].info[3], leaves);
+            assert!(program.edges.len() < leaves as usize);
+            let scene = hierarchy.materialize(1.0).unwrap();
+            let root = program.nodes[program.root as usize];
+            for primitive in scene.scene.primitives() {
+                let center = primitive.center();
+                for (axis, value) in [center.x(), center.y(), center.z()].into_iter().enumerate() {
+                    assert!(value as f32 >= root.lower[axis]);
+                    assert!(value as f32 <= root.upper[axis]);
+                }
+            }
         }
     }
 

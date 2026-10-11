@@ -1,25 +1,36 @@
-# GR-5 geometry research preview
+# GR-5/GR-6 geometry research preview
 
-This is a research-owned, data-driven hierarchy. It expands validated sphere
-and capsule definitions into the existing analytic renderer. The GPU receives a
-materialized primitive list; the optional GPU BVH is derived acceleration. No
-hierarchy is traversed lazily in WGSL, and no geometry here enters `WorldState`,
-persistence, collision, or replay.
+This is a research-owned, data-driven hierarchy. The GR-5 path expands sphere
+and capsule definitions into the existing analytic Direct/BVH renderer. The
+GR-6 path packs the same validated nodes, edges and shared definitions for a
+generic GPU hierarchy shader; it generates repeated leaves during traversal
+without a GPU array of expanded leaf transforms. Both paths run for comparison.
+Neither path enters `WorldState`, persistence, collision, or replay.
 
 From the repository root:
 
 ```sh
 cargo test -p geometry-research --locked
-cargo run --release -p geometry-research --locked -- examples/geometry-research/definitions/branching.json target/gr5-review/branching
-cargo run --release -p geometry-research --locked -- examples/geometry-research/definitions/arcade.json target/gr5-review/arcade
+cargo run --release -p geometry-research --locked -- examples/geometry-research/definitions/branching.json target/gr6-review/branching
+cargo run --release -p geometry-research --locked -- examples/geometry-research/definitions/arcade.json target/gr6-review/arcade
 ```
 
 Add `--detail` for a closer camera. Each run writes actual 640 × 480 GPU PPM
-readbacks for Direct/BVH and base/grown states, a JSONL measurement file, and
-diagnostic flat JSON dumps. The `grown` state uses a deterministic uniform scale
-of 1.3. The program rejects direct/BVH pixel mismatch, missing CPU ray identity
-parity, or an unchanged GPU image after growth. GPU timestamps require adapter
-support; absent timestamps are recorded as an empty sample list.
+readbacks for Direct, BVH, unpruned hierarchy and visually pruned hierarchy in
+base/grown/returned states, a JSONL measurement file, and diagnostic flat JSON
+dumps. The `grown` state uses uniform scale 1.3 and `returned` checks scale 1.0
+again. Each hierarchy frame returns per-pixel hit ID, approximate depth/normal,
+node visits, leaf evaluations, stack peak, subtree culls and exhaustion. The
+program rejects Direct/BVH image mismatch, hierarchy exhaustion, stale dynamic
+images and a failed return to base. It reports rather than hides f32 Direct vs
+hierarchy discrepancies. GPU timestamps require adapter support; absent
+timestamps are recorded as null samples. Raw evidence belongs in ignored
+`target/gr6-review/`.
+
+Use `--revision <revised.json>` instead of `--detail` to replace validated
+definition or topology data on the same device and pipeline. The executable
+requires a visible change and compares the updated image with a fresh renderer
+using the revised data. This is a research check, not production hot reload.
 
 The source format is version 1 JSON. `definitions` hold named analytic spheres
 or capsules. `nodes` contain `leaf`, `group`, or `repeat` operations. Child
@@ -40,4 +51,5 @@ primitive SDF, but the hard union of all leaves is not generally an exact SDF.
 The prototype does not return qualified field misses or physics contacts.
 
 The architecture and measured limitations are in
-[`docs/research/geometry-research-gr5.md`](../../docs/research/geometry-research-gr5.md).
+[`docs/research/geometry-research-gr5.md`](../../docs/research/geometry-research-gr5.md)
+and [`docs/research/geometry-research-gr6.md`](../../docs/research/geometry-research-gr6.md).
