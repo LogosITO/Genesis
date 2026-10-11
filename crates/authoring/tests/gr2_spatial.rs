@@ -5,6 +5,9 @@ use spatial_math::Vec3;
 use std::{hint::black_box, mem::size_of, sync::Arc, time::Instant};
 use world_authoring::field_graph::{Graph, Node as GraphNode, compile_json};
 
+#[path = "support/gr3_narrowphase.rs"]
+mod gr3_narrowphase;
+
 const ARCH: &[u8] = include_bytes!("../../../examples/field-graph/definitions/gr1-arch.json");
 const SPHERE: &[u8] =
     br#"{"format_version":1,"id":"gr2-sphere","root":"s","nodes":[{"op":"sphere","id":"s","radius":1.0}]}"#;
