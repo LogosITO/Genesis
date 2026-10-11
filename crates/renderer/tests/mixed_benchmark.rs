@@ -780,6 +780,7 @@ fn multi_definition_matrix() {
                     ("interpreter-direct", GpuFieldExecution::Interpreter, false),
                     ("interpreter", GpuFieldExecution::Interpreter, true),
                     ("auto", GpuFieldExecution::Auto, true),
+                    ("authoring", GpuFieldExecution::Authoring, true),
                     ("structural", GpuFieldExecution::Structural, true),
                     ("combined-direct", GpuFieldExecution::Combined, false),
                     ("combined", GpuFieldExecution::Combined, true),
@@ -815,10 +816,17 @@ fn multi_definition_matrix() {
                     let compiler = renderer.compiler_stats().unwrap();
                     assert_eq!(
                         compiler.active,
-                        if execution == GpuFieldExecution::Combined {
+                        if execution == GpuFieldExecution::Combined
+                            || (execution == GpuFieldExecution::Authoring
+                                && topology == "heterogeneous"
+                                && definitions > 1)
+                        {
                             GpuFieldPath::Combined
                         } else if (topology == "shared" || definitions == 1)
-                            && execution == GpuFieldExecution::Structural
+                            && matches!(
+                                execution,
+                                GpuFieldExecution::Structural | GpuFieldExecution::Authoring
+                            )
                         {
                             GpuFieldPath::Structural
                         } else if definitions == 1 && execution == GpuFieldExecution::Auto {

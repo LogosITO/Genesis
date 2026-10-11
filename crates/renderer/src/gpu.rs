@@ -290,6 +290,9 @@ pub enum GpuFieldExecution {
     /// combined specialization when any enabled field has runtime parameters.
     /// Interpret while compilation is pending or unsupported.
     Auto,
+    /// Prefer reusable topology programs while authoring numerical revisions.
+    /// One topology uses Structural; several use Combined within its existing limit.
+    Authoring,
     /// Experimentally compile node topology and read validated parameters from GPU storage.
     Structural,
     /// Experimentally combine distinct validated topologies in one mixed shader.
@@ -595,6 +598,23 @@ impl CompilerCache {
             self.entries.pop_front();
         }
     }
+
+    fn poll_finished(&mut self) {
+        let finished =
+            self.pending
+                .as_ref()
+                .and_then(|pending| match pending.receiver.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        Some(Err("compilation worker disconnected".to_owned()))
+                    }
+                    Err(mpsc::TryRecvError::Empty) => None,
+                });
+        if let Some(result) = finished {
+            let pending = self.pending.take().expect("completed pending request");
+            self.insert(pending.key, result);
+        }
+    }
 }
 struct PrimitiveBuffer {
     buffer: wgpu::Buffer,
@@ -704,21 +724,7 @@ impl GpuRenderer {
             .map_err(|_| RenderError::Gpu("compiler cache lock poisoned".into()))?;
         state.active = GpuFieldPath::Interpreter;
         state.fallback_reason = None;
-        let finished =
-            state
-                .pending
-                .as_ref()
-                .and_then(|pending| match pending.receiver.try_recv() {
-                    Ok(result) => Some(Ok(result)),
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        Some(Err("compilation worker disconnected".to_owned()))
-                    }
-                    Err(mpsc::TryRecvError::Empty) => None,
-                });
-        if let Some(finished) = finished {
-            let pending = state.pending.take().expect("completed pending request");
-            state.insert(pending.key, finished.unwrap_or_else(Err));
-        }
+        state.poll_finished();
         if execution == GpuFieldExecution::Interpreter {
             state.fallback_reason = Some("interpreter requested");
             return Ok(None);
@@ -734,7 +740,10 @@ impl GpuRenderer {
         };
         let mut selected = None;
         let mut graphs = Vec::new();
-        if execution == GpuFieldExecution::Combined {
+        if matches!(
+            execution,
+            GpuFieldExecution::Combined | GpuFieldExecution::Authoring
+        ) {
             let mut topologies = BTreeMap::new();
             for instance in world.field_instances().iter().filter(|item| item.enabled()) {
                 let current = world
@@ -751,10 +760,23 @@ impl GpuRenderer {
                 return Ok(None);
             }
             if !topologies.is_empty() {
-                selected = Some(CompilerKey::Combined {
-                    schemas: topologies.keys().cloned().collect(),
-                    semantics: SEMANTICS_VERSION,
-                });
+                selected = Some(
+                    if execution == GpuFieldExecution::Authoring && topologies.len() == 1 {
+                        CompilerKey::Structure {
+                            schema: topologies
+                                .keys()
+                                .next()
+                                .expect("nonempty topology set")
+                                .clone(),
+                            semantics: SEMANTICS_VERSION,
+                        }
+                    } else {
+                        CompilerKey::Combined {
+                            schemas: topologies.keys().cloned().collect(),
+                            semantics: SEMANTICS_VERSION,
+                        }
+                    },
+                );
                 graphs = topologies.into_values().collect();
             }
         } else {
@@ -777,7 +799,9 @@ impl GpuRenderer {
                             semantics: SEMANTICS_VERSION,
                         }
                     }
-                    GpuFieldExecution::Interpreter | GpuFieldExecution::Combined => unreachable!(),
+                    GpuFieldExecution::Interpreter
+                    | GpuFieldExecution::Combined
+                    | GpuFieldExecution::Authoring => unreachable!(),
                 };
                 if selected.as_ref().is_some_and(|old| old != &key) {
                     state.fallback_reason = Some("incompatible graph definitions");
@@ -2366,5 +2390,57 @@ mod tests {
                 semantics: SEMANTICS_VERSION + 1,
             }
         );
+    }
+
+    #[test]
+    fn compiler_completion_failures_are_bounded_and_do_not_activate() {
+        let mut cache = CompilerCache::default();
+        for (index, failure) in [
+            "source generation failed",
+            "shader validation failed",
+            "pipeline creation failed",
+            "obsolete revision failed",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let key = CompilerKey::Exact {
+                revision: DefinitionRevision::of(&[index as u8]),
+                semantics: SEMANTICS_VERSION,
+            };
+            let (sender, receiver) = mpsc::sync_channel(1);
+            cache.pending = Some(PendingCompilation {
+                key: key.clone(),
+                receiver,
+            });
+            cache.poll_finished();
+            assert!(cache.pending.is_some());
+            sender.send(Err(failure.to_owned())).unwrap();
+            cache.poll_finished();
+            assert!(cache.pending.is_none());
+            assert_eq!(cache.active, GpuFieldPath::Interpreter);
+            assert_eq!(cache.entries.back().unwrap().key, key);
+            assert_eq!(
+                cache.entries.back().unwrap().result.as_ref().err().unwrap(),
+                failure
+            );
+        }
+        assert_eq!(cache.failures, 4);
+        assert_eq!(cache.entries.len(), MAX_COMPILED_PIPELINES);
+        let key = CompilerKey::Exact {
+            revision: DefinitionRevision::of(b"worker stopped"),
+            semantics: SEMANTICS_VERSION,
+        };
+        let (sender, receiver) = mpsc::sync_channel(1);
+        cache.pending = Some(PendingCompilation { key, receiver });
+        drop(sender);
+        cache.poll_finished();
+        assert_eq!(cache.entries.len(), MAX_COMPILED_PIPELINES);
+        assert_eq!(cache.failures, 5);
+        assert_eq!(
+            cache.entries.back().unwrap().result.as_ref().err().unwrap(),
+            "compilation worker disconnected"
+        );
+        assert_eq!(cache.active, GpuFieldPath::Interpreter);
     }
 }

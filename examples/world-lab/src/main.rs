@@ -168,8 +168,10 @@ impl App {
         let profile_execution = match profile_scenario.as_deref() {
             None => None,
             Some("auto") => Some(GpuFieldExecution::Auto),
+            Some("authoring") => Some(GpuFieldExecution::Authoring),
             Some("structural") => Some(GpuFieldExecution::Structural),
             Some("heterogeneous-auto") => Some(GpuFieldExecution::Auto),
+            Some("heterogeneous-authoring") => Some(GpuFieldExecution::Authoring),
             Some("heterogeneous-combined") => Some(GpuFieldExecution::Combined),
             Some(_) => return Err("unknown profile scenario".into()),
         };
@@ -186,7 +188,7 @@ impl App {
         }
         if matches!(
             profile_scenario.as_deref(),
-            Some("heterogeneous-auto" | "heterogeneous-combined")
+            Some("heterogeneous-auto" | "heterogeneous-combined" | "heterogeneous-authoring")
         ) {
             scene.world.spawn_field(
                 br#"{"format_version":1,"id":"profile-box","root":"b","nodes":[{"op":"box","id":"b","half_extent":[0.5,0.4,0.5]}]}"#,
@@ -438,7 +440,9 @@ impl App {
                 light_direction: self.scene.light_direction,
             },
             GpuFieldRenderMode {
-                execution: self.profile_execution.unwrap_or(GpuFieldExecution::Auto),
+                execution: self
+                    .profile_execution
+                    .unwrap_or(GpuFieldExecution::Authoring),
                 spatial_guard: true,
             },
         );
@@ -551,6 +555,13 @@ impl App {
                 "gpu_timestamp_readback_ms": gpu_readback_ms,
                 "compiler_mode": field_path, "compiler_pending": compiler.as_ref().is_some_and(|x| x.pending),
                 "compiler_requests": compiler.as_ref().map(|x| x.requests),
+                "compiler_cache_hits": compiler.as_ref().map(|x| x.cache_hits),
+                "compiler_failures": compiler.as_ref().map(|x| x.failures),
+                "compiler_fallback_reason": compiler.as_ref().and_then(|x| x.fallback_reason),
+                "compiler_source_ms": compiler.as_ref().and_then(|x| x.source_ms),
+                "compiler_pipeline_ms": compiler.as_ref().and_then(|x| x.pipeline_ms),
+                "compiler_source_bytes": compiler.as_ref().and_then(|x| x.source_bytes),
+                "field_revision": self.scene.world.field_instances().first().map(|x| format!("{:?}", x.revision())),
                 "present_mode": format!("{:?}", graphics.config.present_mode),
             });
             if let Err(error) = writeln!(profile.output, "{record}") {

@@ -243,6 +243,15 @@ fn native_mixed_diagnostic_selects_nearest_mathematical_object() {
     assert_eq!(current_compiled.definition, current_reference.definition);
     assert_eq!(current_compiled.material, current_reference.material);
     assert_eq!(current_compiled.distance, current_reference.distance);
+    let authoring = diagnose(&shared_world, right_camera, GpuFieldExecution::Authoring);
+    assert_eq!(authoring.path, GpuFieldPath::Combined);
+    assert_eq!(authoring.identity, current_reference.identity);
+    assert_eq!(authoring.definition, current_reference.definition);
+    assert_eq!(authoring.material, current_reference.material);
+    assert_eq!(authoring.distance, current_reference.distance);
+    assert_eq!(authoring.normal, current_reference.normal);
+    assert_eq!(authoring.uncertain, current_reference.uncertain);
+    assert_eq!(authoring.exhausted, current_reference.exhausted);
     shared_world.set_field_enabled(added_box, false).unwrap();
     shared_world
         .set_field_enabled(translated_id, false)
@@ -667,6 +676,17 @@ fn structural_parameters_reuse_pipeline_for_two_revisions() {
         renderer.compiler_stats().unwrap().active,
         GpuFieldPath::Structural
     );
+    let authoring = draw(&world, GpuFieldExecution::Authoring);
+    assert_eq!(
+        renderer.compiler_stats().unwrap().active,
+        GpuFieldPath::Structural
+    );
+    assert!(
+        reference
+            .iter()
+            .zip(authoring)
+            .all(|(a, b)| a.abs_diff(b) <= 1)
+    );
     let captures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/performance-research-3-review");
     std::fs::create_dir_all(&captures).unwrap();
@@ -691,6 +711,13 @@ fn structural_parameters_reuse_pipeline_for_two_revisions() {
             .zip(revised)
             .all(|(a, b)| a.abs_diff(b) <= 1)
     );
+    assert!(
+        revised_reference
+            .iter()
+            .zip(draw(&world, GpuFieldExecution::Authoring))
+            .all(|(a, b)| a.abs_diff(b) <= 1)
+    );
+    assert_eq!(renderer.compiler_stats().unwrap().requests, requests);
     write_bmp(
         &captures.join("structural-after.bmp"),
         &draw(&world, GpuFieldExecution::Structural),
@@ -836,8 +863,11 @@ fn combined_topologies_preserve_mixed_image_and_fallback() {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        let compiled = compiled.expect("combined shader did not become ready");
-        assert!(reference.iter().zip(&compiled).all(|(a, b)| a.abs_diff(*b) <= 1));
+    let compiled = compiled.expect("combined shader did not become ready");
+    assert!(reference.iter().zip(&compiled).all(|(a, b)| a.abs_diff(*b) <= 1));
+    let authoring = draw(&world, &materials, GpuFieldExecution::Authoring, camera, size, GraphTracePolicy::default(), true);
+    assert_eq!(renderer.compiler_stats().unwrap().active, GpuFieldPath::Combined);
+    assert!(compiled.iter().zip(authoring).all(|(a, b)| a.abs_diff(b) <= 1));
         write_bmp(&captures.join(format!("combined-{step}.bmp")), &compiled, size);
     }
     assert_eq!(renderer.compiler_stats().unwrap().requests, 1);
@@ -989,6 +1019,103 @@ fn combined_topologies_preserve_mixed_image_and_fallback() {
     assert_eq!(renderer.compiler_stats().unwrap().requests, 2);
 }
 use world_state::{DeterministicSeed, WorldState};
+
+#[test]
+#[ignore = "requires native GPU; renderer recreation keeps compiler resources device-local"]
+fn authoring_renderer_recreation_uses_current_world() {
+    let adapter = pollster::block_on(
+        test_instance().request_adapter(&wgpu::RequestAdapterOptions::default()),
+    )
+    .unwrap();
+    let mut world = WorldState::new(DeterministicSeed(803));
+    let source = br#"{"format_version":1,"id":"recreate","root":"s","nodes":[{"op":"sphere","id":"s","radius":0.7}]}"#;
+    let id = world.spawn_field(source, Transform::identity()).unwrap();
+    let camera = Camera::look_at(v(0.0, 0.0, -4.0), Vec3::ZERO, v(0.0, 1.0, 0.0), 0.9).unwrap();
+    let read = |renderer: &GpuRenderer, device: &wgpu::Device, queue: &wgpu::Queue, execution| {
+        renderer
+            .diagnose_mixed_camera(
+                device,
+                queue,
+                &world,
+                camera,
+                MixedDrawOptions {
+                    draw: DrawOptions {
+                        size: [1, 1],
+                        normal_debug: false,
+                        surface: None,
+                        timer: None,
+                    },
+                    policy: GraphTracePolicy::default(),
+                    show_analytic: false,
+                    show_fields: true,
+                    diagnostic: true,
+                    materials: None,
+                    simulation_seconds: 0.0,
+                    background: [0.0; 3],
+                    light_direction: [0.0, 1.0, 0.0],
+                },
+                GpuFieldRenderMode {
+                    execution,
+                    spatial_guard: true,
+                },
+            )
+            .unwrap()[0]
+    };
+    let (old_device, old_queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let old_renderer = pollster::block_on(GpuRenderer::new(
+        &old_device,
+        wgpu::TextureFormat::Rgba8Unorm,
+    ))
+    .unwrap();
+    let _ = read(
+        &old_renderer,
+        &old_device,
+        &old_queue,
+        GpuFieldExecution::Authoring,
+    );
+    assert_eq!(old_renderer.compiler_stats().unwrap().requests, 1);
+    drop(old_renderer);
+
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let renderer =
+        pollster::block_on(GpuRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm)).unwrap();
+    assert_eq!(renderer.compiler_stats().unwrap().requests, 0);
+    assert_eq!(renderer.compiler_stats().unwrap().cached_pipelines, 0);
+    let reference = read(&renderer, &device, &queue, GpuFieldExecution::Interpreter);
+    assert_eq!(
+        reference.identity,
+        Some(MixedGpuIdentity::FieldInstance(id.value()))
+    );
+    assert_eq!(
+        reference.definition,
+        Some(world.field_instances()[0].revision())
+    );
+    for _ in 0..200 {
+        let current = read(&renderer, &device, &queue, GpuFieldExecution::Authoring);
+        if current.path == GpuFieldPath::Structural {
+            assert_eq!(current.identity, reference.identity);
+            assert_eq!(current.definition, reference.definition);
+            assert_eq!(current.material, reference.material);
+            assert_eq!(current.uncertain, reference.uncertain);
+            assert_eq!(current.exhausted, reference.exhausted);
+            assert!((current.distance.unwrap() - reference.distance.unwrap()).abs() < 0.003);
+            assert!(
+                current
+                    .normal
+                    .unwrap()
+                    .into_iter()
+                    .zip(reference.normal.unwrap())
+                    .all(|(a, b)| (a - b).abs() < 0.04)
+            );
+            return;
+        }
+        assert!(renderer.compiler_stats().unwrap().last_error.is_none());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("recreated renderer did not compile its own authoring pipeline");
+}
 
 fn test_instance() -> wgpu::Instance {
     if std::env::var("GENESIS_TEST_GPU_BACKEND").as_deref() == Ok("dx12") {
