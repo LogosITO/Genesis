@@ -15,7 +15,7 @@ bytemuck = { version = "=1.25.2", features = ["derive"] }
 pollster = "=1.0.1"
 
 [dev-dependencies]
-naga = { version = "=30.0.1", features = ["wgsl-in"] }
+naga = { version = "=30.0.2", features = ["wgsl-in"] }
 world-simulation = { path = "../simulation" }
 serde_json = { version = "=1.0.151", features = ["float_roundtrip"] }
 
